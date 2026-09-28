@@ -1,0 +1,12 @@
+// הגדרות הפרסום של השרת ב-Cloudflare (Workers Builds). השרת עצמו נמצא ב-worker/worker.js.
+// הקובץ נמצא גם בשורש המאגר כדי שהבנייה תעבוד בלי לשנות Root directory בהגדרות של Cloudflare.
+{
+  "name": "books",
+  "main": "worker/worker.js",
+  "compatibility_date": "2025-09-01",
+  "observability": { "enabled": true },
+  "workers_dev": true,
+  "kv_namespaces": [
+    { "binding": "LIBRARY", "id": "b622c3fe36394ceaa0b02718aaf676b3" }
+  ]
+}
