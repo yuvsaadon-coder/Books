@@ -89,6 +89,11 @@
     const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
     const OL_BASE = 'https://openlibrary.org';
     const STORAGE_KEY = 'verified_reading_tracker_db_v1';
+    const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
+    // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
+    const dbKeyFor = (pid) => pid === 'default' ? STORAGE_KEY : STORAGE_KEY + '__' + pid;
+    const queueKeyFor = (pid) => pid === 'default' ? 'verified_reading_tracker_queue_v1' : 'verified_reading_tracker_queue_v1__' + pid;
+    const ACTIVE = { id: 'default', dbKey: STORAGE_KEY, queueKey: queueKeyFor('default') };
     const IDB_NAME = 'verified_reading_tracker';
     const IDB_STORE = 'kv';
     const SCHEMA_VERSION = 1;
@@ -591,10 +596,10 @@
       };
     }
     function loadLocal() {
-      try { const s = localStorage.getItem(STORAGE_KEY); return s ? sanitizeDB(JSON.parse(s)) : null; } catch (e) { return null; }
+      try { const s = localStorage.getItem(ACTIVE.dbKey); return s ? sanitizeDB(JSON.parse(s)) : null; } catch (e) { return null; }
     }
     function saveLocal(db) {
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); return true; } catch (e) { return false; }
+      try { localStorage.setItem(ACTIVE.dbKey, JSON.stringify(db)); return true; } catch (e) { return false; }
     }
     function idbOpen() {
       return new Promise((resolve, reject) => {
@@ -610,16 +615,25 @@
       const db = await idbOpen();
       return new Promise((resolve, reject) => {
         const tx = db.transaction(IDB_STORE, 'readonly');
-        const r = tx.objectStore(IDB_STORE).get(STORAGE_KEY);
+        const r = tx.objectStore(IDB_STORE).get(ACTIVE.dbKey);
         r.onsuccess = () => resolve(r.result ? sanitizeDB(r.result) : null);
         r.onerror = () => reject(r.error);
+      });
+    }
+    async function idbDelete(key) {
+      const db = await idbOpen();
+      return new Promise((resolve) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).delete(key);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
       });
     }
     async function idbSet(value) {
       const db = await idbOpen();
       return new Promise((resolve, reject) => {
         const tx = db.transaction(IDB_STORE, 'readwrite');
-        tx.objectStore(IDB_STORE).put(value, STORAGE_KEY);
+        tx.objectStore(IDB_STORE).put(value, ACTIVE.dbKey);
         tx.oncomplete = () => resolve(true);
         tx.onerror = () => reject(tx.error);
       });
@@ -643,7 +657,7 @@
           }
         } catch (e) { /* לא נתמך */ }
         const onStorage = (e) => {
-          if (e.key !== STORAGE_KEY || !e.newValue) return;
+          if (e.key !== ACTIVE.dbKey || !e.newValue) return;
           try { const d = sanitizeDB(JSON.parse(e.newValue)); if (d) setDb(d); } catch (err) { /* התעלמות */ }
         };
         window.addEventListener('storage', onStorage);
@@ -1362,7 +1376,6 @@
     }
 
     /* ---------- הוספת רשימה ברצף ---------- */
-    const QUEUE_KEY = 'verified_reading_tracker_queue_v1';
     function parseBookList(text) {
       let lines = (text || '').split(/\r?\n/);
       if (lines.filter(l => l.trim()).length === 1 && /[,;،]/.test(lines[0])) lines = lines[0].split(/[,;،]/);
@@ -1378,7 +1391,7 @@
     }
     function loadQueue() {
       try {
-        const q = JSON.parse(localStorage.getItem(QUEUE_KEY) || 'null');
+        const q = JSON.parse(localStorage.getItem(ACTIVE.queueKey) || 'null');
         if (!q || !Array.isArray(q.items)) return null;
         // תוצאות החיפוש לא נשמרות; פריטים שלא טופלו מחפשים מחדש (מהיר, יש מטמון)
         q.items = q.items.map(it => ({ ...it, status: isDone(it.status) ? it.status : 'pending' }));
@@ -1386,7 +1399,7 @@
       } catch (e) { return null; }
     }
     function saveQueue(q) {
-      try { if (q) localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); else localStorage.removeItem(QUEUE_KEY); } catch (e) { /* */ }
+      try { if (q) localStorage.setItem(ACTIVE.queueKey, JSON.stringify(q)); else localStorage.removeItem(ACTIVE.queueKey); } catch (e) { /* */ }
     }
     const Q_STATUS = {
       pending: { label: 'ממתין', cls: 'bg-surface2 text-muted' },
@@ -1814,7 +1827,7 @@
       setTimeout(() => URL.revokeObjectURL(url), 2000);
     }
     function toText(db) {
-      const lines = [`הספרים שלי · ${db.books.length} ספרים · יוצא ב-${fmtDate(Date.now())}`, ''];
+      const lines = [`הספרים של ${ACTIVE.name || 'הספרייה'} · ${db.books.length} ספרים · יוצא ב-${fmtDate(Date.now())}`, ''];
       db.books.slice().sort((a, b) => b.rating - a.rating || a.title.localeCompare(b.title, 'he')).forEach((b, i) => {
         lines.push(`${i + 1}. ${b.title}${b.authors.length ? ' — ' + b.authors.join(', ') : ''}${b.year ? ` (${b.year})` : ''}`);
         lines.push(`   ${'★'.repeat(b.rating)}${'☆'.repeat(5 - b.rating)}${b.tags.length ? '  |  ' + b.tags.join(', ') : ''}`);
@@ -1830,7 +1843,9 @@
       }
     }
 
-    function BackupTab({ db, update, replace, status, notify }) {
+    function BackupTab({ db, update, replace, status, notify, profile, onRenameProfile, onDeleteProfile }) {
+      const [nameDraft, setNameDraft] = useState(profile.name);
+      const [confirmProfileDel, setConfirmProfileDel] = useState(false);
       const [paste, setPaste] = useState('');
       const [preview, setPreview] = useState(null);
       const [err, setErr] = useState('');
@@ -1914,7 +1929,7 @@
             <StatusRow ok={status.local} label="localStorage" />
             <StatusRow ok={status.idb} label="IndexedDB (עותק שני)" />
             <StatusRow ok={status.persisted} label="אחסון קבוע (מוגן מניקוי)" detail={status.persisted === true ? 'אושר' : status.persisted === false ? 'לא אושר' : 'לא ידוע'} />
-            <p className="text-[13px] text-muted mt-2 tabular">{db.books.length} ספרים · נשמר לאחרונה {status.savedAt ? fmtDateTime(status.savedAt) : '—'} · מפתח: {STORAGE_KEY}</p>
+            <p className="text-[13px] text-muted mt-2 tabular">{db.books.length} ספרים · נשמר לאחרונה {status.savedAt ? fmtDateTime(status.savedAt) : '—'} · משתמש: {profile.name}</p>
           </section>
 
           {daysSince !== null && daysSince < 7
@@ -1923,14 +1938,14 @@
 
           <section className="bg-surface border border-line rounded-2xl p-3 grid gap-2">
             <h2 className="font-bold text-[17px]">ייצוא</h2>
-            <Btn onClick={() => { downloadFile(`reading-backup-${stamp}.json`, json(), 'application/json'); markBackup(); notify('קובץ הגיבוי נוצר'); }} disabled={!db.books.length}>
+            <Btn onClick={() => { downloadFile(`reading-backup-${profile.name}-${stamp}.json`, json(), 'application/json'); markBackup(); notify('קובץ הגיבוי נוצר'); }} disabled={!db.books.length}>
               <Icon name="Download" size={20} />הורדת גיבוי מלא (JSON)
             </Btn>
             <div className="grid grid-cols-2 gap-2">
               <Btn variant="soft" disabled={!db.books.length} onClick={async () => { const ok = await copyText(json(), taRef.current); if (ok) { markBackup(); notify('הגיבוי הועתק. אפשר להדביק בהערות או במייל.'); } else notify('ההעתקה נחסמה. הטקסט מסומן בתיבה למטה, העתיקו ידנית.'); }}>
                 <Icon name="Copy" size={18} />העתקת JSON
               </Btn>
-              <Btn variant="soft" disabled={!db.books.length} onClick={() => { downloadFile(`my-books-${stamp}.txt`, toText(db), 'text/plain;charset=utf-8'); notify('רשימת הטקסט נוצרה'); }}>
+              <Btn variant="soft" disabled={!db.books.length} onClick={() => { downloadFile(`my-books-${profile.name}-${stamp}.txt`, toText(db), 'text/plain;charset=utf-8'); notify('רשימת הטקסט נוצרה'); }}>
                 <Icon name="FileText" size={18} />רשימה כטקסט
               </Btn>
             </div>
@@ -1991,6 +2006,19 @@
             )}
           </section>
 
+          <section className="bg-surface border border-line rounded-2xl p-3 grid gap-2">
+            <h2 className="font-bold text-[17px]">המשתמש שלך</h2>
+            <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (nameDraft.trim()) { onRenameProfile(nameDraft.trim()); notify('השם עודכן'); } }}>
+              <label htmlFor="profile-name" className="sr-only">שם המשתמש</label>
+              <input id="profile-name" value={nameDraft} onChange={e => setNameDraft(e.target.value)} maxLength={24}
+                className="flex-1 min-w-0 min-h-[48px] px-3 rounded-xl border border-line bg-bg text-[16px]" />
+              <Btn variant="soft" type="submit" disabled={!nameDraft.trim() || nameDraft.trim() === profile.name}>שינוי שם</Btn>
+            </form>
+            <Btn variant="danger" onClick={() => { if (!confirmProfileDel) { setConfirmProfileDel(true); return; } onDeleteProfile(); }}>
+              {confirmProfileDel ? `לחצו שוב: מחיקת "${profile.name}" וכל הספרים שלו` : 'מחיקת המשתמש מהמכשיר'}
+            </Btn>
+          </section>
+
           <section className="border border-danger rounded-2xl p-3 grid gap-2">
             <h2 className="font-bold text-[17px] text-danger">מחיקת כל הנתונים</h2>
             <p className="text-[14px] text-muted">מוחק את כל הספרים, הדירוגים והתגיות מהמכשיר. אי אפשר לבטל, אלא אם שמרת גיבוי.</p>
@@ -2014,7 +2042,7 @@
       { id: 'backup', label: 'גיבוי נתונים', icon: 'DatabaseBackup' }
     ];
 
-    function App() {
+    function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
       const { db, update, replace, status } = usePersistentDB();
       const [tab, setTab] = useState(() => { try { return sessionStorage.getItem('vrt_tab') || 'library'; } catch (e) { return 'library'; } });
       const [pending, setPending] = useState(null);   // { book, existing }
@@ -2058,10 +2086,19 @@
       return (
         <div className="min-h-screen bg-bg text-ink font-body">
           <main className="mx-auto max-w-xl px-4 pb-28 safe-top">
+            <div className="flex items-center justify-between gap-2 pt-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <Avatar profile={profile} size={32} />
+                <span className="font-bold text-[15px] truncate">{profile.name}</span>
+              </div>
+              <button type="button" onClick={onSwitch} className="shrink-0 min-h-[40px] px-3 rounded-full border border-line text-[14px] font-bold text-muted inline-flex items-center gap-1.5">
+                <Icon name="Users" size={16} />החלפת משתמש
+              </button>
+            </div>
             {tab === 'library' && <LibraryTab db={db} onEdit={(b) => setPending({ book: b, existing: b })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id) })); notify('הספר נמחק'); }} goAdd={() => setTab('add')} />}
             {tab === 'add' && <AddTab db={db} onPick={pick} goSettings={() => setTab('backup')} />}
             {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} />}
-            {tab === 'backup' && <BackupTab db={db} update={update} replace={replace} status={status} notify={notify} />}
+            {tab === 'backup' && <BackupTab db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
           </main>
 
           <nav className="fixed bottom-0 inset-x-0 z-30 bg-surface border-t border-line safe-bottom" aria-label="ניווט ראשי">
@@ -2084,7 +2121,115 @@
       );
     }
 
-    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    /* ============================================================
+       משתמשים: הזדהות בלי סיסמה. כל משתמש מקבל ספרייה נפרדת במכשיר.
+       ============================================================ */
+    const AVATAR_COLORS = ['#1E5B4A', '#8A5A12', '#3D5A99', '#8E3B5B', '#4F6B2A', '#6A4C93', '#9A3E24', '#2F6F7E'];
+    function Avatar({ profile, size = 40 }) {
+      return (
+        <span aria-hidden="true" className="shrink-0 rounded-full grid place-items-center font-bold text-white"
+          style={{ width: size, height: size, background: AVATAR_COLORS[profile.color % AVATAR_COLORS.length], fontSize: size * 0.45 }}>
+          {(profile.name || '?').trim().charAt(0)}
+        </span>
+      );
+    }
+    function loadProfiles() {
+      try {
+        const p = JSON.parse(localStorage.getItem(PROFILES_KEY) || 'null');
+        if (p && Array.isArray(p.profiles)) return p;
+      } catch (e) { /* */ }
+      return { profiles: [], active: null };
+    }
+    function saveProfiles(p) { try { localStorage.setItem(PROFILES_KEY, JSON.stringify(p)); } catch (e) { /* */ } }
+    function countBooks(pid) {
+      try { const d = JSON.parse(localStorage.getItem(dbKeyFor(pid)) || 'null'); return d && Array.isArray(d.books) ? d.books.length : 0; } catch (e) { return 0; }
+    }
+
+    function WhoAreYou({ profiles, onPick, onCreate }) {
+      const [name, setName] = useState('');
+      const [adding, setAdding] = useState(profiles.length === 0);
+      const legacyCount = profiles.length === 0 ? countBooks('default') : 0;
+      const taken = profiles.some(p => norm(p.name) === norm(name));
+      return (
+        <div className="min-h-screen bg-bg text-ink font-body">
+          <main className="mx-auto max-w-md px-4 pt-10 pb-10 safe-top fade-in">
+            <div className="text-accent mb-3"><Icon name="Library" size={40} /></div>
+            <h1 className="font-display font-black text-[32px] leading-tight mb-1">של מי הספרייה?</h1>
+            <p className="text-muted text-[15px] mb-6">כל משתמש מקבל ספרייה, דירוגים והמלצות משלו. אין סיסמה, רק בוחרים שם.</p>
+            {profiles.length > 0 && (
+              <ul className="grid gap-2 mb-4">
+                {profiles.map(p => (
+                  <li key={p.id}>
+                    <button type="button" onClick={() => onPick(p.id)}
+                      className="w-full min-h-[64px] flex items-center gap-3 px-3 rounded-2xl bg-surface border border-line text-right active:bg-surface2">
+                      <Avatar profile={p} size={44} />
+                      <span className="flex-1 min-w-0">
+                        <span className="block font-bold text-[17px] truncate">{p.name}</span>
+                        <span className="block text-muted text-[13px] tabular">{countBooks(p.id)} ספרים</span>
+                      </span>
+                      <Icon name="ChevronLeft" size={20} className="text-muted" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {adding ? (
+              <form className="grid gap-2 bg-surface border border-line rounded-2xl p-3" onSubmit={(e) => { e.preventDefault(); if (name.trim() && !taken) onCreate(name.trim()); }}>
+                {legacyCount > 0 && <Notice tone="info">במכשיר כבר יש ספרייה עם {legacyCount} ספרים. היא תשויך למשתמש הראשון שתיצרו.</Notice>}
+                <label htmlFor="new-profile" className="font-bold text-[15px]">{profiles.length ? 'משתמש חדש' : 'איך לקרוא לך?'}</label>
+                <input id="new-profile" value={name} onChange={e => setName(e.target.value)} maxLength={24} autoFocus placeholder="שם או כינוי"
+                  className="w-full min-h-[52px] px-3 rounded-xl border border-line bg-bg text-[17px]" />
+                {taken && <p className="text-[13px] text-danger">כבר יש משתמש בשם הזה.</p>}
+                <div className={profiles.length ? 'grid grid-cols-2 gap-2' : 'grid'}>
+                  <Btn type="submit" disabled={!name.trim() || taken}><Icon name="Check" size={20} />כניסה</Btn>
+                  {profiles.length > 0 && <Btn variant="ghost" onClick={() => { setAdding(false); setName(''); }}>ביטול</Btn>}
+                </div>
+              </form>
+            ) : (
+              <Btn variant="ghost" className="w-full" onClick={() => setAdding(true)}><Icon name="UserPlus" size={20} />הוספת משתמש</Btn>
+            )}
+            <p className="text-[13px] text-muted mt-6">הנתונים נשמרים במכשיר הזה בלבד. כדי להעביר ספרייה לטלפון אחר, משתמשים בגיבוי והייבוא בלשונית "גיבוי נתונים".</p>
+          </main>
+        </div>
+      );
+    }
+
+    function Root() {
+      const [state, setState] = useState(loadProfiles);
+      const change = (fn) => setState(prev => { const next = fn(prev); saveProfiles(next); return next; });
+      const active = state.profiles.find(p => p.id === state.active);
+      useEffect(() => {
+        const onStorage = (e) => { if (e.key === PROFILES_KEY) setState(loadProfiles()); };
+        window.addEventListener('storage', onStorage);
+        return () => window.removeEventListener('storage', onStorage);
+      }, []);
+
+      if (!active) {
+        return <WhoAreYou profiles={state.profiles}
+          onPick={(id) => change(s => ({ ...s, active: id }))}
+          onCreate={(name) => change(s => {
+            const id = s.profiles.some(p => p.id === 'default') ? uid() : 'default';
+            const used = new Set(s.profiles.map(p => p.color));
+            const color = [...AVATAR_COLORS.keys()].find(i => !used.has(i)) ?? s.profiles.length;
+            return { profiles: [...s.profiles, { id, name, color, createdAt: Date.now() }], active: id };
+          })} />;
+      }
+
+      ACTIVE.id = active.id;
+      ACTIVE.name = active.name;
+      ACTIVE.dbKey = dbKeyFor(active.id);
+      ACTIVE.queueKey = queueKeyFor(active.id);
+      return <App key={active.id} profile={active}
+        onSwitch={() => { try { sessionStorage.removeItem('vrt_tab'); } catch (e) { /* */ } change(s => ({ ...s, active: null })); }}
+        onRenameProfile={(name) => change(s => ({ ...s, profiles: s.profiles.map(p => p.id === active.id ? { ...p, name } : p) }))}
+        onDeleteProfile={() => {
+          try { localStorage.removeItem(dbKeyFor(active.id)); localStorage.removeItem(queueKeyFor(active.id)); } catch (e) { /* */ }
+          idbDelete(dbKeyFor(active.id)).catch(() => {});
+          change(s => ({ profiles: s.profiles.filter(p => p.id !== active.id), active: null }));
+        }} />;
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<Root />);
   </script>
   <noscript>האפליקציה דורשת JavaScript.</noscript>
 </body>
