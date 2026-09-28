@@ -2091,7 +2091,7 @@
       const [draft, setDraft] = useState('');
       const [results, setResults] = useState({});
       const [form, setForm] = useState({ id: null, title: '', author: '' });   // חיפוש מדויק לספר הנוכחי
-      const [listOpen, setListOpen] = useState(false);
+      const [listOpen, setListOpen] = useState(false);   // false | 'todo' | 'done'
       const [listDraft, setListDraft] = useState(null);   // טקסט בעריכת הרשימה כולה
       const busy = useRef(false);
       const topRef = useRef(null);
@@ -2155,12 +2155,14 @@
       const saveList = () => {
         const lines = parseBookList(listDraft);
         setQueue(q => {
-          const pool = q.items.slice();
-          const items = lines.map(p => {
+          const handled = q.items.filter(it => isDone(it.status));
+          const pool = q.items.filter(it => !isDone(it.status));
+          const todo = lines.map(p => {
             const i = pool.findIndex(it => norm(it.title) === norm(p.title) && norm(it.author) === norm(p.author));
             if (i >= 0) return pool.splice(i, 1)[0];
             return { id: uid(), ...p, status: 'pending', savedTitle: '' };
           });
+          const items = [...handled, ...todo];
           if (!items.length) return null;
           const cur = items.find(it => it.id === q.current) || items.find(it => !isDone(it.status));
           return { ...q, items, current: cur ? cur.id : null };
@@ -2204,40 +2206,45 @@
             <div className="h-2 rounded-full bg-surface2 overflow-hidden mb-2" aria-hidden="true">
               <div className="h-full bg-accent transition-all" style={{ width: `${(doneCount / items.length) * 100}%` }} />
             </div>
-            <div className="flex gap-2">
-              <button type="button" onClick={() => setListOpen(!listOpen)} aria-expanded={listOpen}
-                className="flex-1 min-h-[44px] rounded-xl border border-line font-bold text-[14px] inline-flex items-center justify-center gap-1.5">
-                <Icon name="List" size={17} />{listOpen ? 'הסתרת הרשימה' : `כל הספרים (${items.length})`}
-              </button>
-              <button type="button" onClick={() => { setListDraft(items.map(lineOf).join('\n')); setListOpen(false); }}
-                className="flex-1 min-h-[44px] rounded-xl border border-line font-bold text-[14px] inline-flex items-center justify-center gap-1.5">
-                <Icon name="Pencil" size={16} />עריכת הרשימה
-              </button>
+            <div className="grid grid-cols-3 gap-2">
+              {[['todo', `לטיפול (${items.length - doneCount})`], ['done', `טופלו (${doneCount})`]].map(([k, l]) => (
+                <button key={k} type="button" onClick={() => setListOpen(listOpen === k ? false : k)} aria-expanded={listOpen === k}
+                  className={`min-h-[44px] rounded-xl border font-bold text-[14px] ${listOpen === k ? 'border-accent bg-accentSoft text-accent' : 'border-line'}`}>{l}</button>
+              ))}
+              <button type="button" onClick={() => { setListDraft(items.filter(it => !isDone(it.status)).map(lineOf).join('\n')); setListOpen(false); }}
+                className="min-h-[44px] rounded-xl border border-line font-bold text-[14px] inline-flex items-center justify-center gap-1"><Icon name="Pencil" size={15} />עריכה</button>
             </div>
-            {listOpen && (
-              <ol className="mt-2 grid gap-1 fade-in" aria-label="הספרים ברשימה">
-                {items.map((it, i) => (
-                  <li key={it.id}>
-                    <button type="button" onClick={() => { setQueue(q => ({ ...q, current: it.id })); setListOpen(false); }}
-                      className={`w-full min-h-[44px] flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-right border ${it.id === queue.current ? 'border-accent bg-accentSoft' : 'border-transparent'}`}>
-                      <span className="tabular text-muted text-[13px] w-6 shrink-0">{i + 1}.</span>
-                      <span className="flex-1 min-w-0 text-[14px] font-semibold truncate">{it.savedTitle || it.title}{it.author ? <span className="text-muted font-normal"> · {it.author}</span> : null}</span>
-                      <span className={`shrink-0 text-[11px] font-bold px-2 py-0.5 rounded-full ${Q_STATUS[it.status].cls}`}>{Q_STATUS[it.status].label}</span>
-                    </button>
-                  </li>
-                ))}
-              </ol>
-            )}
+            {listOpen && (() => {
+              const shownItems = items.filter(it => listOpen === 'done' ? isDone(it.status) : !isDone(it.status));
+              return (
+                <ul className="mt-2 grid gap-1 fade-in" aria-label={listOpen === 'done' ? 'ספרים שטופלו' : 'ספרים לטיפול'}>
+                  {!shownItems.length && <li className="text-[14px] text-muted py-2 text-center">{listOpen === 'done' ? 'עוד לא טופלו ספרים.' : 'אין ספרים שממתינים לטיפול.'}</li>}
+                  {shownItems.map(it => (
+                    <li key={it.id} className="flex items-center gap-1.5">
+                      <button type="button" onClick={() => { setQueue(q => ({ ...q, current: it.id })); setListOpen(false); }}
+                        className={`flex-1 min-w-0 min-h-[44px] flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-right border ${it.id === queue.current ? 'border-accent bg-accentSoft' : 'border-transparent'}`}>
+                        <span className="flex-1 min-w-0 text-[14px] font-semibold truncate">{it.savedTitle || it.title}{it.author ? <span className="text-muted font-normal"> · {it.author}</span> : null}</span>
+                        <span className={`shrink-0 text-[11px] font-bold px-2 py-0.5 rounded-full ${Q_STATUS[it.status].cls}`}>{Q_STATUS[it.status].label}</span>
+                      </button>
+                      {listOpen === 'done' && it.status !== 'saved' && (
+                        <button type="button" onClick={() => { setItem(it.id, { status: 'pending', savedTitle: '' }); setQueue(q => ({ ...q, current: it.id })); setListOpen(false); }}
+                          className="shrink-0 min-h-[40px] px-2 rounded-lg text-accent font-bold text-[13px]">חזרה לטיפול</button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              );
+            })()}
           </div>
 
           {listDraft !== null && (
             <div className="fade-in bg-surface border border-accent rounded-2xl p-3 grid gap-2">
               <label htmlFor="bulk-list-edit" className="font-bold text-[15px]">עריכת הרשימה</label>
-              <p className="text-[13px] text-muted">ספר בכל שורה. אפשר לתקן שם, להוסיף מחבר אחרי מקף, להוסיף ספרים או למחוק שורות. ספרים שכבר טופלו נשמרים כמו שהם.</p>
+              <p className="text-[13px] text-muted">הספרים שממתינים לטיפול, ספר בכל שורה. אפשר לתקן שם, להוסיף מחבר אחרי מקף, להוסיף ספרים או למחוק שורות. ספרים שכבר טופלו לא מושפעים.</p>
               <textarea id="bulk-list-edit" value={listDraft} onChange={e => setListDraft(e.target.value)} rows={Math.min(12, Math.max(4, items.length + 1))}
                 className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px] leading-relaxed" />
               <div className="grid grid-cols-2 gap-2">
-                <Btn onClick={saveList} disabled={!parseBookList(listDraft).length}><Icon name="Check" size={18} />שמירה וחיפוש</Btn>
+                <Btn onClick={saveList}><Icon name="Check" size={18} />שמירה וחיפוש</Btn>
                 <Btn variant="ghost" onClick={() => setListDraft(null)}>ביטול</Btn>
               </div>
             </div>
