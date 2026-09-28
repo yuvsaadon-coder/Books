@@ -210,6 +210,7 @@
     function googleUrl(path, params) {
       const u = new URL(API_PRIMARY + (path || ''));
       Object.entries(params || {}).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== '') u.searchParams.set(k, v); });
+      u.searchParams.set('country', 'IL');   // בלי זה Google מחזיר 403 כשאינו מזהה את מיקום המשתמש (VPN וכד')
       if (CONFIG.apiKey) u.searchParams.set('key', CONFIG.apiKey);
       return u.toString();
     }
@@ -326,19 +327,20 @@
       const seen = new Set(a.map(x => x.key));
       return a.concat(b.filter(x => !seen.has(x.key) && seen.add(x.key)));
     }
-    // קיבוץ מהדורות/הדפסות של אותה יצירה (אותו שם ומחבר) לכרטיס אחד
+    // קיבוץ מהדורות/הדפסות של אותה יצירה לכרטיס אחד. מקבצים לפי שם בלבד, כי Google רושם
+    // אותה מהדורה עברית עם איותים שונים של המחבר (עברית, אנגלית, יפנית) או בלי מחבר בכלל
     function groupEditions(list) {
       const groups = [];
       const byKey = new Map();
       list.forEach(c => {
-        const k = dedupeKey(c);
+        const k = normTitle(c.title) || dedupeKey(c);
         const g = byKey.get(k);
         if (g) g.editions.push(c);
         else { const ng = { key: k, main: c, editions: [c] }; byKey.set(k, ng); groups.push(ng); }
       });
       groups.forEach(g => {
         // הרשומה הראשית: זו עם הכי הרבה מידע (תקציר, כריכה)
-        const info = (c) => (c.description ? 2 : 0) + (c.cover ? 1 : 0) + (c.pageCount ? 0.5 : 0);
+        const info = (c) => (c.description ? 2 : 0) + (c.cover ? 1 : 0) + (c.pageCount ? 0.5 : 0) + (c.authors.length ? 1 : 0) + (c.authors.some(hasHebrew) ? 0.5 : 0);
         g.main = g.editions.slice().sort((a, b) => info(b) - info(a))[0];
       });
       return groups.slice(0, 10);
@@ -1208,6 +1210,7 @@
           <Cover book={ed} className="w-10 h-14" />
           <div className="min-w-0 flex-1 text-[13px] leading-snug">
             {normTitle(ed.title) !== normTitle(main.title) && <div className="font-bold text-[14px] truncate">{ed.title}</div>}
+            {ed.authors.length > 0 && ed.authors.join(',') !== main.authors.join(',') && <div className="text-muted truncate">{ed.authors.join(', ')}</div>}
             <div className="tabular">{metaLine(ed) || 'פרטי הדפסה לא צוינו'}</div>
             {ed.isbns && ed.isbns[0] && <div className="text-muted tabular" dir="ltr" style={{ textAlign: 'right' }}>ISBN {ed.isbns[0]}</div>}
           </div>
