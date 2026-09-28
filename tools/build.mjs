@@ -3,14 +3,16 @@
 // הרצה: npm run build
 import { readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { transform } from 'esbuild';
+import { build } from 'esbuild';
 
 const root = new URL('..', import.meta.url).pathname;
-const src = readFileSync(root + 'src/app.jsx', 'utf8');
-const { code } = await transform(src, {
-  loader: 'jsx', jsx: 'transform', jsxFactory: 'React.createElement', jsxFragment: 'React.Fragment',
+// מאגדים את src/app.jsx יחד עם הקבצים שהוא מייבא (למשל רשימת ספרי הפתיחה). React ו-ReactDOM גלובליים מה-CDN.
+const bundled = await build({
+  entryPoints: [root + 'src/app.jsx'], bundle: true, write: false,
+  loader: { '.jsx': 'jsx', '.js': 'js' }, jsx: 'transform', jsxFactory: 'React.createElement', jsxFragment: 'React.Fragment',
   format: 'iife', target: 'es2019', minify: true, legalComments: 'none', charset: 'utf8'
 });
+const code = bundled.outputFiles[0].text;
 const css = execFileSync(root + 'node_modules/.bin/tailwindcss',
   ['-c', root + 'tailwind.config.cjs', '-i', root + 'tools/tailwind.css', '--minify'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
 // גופנים מקומיים (במקום Google Fonts): מהיר יותר, עובד גם בלי אינטרנט. מעתיקים רק עברית ולטינית במשקלים בשימוש.

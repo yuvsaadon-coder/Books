@@ -205,6 +205,20 @@ try {
     assert.ok(viaProxy > 0, 'no proxied Google requests');
     assert.equal(direct, 0, `${direct} direct Google requests`);
   });
+  await step('first entry: pick known books → verified ones added, the rest queued', async () => {
+    const C = await phone(browser, 'C');
+    await C.fill('#new-profile', 'דנה'); await C.click('button:has-text("כניסה")');
+    await C.waitForSelector('text=אילו ספרים כבר קראת?');
+    const rate = async (title, label) => { await C.fill('#starter-q', title); await C.locator(`li:has-text("${title}")`).first().locator(`button:has-text("${label}")`).click(); };
+    await rate('מיכאל שלי', 'אהבתי'); await rate('יער נורווגי', 'בסדר'); await rate('חסמבה', 'אהבתי');
+    await C.click('button:has-text("הוספת 3 ספרים")');
+    await C.waitForSelector('text=הספרייה מוכנה', { timeout: 20000 });
+    assert.ok((await C.locator('main p.tabular').textContent()).includes('נוספו 2'));
+    await C.click('button:has-text("לספרייה שלי")');
+    assert.deepEqual((await texts(C.locator('main ul li .font-display.text-\\[17px\\]'))).sort(), ['יער נורווגי', 'מיכאל שלי']);
+    await C.click('nav >> text=הוספת ספר'); await C.click('button[role=tab]:has-text("רשימה")');
+    await C.waitForSelector('text=חסמבה');
+  });
   assert.deepEqual(errors, [], 'page errors');
   console.log('\nכל הבדיקות עברו');
 } finally {
