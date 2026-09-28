@@ -827,16 +827,20 @@
       try { url = localStorage.getItem('vrt_server_url') || url; } catch (e) { /* */ }
       return url ? { url: cloudBase(url), ai: true } : null;
     }
-    const aiAvailable = () => !!loadCloud();
+    // ה-AI זמין רק אם השרת מדווח שמוגדר בו מפתח (ping.ai)
+    const aiAvailable = () => !!loadCloud() && SYNC.ai !== false;
     // איתור השרת: כתובת ה-Worker ב-Cloudflare היא books.<שם-החשבון>.workers.dev. האפליקציה מנסה את האפשרויות וזוכרת את זו שעונה.
     const CLOUD_CANDIDATES = ['https://books.yuvsaadon.workers.dev', 'https://books.yuvsaadon-coder.workers.dev', 'https://books.yuvsaadon1.workers.dev', 'https://books.yuval-saadon.workers.dev', 'https://books.yuvalsaadon.workers.dev'];
     async function discoverCloud() {
-      if (loadCloud()) return true;
+      if (loadCloud()) {
+        try { const r = await fetch(loadCloud().url + '/ping'); const j = await r.json(); setSyncStatus({ ai: !!j.ai }); } catch (e) { /* */ }
+        return true;
+      }
       for (const u of CLOUD_CANDIDATES) {
         try {
           const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 6000);
           const r = await fetch(u + '/ping', { signal: ctrl.signal }); clearTimeout(t);
-          if (r.ok) { const j = await r.json(); if (j && j.ok) { localStorage.setItem('vrt_server_url', u); window.dispatchEvent(new Event('vrt-sync-status')); return true; } }
+          if (r.ok) { const j = await r.json(); if (j && j.ok) { localStorage.setItem('vrt_server_url', u); setSyncStatus({ ai: !!j.ai }); return true; } }
         } catch (e) { /* ננסה את הבאה */ }
       }
       setSyncStatus({ status: 'error', error: 'השרת לא נמצא. שלחו ל-Claude Code את כתובת ה-Worker מ-Cloudflare.' });
@@ -906,7 +910,7 @@
       });
       window.dispatchEvent(new Event('vrt-profiles-changed'));
     }
-    const SYNC = { running: false, again: false, status: 'off', lastAt: 0, error: '' };
+    const SYNC = { running: false, again: false, status: 'off', lastAt: 0, error: '', ai: null };
     function setSyncStatus(patch) { Object.assign(SYNC, patch); window.dispatchEvent(new Event('vrt-sync-status')); }
     async function syncNow() {
       if (!loadCloud()) { setSyncStatus({ status: 'off' }); return; }
@@ -2804,6 +2808,7 @@
             {label && <span className={`shrink-0 text-[13px] font-bold px-2 py-0.5 rounded-full ${sync.status === 'error' ? 'bg-surface2 text-danger' : 'bg-accentSoft text-ok'}`}>{label}</span>}
           </div>
           {sync.error && <p className="text-[13px] text-danger">{sync.error}</p>}
+          <p className="text-[13px] text-muted">המלצות חכמות ותרגום (Claude): {sync.ai === false ? <span className="text-danger font-bold">לא פעילים, חסר מפתח ANTHROPIC_API_KEY בשרת</span> : sync.ai ? <span className="text-ok font-bold">פעילים</span> : 'בודק…'}</p>
           <Btn variant="ghost" onClick={() => syncNow()} disabled={sync.status === 'syncing'}><Icon name="RefreshCw" size={18} />סנכרון עכשיו</Btn>
         </div>
       );

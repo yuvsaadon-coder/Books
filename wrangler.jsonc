@@ -6,6 +6,8 @@
   "compatibility_date": "2025-09-01",
   "observability": { "enabled": true },
   "workers_dev": true,
+  // לא למחוק משתנים שהוגדרו בלוח הבקרה של Cloudflare בכל פרסום
+  "keep_vars": true,
   "kv_namespaces": [
     { "binding": "LIBRARY", "id": "b622c3fe36394ceaa0b02718aaf676b3" }
   ]
