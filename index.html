@@ -798,28 +798,19 @@
     /* ============================================================
        ספרייה משפחתית: סנכרון בין מכשירים דרך השרת המשפחתי (Cloudflare)
        ============================================================ */
-    const CLOUD_KEY = 'verified_reading_tracker_cloud_v1';
-    function loadCloud() {
-      try { const c = JSON.parse(localStorage.getItem(CLOUD_KEY) || 'null'); return c && c.url && c.code ? c : null; } catch (e) { return null; }
-    }
-    function saveCloud(c) {
-      try { if (c) localStorage.setItem(CLOUD_KEY, JSON.stringify(c)); else localStorage.removeItem(CLOUD_KEY); } catch (e) { /* */ }
-      window.dispatchEvent(new Event('vrt-cloud-changed'));
-    }
-    const aiAvailable = () => { const c = loadCloud(); return !!(c && c.ai); };
+    // כתובת השרת (Cloudflare Worker). האפליקציה מתחברת אליו לבד; אין קוד גישה.
+    const CLOUD_URL = '';
     const cloudBase = (url) => url.trim().replace(/\/+$/, '');
-    // כותרות HTTP לא יכולות להכיל עברית, לכן הקוד מקודד (השרת מפענח)
-    const codeHeader = (code) => encodeURIComponent(code.trim());
-    async function cloudPing(url, code) {
-      const r = await fetch(cloudBase(url) + '/ping', { headers: { 'x-family-code': codeHeader(code) } });
-      if (r.status === 401) throw new Error('bad_code');
-      if (!r.ok) throw new Error('http_' + r.status);
-      return r.json();
+    function loadCloud() {
+      let url = CLOUD_URL;
+      try { url = localStorage.getItem('vrt_server_url') || url; } catch (e) { /* */ }
+      return url ? { url: cloudBase(url), ai: true } : null;
     }
+    const aiAvailable = () => !!loadCloud();
     async function cloudFetch(path, opts = {}) {
       const c = loadCloud();
       if (!c) throw new Error('no_cloud');
-      return fetch(cloudBase(c.url) + path, { ...opts, headers: { 'x-family-code': codeHeader(c.code), 'content-type': 'application/json', ...(opts.headers || {}) } });
+      return fetch(c.url + path, { ...opts, headers: { 'content-type': 'application/json', ...(opts.headers || {}) } });
     }
     const uniq = (arr) => Array.from(new Set(arr));
     function mergeByIdNewest(a, b, ts) {
@@ -890,7 +881,6 @@
       try {
         for (let attempt = 0; attempt < 4; attempt++) {
           const r = await cloudFetch('/sync');
-          if (r.status === 401) throw new Error('bad_code');
           if (!r.ok) throw new Error('http_' + r.status);
           const remote = await r.json();
           const merged = mergeState(collectLocal(), remote.data);
@@ -903,7 +893,7 @@
         }
         setSyncStatus({ status: 'ok', lastAt: Date.now(), error: '' });
       } catch (e) {
-        setSyncStatus({ status: 'error', error: e.message === 'bad_code' ? 'קוד הספרייה שגוי' : 'אין חיבור לשרת המשפחתי' });
+        setSyncStatus({ status: 'error', error: 'אין חיבור לשרת. הנתונים שמורים בטלפון ויסתנכרנו כשיחזור החיבור.' });
       } finally {
         SYNC.running = false;
         if (SYNC.again) { SYNC.again = false; setTimeout(syncNow, 400); }
@@ -911,50 +901,39 @@
     }
     let syncTimer = null;
     function scheduleSync(ms = 2500) { if (!loadCloud()) return; clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, ms); }
-    // חיבור ראשון: אם גם במכשיר וגם בשרת יש משתמש 'default' שונה, מעבירים את המקומי למזהה חדש כדי שלא יתמזגו
-    // כתובת השרת המשפחתי (לא סוד). הקוד המשפחתי לא נשמר בקוד, כי המאגר ציבורי: הוא מגיע בקישור הצטרפות או מוקלד פעם אחת.
-    const DEFAULT_CLOUD_URL = '';
-    // קישור הצטרפות: הכתובת והקוד נמצאים אחרי ה-#, ולכן לא נשלחים לשום שרת (גם לא ל-GitHub)
-    function joinLink(c) {
-      return location.origin + location.pathname + '#join=' + encodeURIComponent(c.url) + '~' + encodeURIComponent(c.code);
-    }
-    function readJoinHash() {
-      const m = (location.hash || '').match(/^#join=([^~]+)~(.+)$/);
-      if (!m) return null;
-      try { return { url: decodeURIComponent(m[1]), code: decodeURIComponent(m[2]) }; } catch (e) { return null; }
-    }
-    async function connectCloud(url, code) {
-      const ping = await cloudPing(url, code);
-      saveCloud({ url: cloudBase(url), code: code.trim(), ai: !!ping.ai, sync: !!ping.sync });
+    // חיבור ראשון של מכשיר: אם גם במכשיר וגם בשרת יש משתמש 'default' שונה, מעבירים את המקומי למזהה חדש כדי שלא יתמזגו
+    const JOINED_KEY = 'verified_reading_tracker_joined_v1';
+    async function ensureJoined() {
+      if (!loadCloud()) return;
+      try { if (localStorage.getItem(JOINED_KEY)) return; } catch (e) { return; }
       const r = await cloudFetch('/sync');
-      if (r.ok) {
-        const remote = await r.json();
-        const rp = remote.data && remote.data.profiles || [];
-        const lp = loadProfiles();
-        const ld = lp.profiles.find(p => p.id === 'default');
-        const rd = rp.find(p => p.id === 'default');
-        if (ld && rd && ld.createdAt !== rd.createdAt) {
-          const nid = uid();
-          try {
-            const raw = localStorage.getItem(dbKeyFor('default'));
-            if (raw) localStorage.setItem(dbKeyFor(nid), raw);
-            localStorage.removeItem(dbKeyFor('default'));
-            idbDelete(dbKeyFor('default')).catch(() => {});
-            const q = localStorage.getItem(queueKeyFor('default'));
-            if (q) { localStorage.setItem(queueKeyFor(nid), q); localStorage.removeItem(queueKeyFor('default')); }
-          } catch (e) { /* */ }
-          saveProfiles({ ...lp, profiles: lp.profiles.map(p => p.id === 'default' ? { ...p, id: nid, updatedAt: Date.now() } : p), active: lp.active === 'default' ? nid : lp.active });
-        }
+      if (!r.ok) return;
+      const remote = await r.json();
+      const rp = remote.data && remote.data.profiles || [];
+      const lp = loadProfiles();
+      const ld = lp.profiles.find(p => p.id === 'default');
+      const rd = rp.find(p => p.id === 'default');
+      if (ld && rd && ld.createdAt !== rd.createdAt) {
+        const nid = uid();
+        try {
+          const raw = localStorage.getItem(dbKeyFor('default'));
+          if (raw) localStorage.setItem(dbKeyFor(nid), raw);
+          localStorage.removeItem(dbKeyFor('default'));
+          idbDelete(dbKeyFor('default')).catch(() => {});
+          const q = localStorage.getItem(queueKeyFor('default'));
+          if (q) { localStorage.setItem(queueKeyFor(nid), q); localStorage.removeItem(queueKeyFor('default')); }
+        } catch (e) { /* */ }
+        saveProfiles({ ...lp, profiles: lp.profiles.map(p => p.id === 'default' ? { ...p, id: nid, updatedAt: Date.now() } : p), active: lp.active === 'default' ? nid : lp.active });
+        window.dispatchEvent(new Event('vrt-profiles-changed'));
       }
-      await syncNow();
-      return ping;
+      try { localStorage.setItem(JOINED_KEY, '1'); } catch (e) { /* */ }
     }
     function useSyncStatus() {
       const [, force] = useState(0);
       useEffect(() => {
         const f = () => force(x => x + 1);
-        window.addEventListener('vrt-sync-status', f); window.addEventListener('vrt-cloud-changed', f);
-        return () => { window.removeEventListener('vrt-sync-status', f); window.removeEventListener('vrt-cloud-changed', f); };
+        window.addEventListener('vrt-sync-status', f);
+        return () => window.removeEventListener('vrt-sync-status', f);
       }, []);
       return { ...SYNC, cloud: loadCloud() };
     }
@@ -979,7 +958,7 @@
         Anthropic,
         client: new Anthropic({
           apiKey: 'held-by-family-server', baseURL: cloudBase(c.url), dangerouslyAllowBrowser: true,
-          defaultHeaders: { 'x-family-code': codeHeader(c.code) }, maxRetries: 1, timeout: 6 * 60 * 1000
+          maxRetries: 1, timeout: 6 * 60 * 1000
         })
       };
     }
@@ -1022,7 +1001,7 @@
           if (onProgress) stream.on('contentBlock', (b) => { const d = describeBlock(b); if (d) onProgress(d); });
           msg = await stream.finalMessage();
         } catch (e) {
-          if (e instanceof Anthropic.AuthenticationError) throw new Error('קוד הספרייה המשפחתית שגוי');
+          if (e instanceof Anthropic.AuthenticationError) throw new Error('השרת לא הצליח להתחבר ל-Claude. בדקו את ANTHROPIC_API_KEY ב-Cloudflare.');
           if (e instanceof Anthropic.RateLimitError) throw new Error('הגעתם למגבלת השימוש היומית ב-AI, או שהשירות עמוס. נסו שוב מאוחר יותר.');
           if (e instanceof Anthropic.APIError) throw new Error('שגיאה מהשרת (' + (e.status || '') + '): ' + (e.message || '').slice(0, 160));
           throw new Error('אין חיבור לשרת המשפחתי. בדקו אינטרנט ונסו שוב.');
@@ -2222,8 +2201,7 @@
       if (!aiAvailable()) {
         return (
           <Notice tone="info">
-            זיהוי ספרים מתוך טקסט חופשי עובד דרך Claude, ודורש חיבור לשרת המשפחתי.
-            <button type="button" onClick={goSettings} className="block mt-1 text-accent font-bold min-h-[40px]">לחיבור הספרייה המשפחתית ←</button>
+            זיהוי ספרים מתוך טקסט חופשי עובד דרך Claude, והוא עוד לא זמין באפליקציה.
           </Notice>
         );
       }
@@ -2612,7 +2590,7 @@
             </div>
           )}
           {!hasAi && step === 0 && !log.length && (
-            <div className="mb-3"><Notice tone="info">להמלצות חכמות (Claude שקורא ביקורות ומבין בקשה חופשית) צריך לחבר את הספרייה המשפחתית בלשונית "גיבוי נתונים". בינתיים: השאלון המהיר.</Notice></div>
+            <div className="mb-3"><Notice tone="info">המלצות חכמות עם Claude עוד לא זמינות באפליקציה. בינתיים: השאלון המהיר.</Notice></div>
           )}
           {hasAi && step === 0 && !log.length && <h2 className="font-bold text-[15px] text-muted mb-2">או: שאלון מהיר, בלי AI</h2>}
 
@@ -2694,64 +2672,19 @@
       }
     }
 
-    function CloudPanel({ compact }) {
+    function SyncPanel() {
       const sync = useSyncStatus();
-      const [url, setUrl] = useState(DEFAULT_CLOUD_URL);
-      const [shareMsg, setShareMsg] = useState('');
-      const [code, setCode] = useState('');
-      const [st, setSt] = useState({ busy: false, err: '' });
-      const [confirmOff, setConfirmOff] = useState(false);
-      const c = sync.cloud;
-      const connect = async (e) => {
-        e.preventDefault();
-        setSt({ busy: true, err: '' });
-        try { await connectCloud(url, code); setSt({ busy: false, err: '' }); }
-        catch (err) { setSt({ busy: false, err: err.message === 'bad_code' ? 'קוד הספרייה שגוי.' : 'לא הצלחנו להתחבר לשרת. בדקו את הכתובת (מתחילה ב-https://) ואת החיבור לאינטרנט.' }); }
-      };
-      if (c) {
-        const label = { syncing: 'מסנכרן…', ok: 'מסונכרן', error: 'שגיאה', off: 'כבוי' }[sync.status] || '';
-        return (
-          <div className="grid gap-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[15px] font-bold">ספרייה משפחתית מחוברת</span>
-              <span className={`text-[13px] font-bold px-2 py-0.5 rounded-full ${sync.status === 'error' ? 'bg-surface2 text-danger' : 'bg-accentSoft text-ok'}`}>{label}</span>
-            </div>
-            <p className="text-[13px] text-muted">כל המשתמשים, הספרים, הדירוגים וההיסטוריה מסתנכרנים בין הטלפונים שמחוברים עם אותו קוד.{sync.lastAt ? ` סנכרון אחרון: ${fmtDateTime(sync.lastAt)}.` : ''}</p>
-            {sync.error && <Notice tone="error">{sync.error}</Notice>}
-            <p className="text-[13px] text-muted">המלצות וזיהוי חכם (Claude): {c.ai ? 'פעילים' : 'לא הוגדר מפתח בשרת'}</p>
-            {!compact && (
-              <div className="grid gap-1.5">
-                <Btn onClick={async () => {
-                  const link = joinLink(c);
-                  try { if (navigator.share) { await navigator.share({ title: 'הצטרפות לספרייה המשפחתית', text: 'לחצו כדי לחבר את הטלפון לספרייה המשפחתית:', url: link }); setShareMsg('נשלח.'); return; } } catch (e) { if (e && e.name === 'AbortError') return; }
-                  try { await navigator.clipboard.writeText(link); setShareMsg('הקישור הועתק. שלחו אותו (למשל בוואטסאפ) ופתחו אותו בטלפון השני.'); }
-                  catch (e) { setShareMsg(link); }
-                }}><Icon name="Share2" size={18} />קישור הצטרפות לטלפון נוסף</Btn>
-                {shareMsg && <p className="text-[13px] text-muted break-all select-all">{shareMsg}</p>}
-                <p className="text-[12px] text-muted">מי שפותח את הקישור מתחבר לספרייה בלי להקליד כלום. הקישור מכיל את הקוד המשפחתי, אז שלחו אותו רק לבני המשפחה.</p>
-              </div>
-            )}
-            {!compact && (
-              <div className="grid grid-cols-2 gap-2">
-                <Btn variant="soft" onClick={() => syncNow()} disabled={sync.status === 'syncing'}><Icon name="RefreshCw" size={18} />סנכרון עכשיו</Btn>
-                <Btn variant="ghost" onClick={() => { if (!confirmOff) { setConfirmOff(true); return; } saveCloud(null); setConfirmOff(false); }}>{confirmOff ? 'לחצו שוב לניתוק' : 'ניתוק המכשיר'}</Btn>
-              </div>
-            )}
-          </div>
-        );
-      }
+      if (!sync.cloud) return <p className="text-[14px] text-muted">הסנכרון עוד לא הוגדר באפליקציה.</p>;
+      const label = { syncing: 'מסנכרן…', ok: 'מסונכרן', error: 'לא מחובר', off: '' }[sync.status] || '';
       return (
-        <form onSubmit={connect} className="grid gap-2">
-          <p className="text-[14px] text-muted">{DEFAULT_CLOUD_URL ? 'מקלידים פעם אחת את הקוד המשפחתי, או פותחים קישור הצטרפות שנשלח מטלפון שכבר מחובר.' : 'מחברים כל טלפון עם אותה כתובת ואותו קוד, או פותחים קישור הצטרפות מטלפון מחובר. החיבור מפעיל גם המלצות חכמות עם Claude.'}</p>
-          {!DEFAULT_CLOUD_URL && <label htmlFor="cloud-url" className="text-[13px] font-bold text-muted">כתובת השרת המשפחתי</label>}
-          {!DEFAULT_CLOUD_URL && <input id="cloud-url" value={url} onChange={e => setUrl(e.target.value)} dir="ltr" autoComplete="off" placeholder="https://books-family.NAME.workers.dev"
-            className="w-full min-h-[48px] px-3 rounded-xl border border-line bg-bg text-[15px]" />}
-          <label htmlFor="cloud-code" className="text-[13px] font-bold text-muted">קוד הספרייה המשפחתית</label>
-          <input id="cloud-code" value={code} onChange={e => setCode(e.target.value)} autoComplete="off" placeholder="הקוד שהגדרתם בשרת"
-            className="w-full min-h-[48px] px-3 rounded-xl border border-line bg-bg text-[15px]" />
-          <Btn type="submit" disabled={!url.trim() || !code.trim() || st.busy}>{st.busy ? <><Spinner />מתחבר…</> : <><Icon name="Cloud" size={20} />חיבור</>}</Btn>
-          {st.err && <Notice tone="error">{st.err}</Notice>}
-        </form>
+        <div className="grid gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[14px] text-muted">כל המשתמשים והספרים מסתנכרנים אוטומטית בין הטלפונים.{sync.lastAt ? ` עדכון אחרון: ${fmtDateTime(sync.lastAt)}.` : ''}</span>
+            {label && <span className={`shrink-0 text-[13px] font-bold px-2 py-0.5 rounded-full ${sync.status === 'error' ? 'bg-surface2 text-danger' : 'bg-accentSoft text-ok'}`}>{label}</span>}
+          </div>
+          {sync.error && <p className="text-[13px] text-danger">{sync.error}</p>}
+          <Btn variant="ghost" onClick={() => syncNow()} disabled={sync.status === 'syncing'}><Icon name="RefreshCw" size={18} />סנכרון עכשיו</Btn>
+        </div>
       );
     }
 
@@ -2839,8 +2772,8 @@
           </header>
 
           <section className="bg-surface border border-line rounded-2xl p-3">
-            <h2 className="font-bold text-[17px] mb-2">ספרייה משפחתית: סנכרון ו-AI</h2>
-            <CloudPanel />
+            <h2 className="font-bold text-[17px] mb-2">סנכרון</h2>
+            <SyncPanel />
           </section>
 
           <section className="bg-surface border border-line rounded-2xl p-3">
@@ -3119,11 +3052,7 @@
             ) : (
               <Btn variant="ghost" className="w-full" onClick={() => setAdding(true)}><Icon name="UserPlus" size={20} />הוספת משתמש</Btn>
             )}
-            <details className="mt-6 bg-surface border border-line rounded-2xl p-3">
-              <summary className="font-bold text-[15px] cursor-pointer min-h-[32px] flex items-center gap-1.5"><Icon name="Cloud" size={18} />{loadCloud() ? 'הספרייה המשפחתית מחוברת' : 'יש כבר ספרייה משפחתית? חיבור הטלפון'}</summary>
-              <div className="mt-2"><CloudPanel compact /></div>
-            </details>
-            <p className="text-[13px] text-muted mt-4">{loadCloud() ? 'המשתמשים והספרים מסתנכרנים בין כל הטלפונים המחוברים.' : 'בלי חיבור, הנתונים נשמרים רק במכשיר הזה.'}</p>
+            <p className="text-[13px] text-muted mt-6">{loadCloud() ? 'המשתמשים והספרים מסתנכרנים בין כל הטלפונים.' : 'הנתונים נשמרים במכשיר הזה.'}</p>
           </main>
         </div>
       );
@@ -3131,7 +3060,6 @@
 
     function Root() {
       const [state, setState] = useState(loadProfiles);
-      const [joinMsg, setJoinMsg] = useState(null);
       const change = (fn) => setState(prev => { const next = fn(prev); saveProfiles(next); scheduleSync(800); return next; });
       const active = state.profiles.find(p => p.id === state.active);
       useEffect(() => {
@@ -3141,15 +3069,7 @@
         window.addEventListener('storage', onStorage);
         window.addEventListener('vrt-profiles-changed', onProfiles);
         document.addEventListener('visibilitychange', onVisible);
-        const join = readJoinHash();
-        if (join) {
-          try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* */ }
-          setJoinMsg({ tone: 'info', text: 'מחבר את הטלפון לספרייה המשפחתית…' });
-          connectCloud(join.url, join.code)
-            .then(() => setJoinMsg({ tone: 'ok', text: 'הטלפון חובר לספרייה המשפחתית. הכול מסתנכרן אוטומטית.' }))
-            .catch((e) => setJoinMsg({ tone: 'error', text: e.message === 'bad_code' ? 'קישור ההצטרפות לא תקין (הקוד השתנה?). בקשו קישור חדש.' : 'לא הצלחנו להתחבר לשרת המשפחתי. נסו לפתוח את הקישור שוב.' }))
-            .finally(() => setTimeout(() => setJoinMsg(null), 6000));
-        } else syncNow();
+        ensureJoined().catch(() => {}).finally(() => syncNow());
         const iv = setInterval(() => { if (document.visibilityState === 'visible') syncNow(); }, 45000);
         return () => {
           window.removeEventListener('storage', onStorage); window.removeEventListener('vrt-profiles-changed', onProfiles);
@@ -3157,34 +3077,29 @@
         };
       }, []);
 
-      const banner = joinMsg && (
-        <div className="fixed top-0 inset-x-0 z-50 px-4 flex justify-center" style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 8px)' }}>
-          <div className="max-w-md w-full shadow-lg rounded-xl"><Notice tone={joinMsg.tone}>{joinMsg.text}</Notice></div>
-        </div>
-      );
       if (!active) {
-        return <>{banner}<WhoAreYou profiles={state.profiles}
+        return <WhoAreYou profiles={state.profiles}
           onPick={(id) => change(s => ({ ...s, active: id }))}
           onCreate={(name) => change(s => {
             const id = s.profiles.some(p => p.id === 'default') || loadCloud() ? uid() : 'default';
             const used = new Set(s.profiles.map(p => p.color));
             const color = [...AVATAR_COLORS.keys()].find(i => !used.has(i)) ?? s.profiles.length;
             return { ...s, profiles: [...s.profiles, { id, name, color, createdAt: Date.now(), updatedAt: Date.now() }], active: id };
-          })} /></>;
+          })} />;
       }
 
       ACTIVE.id = active.id;
       ACTIVE.name = active.name;
       ACTIVE.dbKey = dbKeyFor(active.id);
       ACTIVE.queueKey = queueKeyFor(active.id);
-      return <>{banner}<App key={active.id} profile={active}
+      return <App key={active.id} profile={active}
         onSwitch={() => { try { sessionStorage.removeItem('vrt_tab'); } catch (e) { /* */ } change(s => ({ ...s, active: null })); }}
         onRenameProfile={(name) => change(s => ({ ...s, profiles: s.profiles.map(p => p.id === active.id ? { ...p, name, updatedAt: Date.now() } : p) }))}
         onDeleteProfile={() => {
           try { localStorage.removeItem(dbKeyFor(active.id)); localStorage.removeItem(queueKeyFor(active.id)); } catch (e) { /* */ }
           idbDelete(dbKeyFor(active.id)).catch(() => {});
           change(s => ({ ...s, profiles: s.profiles.filter(p => p.id !== active.id), deleted: { ...(s.deleted || {}), [active.id]: Date.now() }, active: null }));
-        }} /></>;
+        }} />;
     }
 
     ReactDOM.createRoot(document.getElementById('root')).render(<Root />);

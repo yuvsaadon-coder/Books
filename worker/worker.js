@@ -4,7 +4,6 @@
 //
 // הגדרות נדרשות ב-Cloudflare (ראו README.md בתיקייה הזו):
 //   Secret   ANTHROPIC_API_KEY  מפתח ה-API של Anthropic
-//   Secret   FAMILY_CODE        קוד הספרייה המשפחתית (כל מי שמזין אותו מקבל גישה)
 //   KV       LIBRARY            מאגר KV לשמירת הספרייה
 
 const ALLOWED_ORIGINS = ['https://yuvsaadon-coder.github.io'];
@@ -110,9 +109,7 @@ export default {
   async fetch(req, env) {
     const cors = corsHeaders(req);
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    let code = '';
-    try { code = decodeURIComponent(req.headers.get('x-family-code') || ''); } catch (e) { code = ''; }
-    if (!env.FAMILY_CODE || code !== env.FAMILY_CODE.trim()) return json({ type: 'error', error: { type: 'bad_family_code', message: 'wrong family code' } }, 401, cors);
+    // אין קוד גישה: השרת פתוח לאפליקציה. ההוצאה מוגבלת ע"י DAILY_AI_LIMIT ותקרת ההוצאה בחשבון Anthropic.
     const path = new URL(req.url).pathname;
     try {
       if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY }, 200, cors);
