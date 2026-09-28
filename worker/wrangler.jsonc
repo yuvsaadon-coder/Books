@@ -1,0 +1,12 @@
+// הגדרות הפרסום של השרת המשפחתי (Cloudflare Workers Builds מפרסם לפי הקובץ הזה)
+// בהגדרות הבנייה ב-Cloudflare: Root directory = worker
+// הסודות ANTHROPIC_API_KEY ו-FAMILY_CODE מוגדרים רק ב-Cloudflare, לא כאן.
+{
+  "name": "books",
+  "main": "worker.js",
+  "compatibility_date": "2025-09-01",
+  "observability": { "enabled": true },
+  "kv_namespaces": [
+    { "binding": "LIBRARY", "id": "b622c3fe36394ceaa0b02718aaf676b3" }
+  ]
+}
