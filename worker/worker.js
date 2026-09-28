@@ -112,7 +112,8 @@ export default {
     // אין קוד גישה: השרת פתוח לאפליקציה. ההוצאה מוגבלת ע"י DAILY_AI_LIMIT ותקרת ההוצאה בחשבון Anthropic.
     const path = new URL(req.url).pathname;
     try {
-      if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY }, 200, cors);
+      // בדיקה: מחזיר רק את שמות המשתנים שהשרת רואה, בלי ערכים
+      if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY, env: Object.keys(env) }, 200, cors);
       if (path === '/sync') return await handleSync(req, env, cors);
       if (path.startsWith('/v1/messages') && req.method === 'POST') return await handleAI(req, env, cors);
       return json({ error: 'not_found' }, 404, cors);
