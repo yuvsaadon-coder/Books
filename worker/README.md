@@ -32,11 +32,15 @@
 
 ## 4. סודות
 
+> **שימו לב:** אפשר להגדיר את הסודות גם ב-**Settings ← Build ← Variables and secrets**. שלב הבנייה (`worker/sync-secrets.sh`) מעביר אותם אוטומטית לשרת בכל פרסום.
+
+
 ב-Worker: **Settings ← Variables and Secrets ← Add.** מוסיפים משתנה מסוג **Secret**:
 
 | שם | ערך |
 |---|---|
 | `ANTHROPIC_API_KEY` | המפתח משלב 1 |
+| `GOOGLE_BOOKS_KEY` | (רשות, מומלץ) מפתח Google Books. החיפוש של כל הטלפונים עובר דרך השרת עם המפתח ועם מטמון, ולכן התוצאות מלאות, גם בעברית. |
 
 שומרים ולוחצים **Deploy**.
 

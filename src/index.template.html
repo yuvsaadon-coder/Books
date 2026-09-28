@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#1E5B4A">
+  <title>מנהל קריאה ומנוע המלצות חכם</title>
+  <meta name="description" content="ספרייה אישית מאומתת, דירוגים והמלצות קריאה חכמות">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="icons/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="הספרים שלי">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Assistant:wght@400;500;600;700&family=Frank+Ruhl+Libre:wght@500;700;900&display=swap">
+  <!-- נבנה מראש: Tailwind + קוד האפליקציה (tools/build.mjs) -->
+  <!-- React, ReactDOM -->
+  <script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <!-- Lucide Icons (Vanilla / CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.469.0/dist/umd/lucide.min.js"></script>
+  <style>
+    :root {
+      --bg: #EDF1EF; --surface: #FFFFFF; --surface-2: #E2E8E5; --ink: #14201B; --muted: #56675F;
+      --line: #D0D9D4; --accent: #1E5B4A; --accent-ink: #FFFFFF; --accent-soft: #D3E6DE;
+      --brass: #A9771F; --danger: #B3261E; --ok: #2A7A4B; --warn: #9A6A00;
+      color-scheme: light;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #0D1311; --surface: #141C19; --surface-2: #1B2521; --ink: #E5ECE8; --muted: #93A39C;
+        --line: #283530; --accent: #62B89A; --accent-ink: #08130F; --accent-soft: #1B372D;
+        --brass: #E2B658; --danger: #F08A82; --ok: #6DCB93; --warn: #E8C25C;
+        color-scheme: dark;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg: #0D1311; --surface: #141C19; --surface-2: #1B2521; --ink: #E5ECE8; --muted: #93A39C;
+      --line: #283530; --accent: #62B89A; --accent-ink: #08130F; --accent-soft: #1B372D;
+      --brass: #E2B658; --danger: #F08A82; --ok: #6DCB93; --warn: #E8C25C;
+      color-scheme: dark;
+    }
+    html, body { background: var(--bg); color: var(--ink); }
+    body { margin: 0; font-family: Assistant, "Segoe UI", Arial, sans-serif; -webkit-tap-highlight-color: transparent; }
+    h1, h2, h3 { text-wrap: balance; }
+    .tabular { font-variant-numeric: tabular-nums; }
+    .grid > *, main { min-width: 0; }
+    html, body { overflow-x: hidden; }
+    .safe-bottom { padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 6px); }
+    .safe-top { padding-top: env(safe-area-inset-top, 0px); }
+    .clamp-3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    .clamp-4 { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+    .clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .fade-in { animation: fadeIn .22s ease-out both; }
+    .sheet-in { animation: sheetIn .26s cubic-bezier(.2,.8,.2,1) both; }
+    @keyframes fadeIn { from { opacity: .0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    @keyframes sheetIn { from { transform: translateY(40px); opacity: .4; } to { transform: none; opacity: 1; } }
+    .spin { animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .fade-in, .sheet-in, .spin { animation: none; } }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    input, textarea, select, button { font: inherit; color: inherit; }
+    .boot { display: grid; place-items: center; min-height: 100vh; color: var(--muted); font-size: 16px; padding-inline: 16px; text-align: center; }
+  </style>
+  <style>/*__TAILWIND__*/</style>
+</head>
+<body>
+  <div id="root"><div class="boot">טוען את מנהל הקריאה…</div></div>
+  <script>
+    // אירוע ההתקנה עלול להגיע לפני ש-React נטען, לכן תופסים אותו כאן
+    window.__installPrompt = null;
+    window.addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); window.__installPrompt = e; window.dispatchEvent(new Event('vrt-install-ready')); });
+    window.addEventListener('appinstalled', function () { window.__installPrompt = null; window.dispatchEvent(new Event('vrt-install-ready')); });
+    if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+      window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function () {}); });
+    }
+  </script>
+  <script>/*__APP__*/</script>
+  <noscript>האפליקציה דורשת JavaScript.</noscript>
+</body>
+</html>

@@ -1,0 +1,20 @@
+name: בדיקות
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: index.html נבנה מהגרסה העדכנית של src/
+        run: npm run build && git diff --exit-code index.html
+      - run: npm --prefix tests ci
+      - run: npx --prefix tests playwright install --with-deps chromium
+      - run: npm test
+      - name: תחביר השרת
+        run: node --check worker/worker.js

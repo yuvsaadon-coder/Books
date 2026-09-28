@@ -1,11 +1,16 @@
 #!/bin/sh
-# רץ בזמן הבנייה ב-Cloudflare (Workers Builds). מפתח שהוגדר כ-Build secret זמין רק בזמן הבנייה,
-# לכן מעבירים אותו כאן לסוד של השרת עצמו. הערך לא מודפס ללוג. אם אין מפתח, לא עושים כלום.
-if [ -n "$ANTHROPIC_API_KEY" ]; then
-  printf '%s' "$ANTHROPIC_API_KEY" | npx wrangler secret put ANTHROPIC_API_KEY --name books >/dev/null 2>&1 \
-    && echo "ANTHROPIC_API_KEY copied to the worker's runtime secrets" \
-    || echo "Could not copy ANTHROPIC_API_KEY (continuing)"
-else
-  echo "No ANTHROPIC_API_KEY build variable; skipping"
-fi
+# רץ בזמן הבנייה ב-Cloudflare (Workers Builds). סודות שהוגדרו כ-Build secrets זמינים רק בזמן הבנייה,
+# לכן מעבירים אותם כאן לסודות של השרת עצמו. הערכים לא מודפסים ללוג. סוד שלא הוגדר מדולג.
+copy() {
+  name="$1"; value="$2"
+  if [ -n "$value" ]; then
+    printf '%s' "$value" | npx wrangler secret put "$name" --name books >/dev/null 2>&1 \
+      && echo "$name copied to the worker's runtime secrets" \
+      || echo "Could not copy $name (continuing)"
+  else
+    echo "No $name build variable; skipping"
+  fi
+}
+copy ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
+copy GOOGLE_BOOKS_KEY "$GOOGLE_BOOKS_KEY"
 exit 0

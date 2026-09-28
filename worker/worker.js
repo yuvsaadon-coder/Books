@@ -4,6 +4,7 @@
 //
 // הגדרות נדרשות ב-Cloudflare (ראו README.md בתיקייה הזו):
 //   Secret   ANTHROPIC_API_KEY  מפתח ה-API של Anthropic
+//   Secret   GOOGLE_BOOKS_KEY   (רשות) מפתח Google Books לחיפוש מלא בעברית
 //   KV       LIBRARY            מאגר KV לשמירת הספרייה
 
 const ALLOWED_ORIGINS = ['https://yuvsaadon-coder.github.io'];
@@ -84,6 +85,26 @@ async function handleAI(req, env, cors) {
   return new Response(upstream.body, { status: upstream.status, headers: { ...cors, 'content-type': upstream.headers.get('content-type') || 'application/json' } });
 }
 
+// Google Books דרך השרת: מוסיף את המפתח (שמור בשרת) ושומר תוצאות במטמון ל-12 שעות,
+// כדי שכל הטלפונים יקבלו תוצאות מלאות בלי מפתח משלהם ובלי לבזבז מכסה
+const GOOGLE_REFERER = 'https://yuvsaadon-coder.github.io/';
+async function handleGoogleBooks(req, env, cors, ctx) {
+  const target = new URL(req.url).searchParams.get('u') || '';
+  let u;
+  try { u = new URL(target); } catch (e) { return json({ error: 'bad_url' }, 400, cors); }
+  if (u.origin !== 'https://www.googleapis.com' || !u.pathname.startsWith('/books/v1/volumes')) return json({ error: 'not_allowed' }, 400, cors);
+  u.searchParams.delete('key');
+  const cacheKey = new Request('https://gbooks-cache/' + encodeURIComponent(u.toString()));
+  const cache = caches.default;
+  const hit = await cache.match(cacheKey);
+  if (hit) return new Response(hit.body, { status: 200, headers: { ...cors, 'content-type': 'application/json', 'x-cache': 'hit' } });
+  if (env.GOOGLE_BOOKS_KEY) u.searchParams.set('key', env.GOOGLE_BOOKS_KEY);
+  const up = await fetch(u.toString(), { headers: { Referer: GOOGLE_REFERER } });
+  const body = await up.text();
+  if (up.ok) ctx.waitUntil(cache.put(cacheKey, new Response(body, { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=43200' } })));
+  return new Response(body, { status: up.status, headers: { ...cors, 'content-type': 'application/json' } });
+}
+
 async function handleSync(req, env, cors) {
   if (req.method === 'GET') {
     const cur = await env.LIBRARY.get('state', 'json');
@@ -106,14 +127,14 @@ async function handleSync(req, env, cors) {
 }
 
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     const cors = corsHeaders(req);
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
     // אין קוד גישה: השרת פתוח לאפליקציה. ההוצאה מוגבלת ע"י DAILY_AI_LIMIT ותקרת ההוצאה בחשבון Anthropic.
     const path = new URL(req.url).pathname;
     try {
-      // בדיקה: מחזיר רק את שמות המשתנים שהשרת רואה, בלי ערכים
-      if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY, env: Object.keys(env) }, 200, cors);
+      if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY, gbooks: !!env.GOOGLE_BOOKS_KEY }, 200, cors);
+      if (path === '/gbooks' && req.method === 'GET') return await handleGoogleBooks(req, env, cors, ctx);
       if (path === '/sync') return await handleSync(req, env, cors);
       if (path.startsWith('/v1/messages') && req.method === 'POST') return await handleAI(req, env, cors);
       return json({ error: 'not_found' }, 404, cors);

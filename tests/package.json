@@ -1,0 +1,14 @@
+{
+  "name": "books-tests",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node e2e.mjs" },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "0.129.0",
+    "esbuild": "0.25.10",
+    "lucide": "0.469.0",
+    "playwright": "1.55.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  }
+}

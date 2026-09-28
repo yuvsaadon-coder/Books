@@ -2,9 +2,12 @@
 
 אפליקציית ווב בקובץ אחד (`index.html`) לניהול ספרים שקראתם ולקבלת המלצות. כל ספר, בספרייה ובהמלצות, נבדק מול Google Books או Open Library לפני שהוא מוצג.
 
-## הרצה
-- **GitHub Pages:** Settings → Pages → Deploy from branch, ואז לפתוח את הכתובת בטלפון.
-- **מקומית:** לפתוח את `index.html` בדפדפן. לא צריך התקנה, שרת או מפתח API.
+## מבנה ופיתוח
+- `src/app.jsx`: קוד האפליקציה (React). `src/index.template.html`: שלד הדף.
+- `index.html` נבנה מהם (`npm install && npm run build`): ה-JSX וה-CSS של Tailwind מתורגמים מראש, כך שהטלפון לא מוריד Babel ו-Tailwind בכל פתיחה. אין לערוך אותו ידנית.
+- `worker/`: השרת המשפחתי ב-Cloudflare (סנכרון, Claude, Google Books עם מפתח ומטמון). Cloudflare מפרסם אותו אוטומטית בכל דחיפה לענף.
+- `tests/e2e.mjs`: בדיקות קצה-לקצה בדפדפן עם רשת מדומה (`npm test`). הן רצות אוטומטית ב-GitHub Actions בכל דחיפה.
+- האפליקציה מתפרסמת ב-GitHub Pages: https://yuvsaadon-coder.github.io/Books/
 
 > צריך לפתוח את הקובץ בדפדפן רגיל. ארגז החול של Claude Artifacts חוסם קריאות רשת ל-`googleapis.com` ול-`openlibrary.org`, ולכן חיפוש ספרים לא יעבוד שם.
 
