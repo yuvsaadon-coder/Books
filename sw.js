@@ -2,9 +2,10 @@
 // דף האפליקציה: קודם מהרשת (כדי לקבל עדכונים), ואם אין רשת – מהמטמון.
 // ספריות מ-CDN, אייקונים ו-manifest: מהמטמון, עם רענון ברקע.
 // קריאות ל-API (Google Books, Open Library, Wikidata, השרת המשפחתי) לא נשמרות במטמון.
-const CACHE = 'books-app-v6';
-const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/favicon.svg', './icons/icon-192.png', './icons/icon-512.png'];
-const STATIC_HOSTS = ['cdn.jsdelivr.net', 'cdn.tailwindcss.com', 'fonts.googleapis.com', 'fonts.gstatic.com'];
+const CACHE = 'books-app-v7';
+const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/favicon.svg', './icons/icon-192.png', './icons/icon-512.png',
+  './fonts/frank-ruhl-libre-hebrew-400-normal.woff2', './fonts/assistant-hebrew-400-normal.woff2', './fonts/assistant-hebrew-600-normal.woff2'];
+const STATIC_HOSTS = ['cdn.jsdelivr.net'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

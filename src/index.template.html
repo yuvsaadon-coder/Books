@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#1E5B4A">
+  <meta name="theme-color" content="#56694F">
   <title>מנהל קריאה ומנוע המלצות חכם</title>
   <meta name="description" content="ספרייה אישית מאומתת, דירוגים והמלצות קריאה חכמות">
   <link rel="manifest" href="manifest.webmanifest">
@@ -14,9 +14,8 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="הספרים שלי">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Assistant:wght@400;500;600;700&family=Frank+Ruhl+Libre:wght@500;700;900&display=swap">
+  <link rel="preload" href="fonts/frank-ruhl-libre-hebrew-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/assistant-hebrew-400-normal.woff2" as="font" type="font/woff2" crossorigin>
   <!-- נבנה מראש: Tailwind + קוד האפליקציה (tools/build.mjs) -->
   <!-- React, ReactDOM -->
   <script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
@@ -25,27 +24,29 @@
   <script src="https://cdn.jsdelivr.net/npm/lucide@0.469.0/dist/umd/lucide.min.js"></script>
   <style>
     :root {
-      --bg: #EDF1EF; --surface: #FFFFFF; --surface-2: #E2E8E5; --ink: #14201B; --muted: #56675F;
-      --line: #D0D9D4; --accent: #1E5B4A; --accent-ink: #FFFFFF; --accent-soft: #D3E6DE;
-      --brass: #A9771F; --danger: #B3261E; --ok: #2A7A4B; --warn: #9A6A00;
+      --bg: #F5F1EA; --surface: #FFFDF9; --surface-2: #EEE8DE; --ink: #2E2925; --muted: #7B7168;
+      --line: #E4DCCF; --accent: #56694F; --accent-ink: #FFFDF9; --accent-soft: #E7EADF;
+      --brass: #B08A4E; --danger: #A5574B; --ok: #5A7A55; --warn: #957437;
       color-scheme: light;
     }
     @media (prefers-color-scheme: dark) {
       :root:not([data-theme="light"]) {
-        --bg: #0D1311; --surface: #141C19; --surface-2: #1B2521; --ink: #E5ECE8; --muted: #93A39C;
-        --line: #283530; --accent: #62B89A; --accent-ink: #08130F; --accent-soft: #1B372D;
-        --brass: #E2B658; --danger: #F08A82; --ok: #6DCB93; --warn: #E8C25C;
+        --bg: #1B1815; --surface: #231F1B; --surface-2: #2B2622; --ink: #EAE3D8; --muted: #A59A8D;
+        --line: #37302A; --accent: #A3B498; --accent-ink: #1B1815; --accent-soft: #2E3429;
+        --brass: #CFB07A; --danger: #D38D80; --ok: #9FBB97; --warn: #D5B775;
         color-scheme: dark;
       }
     }
     :root[data-theme="dark"] {
-      --bg: #0D1311; --surface: #141C19; --surface-2: #1B2521; --ink: #E5ECE8; --muted: #93A39C;
-      --line: #283530; --accent: #62B89A; --accent-ink: #08130F; --accent-soft: #1B372D;
-      --brass: #E2B658; --danger: #F08A82; --ok: #6DCB93; --warn: #E8C25C;
+      --bg: #1B1815; --surface: #231F1B; --surface-2: #2B2622; --ink: #EAE3D8; --muted: #A59A8D;
+      --line: #37302A; --accent: #A3B498; --accent-ink: #1B1815; --accent-soft: #2E3429;
+      --brass: #CFB07A; --danger: #D38D80; --ok: #9FBB97; --warn: #D5B775;
       color-scheme: dark;
     }
     html, body { background: var(--bg); color: var(--ink); }
-    body { margin: 0; font-family: Assistant, "Segoe UI", Arial, sans-serif; -webkit-tap-highlight-color: transparent; }
+    body { margin: 0; font-family: Assistant, "Segoe UI", Arial, sans-serif; font-size: 16px; line-height: 1.55; -webkit-tap-highlight-color: transparent; -webkit-font-smoothing: antialiased; }
+    /* טקסט לקריאה: תקצירים, הערות, שיחה */
+    .font-reading { font-family: "Frank Ruhl Libre", "David Libre", Georgia, serif; font-size: 16.5px; line-height: 1.75; }
     h1, h2, h3 { text-wrap: balance; }
     .tabular { font-variant-numeric: tabular-nums; }
     .grid > *, main { min-width: 0; }
@@ -55,10 +56,10 @@
     .clamp-3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
     .clamp-4 { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
     .clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-    .fade-in { animation: fadeIn .22s ease-out both; }
+    .fade-in { animation: fadeIn .18s ease-out both; }
     .sheet-in { animation: sheetIn .26s cubic-bezier(.2,.8,.2,1) both; }
-    @keyframes fadeIn { from { opacity: .0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-    @keyframes sheetIn { from { transform: translateY(40px); opacity: .4; } to { transform: none; opacity: 1; } }
+    @keyframes fadeIn { from { opacity: .0; } to { opacity: 1; } }
+    @keyframes sheetIn { from { transform: translateY(16px); opacity: .6; } to { transform: none; opacity: 1; } }
     .spin { animation: spin 1s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
     @media (prefers-reduced-motion: reduce) { .fade-in, .sheet-in, .spin { animation: none; } }

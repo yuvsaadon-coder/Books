@@ -123,7 +123,9 @@ try {
   });
   await step('a deletion on one phone reaches the other', async () => {
     await B.click('main li:has-text("יובל")');
-    await B.click('main ul li button >> nth=0'); await B.click('text=מחיקה'); await B.click('text=לחצו שוב למחיקה');
+    await B.click('main ul li button >> nth=0'); await B.waitForTimeout(400);
+    const del = B.locator('[role=dialog] button:has-text("מחיקה")'); await del.scrollIntoViewIfNeeded(); await del.click();
+    await B.locator('[role=dialog] button:has-text("לחצו שוב למחיקה")').click();
     await A.click('main li:has-text("יובל")'); await syncBoth(); await B.click('nav >> text=ספרים שלי'); await A.click('nav >> text=ספרים שלי');
     await A.waitForSelector('text=הספרייה שלך מחכה לספר הראשון');
   });

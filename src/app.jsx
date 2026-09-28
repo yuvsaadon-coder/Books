@@ -1415,7 +1415,7 @@ function Cover({ book, className = 'w-16 h-24' }) {
   const [err, setErr] = useState(false);
   if (!book.cover || err) {
     return (
-      <div className={className + ' shrink-0 rounded-md bg-accentSoft text-accent grid place-items-center font-display font-bold text-xl border border-line'} aria-hidden="true">
+      <div className={className + ' shrink-0 rounded-md bg-accentSoft text-accent grid place-items-center font-display font-medium text-xl border border-line'} aria-hidden="true">
         {(book.title || '?').trim().charAt(0)}
       </div>
     );
@@ -1437,7 +1437,7 @@ function SourceBadge({ book }) {
 function Chip({ active, onClick, children, className = '' }) {
   return (
     <button type="button" onClick={onClick} aria-pressed={!!active}
-      className={`min-h-[40px] px-3.5 rounded-full border text-[15px] font-semibold transition-colors ${active ? 'bg-accent text-accentInk border-accent' : 'bg-surface text-ink border-line hover:border-accent'} ${className}`}>
+      className={`min-h-[40px] px-3.5 rounded-full border text-[15px] font-medium transition-colors ${active ? 'bg-accentSoft text-accent border-accent' : 'bg-surface text-ink border-line hover:border-accent'} ${className}`}>
       {children}
     </button>
   );
@@ -1452,7 +1452,7 @@ function Btn({ variant = 'primary', className = '', children, ...rest }) {
   }[variant];
   return (
     <button type="button" {...rest}
-      className={`min-h-[48px] px-4 rounded-xl border font-bold text-[16px] inline-flex items-center justify-center gap-2 transition active:scale-[.98] disabled:opacity-40 disabled:active:scale-100 ${styles} ${className}`}>
+      className={`min-h-[48px] px-4 rounded-xl border font-semibold text-[16px] inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-40 disabled:active:scale-100 ${styles} ${className}`}>
       {children}
     </button>
   );
@@ -1474,7 +1474,7 @@ function Toast({ toast }) {
   if (!toast) return null;
   return (
     <div className="fixed inset-x-0 z-50 flex justify-center px-4 pointer-events-none" style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 84px)' }}>
-      <div className="fade-in pointer-events-auto bg-ink text-bg px-4 py-3 rounded-xl shadow-lg text-[15px] font-semibold max-w-md" role="status">{toast}</div>
+      <div className="fade-in pointer-events-auto bg-ink text-bg px-4 py-3 rounded-xl shadow-md text-[15px] font-semibold max-w-md" role="status">{toast}</div>
     </div>
   );
 }
@@ -1489,18 +1489,19 @@ function Sheet({ open, onClose, title, children }) {
     return () => { document.removeEventListener('keydown', onKey); document.body.style.overflow = prev; };
   }, [open]);
   if (!open) return null;
-  return (
+  // בפורטל ל-body: כך הגיליון תמיד מעל סרגל הניווט, גם כשהלשונית שמתחתיו באנימציה
+  return ReactDOM.createPortal((
     <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center" role="dialog" aria-modal="true" aria-label={title}>
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="sheet-in relative w-full sm:max-w-lg max-h-[92vh] overflow-y-auto bg-surface rounded-t-3xl sm:rounded-3xl border border-line shadow-2xl">
+      <div className="sheet-in relative w-full sm:max-w-lg max-h-[92vh] overflow-y-auto bg-surface rounded-t-3xl sm:rounded-2xl border border-line shadow-md">
         <div className="sticky top-0 bg-surface flex items-center justify-between px-4 pt-3 pb-2 border-b border-line z-10">
-          <h2 className="font-display font-bold text-[20px]">{title}</h2>
+          <h2 className="font-display font-medium text-[20px]">{title}</h2>
           <button type="button" onClick={onClose} aria-label="סגירה" className="w-11 h-11 grid place-items-center rounded-full hover:bg-surface2"><Icon name="X" size={22} /></button>
         </div>
         <div className="px-4 pt-3 safe-bottom pb-5">{children}</div>
       </div>
     </div>
-  );
+  ), document.body);
 }
 
 /* ============================================================
@@ -1531,20 +1532,20 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose }) {
       <div className="flex gap-3 items-start mb-4">
         <Cover book={book} className="w-14 h-20" />
         <div className="min-w-0">
-          <div className="font-display font-bold text-[18px] leading-tight">{book.title}</div>
+          <div className="font-display font-medium text-[18px] leading-tight">{book.title}</div>
           <div className="text-muted text-[14px]">{(book.authors || []).join(', ')}{book.year ? ` · ${book.year}` : ''}</div>
           <div className="mt-1"><SourceBadge book={book} /></div>
         </div>
       </div>
       <fieldset className="mb-4">
-        <legend className="text-[13px] font-bold tracking-wide text-muted mb-1">דירוג (חובה)</legend>
+        <legend className="text-[13px] font-semibold tracking-wide text-muted mb-1">דירוג (חובה)</legend>
         <div className="flex items-center gap-3 flex-wrap">
           <Stars value={rating} onChange={setRating} size={28} label="דירוג הספר" />
           <span className="text-[15px] font-semibold text-muted min-h-[1.5em]">{ratingText}</span>
         </div>
       </fieldset>
       <fieldset className="mb-4">
-        <legend className="text-[13px] font-bold tracking-wide text-muted mb-2">תגיות</legend>
+        <legend className="text-[13px] font-semibold tracking-wide text-muted mb-2">תגיות</legend>
         <div className="flex flex-wrap gap-2 mb-3">
           {suggested.map(t => <Chip key={t} active={tags.includes(t)} onClick={() => toggle(t)}>{t}</Chip>)}
           {tags.filter(t => !suggested.includes(t)).map(t => <Chip key={t} active onClick={() => toggle(t)}>{t}</Chip>)}
@@ -1557,7 +1558,7 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose }) {
         </form>
       </fieldset>
       <div className="mb-4">
-        <label htmlFor="book-note" className="block text-[13px] font-bold tracking-wide text-muted mb-1.5">מה חשבת על הספר? (רשות)</label>
+        <label htmlFor="book-note" className="block text-[13px] font-semibold tracking-wide text-muted mb-1.5">מה חשבת על הספר? (רשות)</label>
         <textarea id="book-note" value={note} onChange={e => setNote(e.target.value)} rows={3} maxLength={4000}
           placeholder="מה אהבת, מה פחות, למי היית ממליץ… ההמלצות החכמות משתמשות בזה."
           className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px] leading-relaxed" />
@@ -1620,12 +1621,12 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd }) {
   if (!books.length) {
     return (
       <div className="fade-in pt-6">
-        <h1 className="font-display font-black text-[30px] leading-tight mb-2">הספרייה שלך מחכה לספר הראשון</h1>
+        <h1 className="font-display font-medium text-[26px] leading-snug mb-2">הספרייה שלך מחכה לספר הראשון</h1>
         <p className="text-muted text-[16px] mb-5 max-w-prose">כל ספר נכנס לכאן רק אחרי שאומת מול Google Books או Open Library: כריכה, מחבר ותקציר אמיתיים. אחרי כמה ספרים מדורגים, מנוע ההמלצות יתחיל לעבוד בשבילך.</p>
         <ol className="grid gap-3 mb-6 text-[15px]">
           {['מקלידים שם ספר בעברית או באנגלית, ISBN או קישור', 'בוחרים את הספר הנכון ולוחצים "זה הספר שלי"', 'מדרגים 1–5 כוכבים ומוסיפים תגיות', 'בלשונית "גלה ספר חדש" עונים על 4 שאלות ומקבלים המלצות מאומתות'].map((t, i) => (
-            <li key={i} className="flex gap-3 items-start bg-surface border border-line rounded-2xl p-3">
-              <span className="tabular w-7 h-7 shrink-0 rounded-full bg-accent text-accentInk grid place-items-center font-bold text-[14px]">{i + 1}</span>
+            <li key={i} className="flex gap-3 items-start bg-surface border border-line rounded-xl p-3">
+              <span className="tabular w-7 h-7 shrink-0 rounded-full bg-accentSoft text-accent grid place-items-center font-semibold text-[14px]">{i + 1}</span>
               <span className="pt-0.5">{t}</span>
             </li>
           ))}
@@ -1638,7 +1639,7 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd }) {
   return (
     <div className="fade-in">
       <header className="pt-4 pb-3">
-        <h1 className="font-display font-black text-[30px] leading-tight">הספרים שלי</h1>
+        <h1 className="font-display font-medium text-[26px] leading-snug">הספרים שלי</h1>
         <p className="text-muted text-[15px] tabular">{books.length} ספרים · ממוצע {avg}★ · {loved} אהובים (4★+)</p>
       </header>
       <div className="flex gap-2 mb-3">
@@ -1665,10 +1666,10 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd }) {
         {list.map(b => (
           <li key={b.id}>
             <button type="button" onClick={() => { setOpen(b.id); setConfirmDel(false); }}
-              className="w-full text-right flex gap-3 p-3 bg-surface border border-line rounded-2xl active:bg-surface2 transition-colors">
+              className="w-full text-right flex gap-3 p-3 bg-surface border border-line rounded-xl active:bg-surface2 transition-colors">
               <Cover book={b} className="w-14 h-20" />
               <div className="min-w-0 flex-1">
-                <div className="font-display font-bold text-[17px] leading-snug clamp-2">{b.title}</div>
+                <div className="font-display font-medium text-[17px] leading-snug clamp-2">{b.title}</div>
                 <div className="text-muted text-[14px] truncate">{[b.authors.join(', '), b.publisher, b.year].filter(Boolean).join(' · ')}</div>
                 <div className="mt-1"><Stars value={b.rating} size={15} /></div>
                 {b.tags.length > 0 && <div className="flex flex-wrap gap-1 mt-1.5">{b.tags.slice(0, 4).map(t => <span key={t} className="text-[12px] px-2 py-0.5 rounded-full bg-surface2 text-muted font-semibold">{t}</span>)}{b.tags.length > 4 && <span className="text-[12px] text-muted">+{b.tags.length - 4}</span>}</div>}
@@ -1684,7 +1685,7 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd }) {
           <div className="flex gap-3 items-start mb-3">
             <Cover book={current} className="w-24 h-36" />
             <div className="min-w-0 flex-1">
-              <div className="font-display font-bold text-[20px] leading-tight">{current.title}</div>
+              <div className="font-display font-medium text-[20px] leading-tight">{current.title}</div>
               {current.subtitle && <div className="text-[14px] text-muted">{current.subtitle}</div>}
               <div className="text-[15px] mt-1">{current.authors.join(', ')}</div>
               <div className="text-muted text-[13px] tabular mt-0.5">{metaLine(current)}</div>
@@ -1695,15 +1696,15 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd }) {
           <Synopsis key={current.id} book={current} className="mb-3" onChange={(patch) => onUpdateBook(current.id, patch)} />
           {current.note && (
             <div className="mb-3 rounded-xl bg-surface2 p-2.5">
-              <div className="text-[12px] font-bold text-muted mb-0.5">מה חשבת</div>
-              <p className="text-[15px] leading-relaxed whitespace-pre-line">{current.note}</p>
+              <div className="text-[12px] font-semibold text-muted mb-0.5">מה חשבת</div>
+              <p className="font-reading whitespace-pre-line">{current.note}</p>
             </div>
           )}
           {current.genres && current.genres.length > 0 && <div className="flex flex-wrap gap-1 mb-3">{current.genres.map(g => <span key={g} className="text-[12px] px-2 py-0.5 rounded-full border border-line">{g}</span>)}</div>}
           <AiDetailsButton book={current} onUpdate={(patch) => onUpdateBook(current.id, patch)} />
           <p className="text-muted text-[13px] mb-3">נוסף ב-{fmtDate(current.addedAt)}{current.isbns[0] ? ` · ISBN ${current.isbns[0]}` : ''}</p>
           <div className="mb-3"><FormatInfo book={current} /></div>
-          {current.link && <a href={current.link} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent font-bold mb-4 min-h-[44px]"><Icon name="ExternalLink" size={16} />לרשומה במקור</a>}
+          {current.link && <a href={current.link} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent font-semibold mb-4 min-h-[44px]"><Icon name="ExternalLink" size={16} />לרשומה במקור</a>}
           <div className="grid grid-cols-2 gap-2">
             <Btn variant="soft" onClick={() => { onEdit(current); setOpen(null); }}><Icon name="Pencil" size={18} />עריכה</Btn>
             {!confirmDel
@@ -1728,13 +1729,13 @@ function EditionRow({ ed, main, onPick, disabled }) {
     <li className="flex gap-2.5 items-center py-2 border-b border-line last:border-0">
       <Cover book={ed} className="w-10 h-14" />
       <div className="min-w-0 flex-1 text-[13px] leading-snug">
-        {normTitle(ed.title) !== normTitle(main.title) && <div className="font-bold text-[14px] truncate">{ed.title}</div>}
+        {normTitle(ed.title) !== normTitle(main.title) && <div className="font-semibold text-[14px] truncate">{ed.title}</div>}
         {ed.authors.length > 0 && ed.authors.join(',') !== main.authors.join(',') && <div className="text-muted truncate">{ed.authors.join(', ')}</div>}
         <div className="tabular">{metaLine(ed) || 'פרטי הדפסה לא צוינו'}</div>
         {ed.isbns && ed.isbns[0] && <div className="text-muted tabular" dir="ltr" style={{ textAlign: 'right' }}>ISBN {ed.isbns[0]}</div>}
       </div>
       <button type="button" disabled={disabled} onClick={() => onPick(withWorkInfo(ed, main))}
-        className="shrink-0 min-h-[44px] px-3 rounded-xl border border-accent text-accent font-bold text-[14px] disabled:opacity-40">בחירה</button>
+        className="shrink-0 min-h-[44px] px-3 rounded-xl border border-accent text-accent font-semibold text-[14px] disabled:opacity-40">בחירה</button>
     </li>
   );
 }
@@ -1779,19 +1780,19 @@ function Synopsis({ book, onChange, className = '' }) {
   };
   return (
     <div className={className}>
-      {book.descSource && !he && <div className="text-[12px] font-bold text-muted mb-0.5">תקציר מ{book.descSource}</div>}
-      {he && !showOrig && <div className="text-[12px] font-bold text-muted mb-0.5">תקציר בעברית</div>}
-      <p ref={ref} dir="auto" className={`text-[15px] leading-relaxed whitespace-pre-line ${expanded ? '' : 'clamp-4'}`}>{text}</p>
+      {book.descSource && !he && <div className="text-[12px] font-semibold text-muted mb-0.5">תקציר מ{book.descSource}</div>}
+      {he && !showOrig && <div className="text-[12px] font-semibold text-muted mb-0.5">תקציר בעברית</div>}
+      <p ref={ref} dir="auto" className={`font-reading whitespace-pre-line ${expanded ? '' : 'clamp-4'}`}>{text}</p>
       <div className="flex flex-wrap gap-x-4 gap-y-0">
         {(overflow || expanded || looksCut || book.source === 'google') && (
-          <button type="button" className="text-accent font-bold text-[14px] min-h-[40px]" onClick={expand}>{expanded ? 'פחות' : 'לתקציר המלא'}</button>
+          <button type="button" className="text-accent font-semibold text-[14px] min-h-[40px]" onClick={expand}>{expanded ? 'פחות' : 'לתקציר המלא'}</button>
         )}
         {!hasHebrew(orig) && !he && aiAvailable() && (
-          <button type="button" className="text-accent font-bold text-[14px] min-h-[40px] inline-flex items-center gap-1" disabled={tr.busy} onClick={translate}>
+          <button type="button" className="text-accent font-semibold text-[14px] min-h-[40px] inline-flex items-center gap-1" disabled={tr.busy} onClick={translate}>
             {tr.busy ? <Spinner size={14} /> : <Icon name="Languages" size={15} />}תרגום לעברית
           </button>
         )}
-        {he && <button type="button" className="text-muted font-bold text-[14px] min-h-[40px]" onClick={() => setShowOrig(!showOrig)}>{showOrig ? 'הצגת העברית' : 'הצגת המקור'}</button>}
+        {he && <button type="button" className="text-muted font-semibold text-[14px] min-h-[40px]" onClick={() => setShowOrig(!showOrig)}>{showOrig ? 'הצגת העברית' : 'הצגת המקור'}</button>}
       </div>
       {tr.err && <p className="text-[13px] text-danger">{tr.err}</p>}
     </div>
@@ -1819,11 +1820,11 @@ function CandidateGroup({ group, inLib, onPick }) {
   };
 
   return (
-    <li className="fade-in bg-surface border border-line rounded-2xl p-3">
+    <li className="fade-in bg-surface border border-line rounded-xl p-3">
       <div className="flex gap-3">
         <Cover book={c} className="w-20 h-28" />
         <div className="min-w-0 flex-1">
-          <div className="font-display font-bold text-[18px] leading-snug">{c.title}</div>
+          <div className="font-display font-medium text-[18px] leading-snug">{c.title}</div>
           {c.subtitle && <div className="text-muted text-[13px] clamp-2">{c.subtitle}</div>}
           <div className="text-[15px] mt-0.5">{c.authors.length ? c.authors.join(', ') : <span className="text-warn">מחבר לא צוין במקור</span>}</div>
           <div className="text-muted text-[13px] tabular">{metaLine(c)}</div>
@@ -1834,7 +1835,7 @@ function CandidateGroup({ group, inLib, onPick }) {
       <Synopsis book={c} className="mt-2.5" onChange={(patch) => setExtra(x => ({ ...x, ...patch }))} />
       <div className="flex gap-2 mt-2 items-center">
         {inLib
-          ? <div className="flex-1 min-h-[48px] rounded-xl bg-surface2 text-muted font-bold grid place-items-center text-[15px]">כבר בספרייה ({inLib.rating}★)</div>
+          ? <div className="flex-1 min-h-[48px] rounded-xl bg-surface2 text-muted font-semibold grid place-items-center text-[15px]">כבר בספרייה ({inLib.rating}★)</div>
           : <Btn className="flex-1" disabled={picking} onClick={async () => {
               // שומרים את התקציר המלא: אם עוד לא נשלף, שולפים לפני השמירה
               setPicking(true);
@@ -1847,7 +1848,7 @@ function CandidateGroup({ group, inLib, onPick }) {
       {(googleEds.length > 0 || canLoadOL) && (
         <div className="mt-2 border-t border-line pt-1">
           <button type="button" onClick={toggleEditions} aria-expanded={showEd}
-            className="w-full min-h-[44px] flex items-center justify-between text-accent font-bold text-[15px]">
+            className="w-full min-h-[44px] flex items-center justify-between text-accent font-semibold text-[15px]">
             <span>{googleEds.length ? `מהדורות והדפסות נוספות (${googleEds.length})` : 'מהדורות והדפסות אחרות'}</span>
             <span style={{ transform: showEd ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}><Icon name="ChevronDown" size={20} /></span>
           </button>
@@ -1882,7 +1883,7 @@ function useSmartSearch(onResult) {
 function SmartBox({ st, onRun, prominent }) {
   if (!aiAvailable()) return null;
   return (
-    <div className={`grid gap-1.5 ${prominent ? 'bg-surface border border-accent rounded-2xl p-3' : ''}`}>
+    <div className={`grid gap-1.5 ${prominent ? 'bg-surface border border-accent rounded-xl p-3' : ''}`}>
       {prominent && <p className="text-[14px]">החיפוש הרגיל לא מצא התאמה טובה. Claude יכול לזהות את הספר גם משם חלקי, איות אחר או שם בתרגום, ולאמת אותו מול המאגרים.</p>}
       <Btn variant={prominent ? 'primary' : 'ghost'} disabled={st.busy} onClick={onRun}>{st.busy ? <Spinner /> : <Icon name="Sparkles" size={18} />}{prominent ? 'זיהוי חכם עם AI' : 'לא הספר הנכון? זיהוי חכם עם AI'}</Btn>
       {st.msg && <p className="text-[13px] text-muted">{st.msg}</p>}
@@ -1908,7 +1909,7 @@ function SearchResults({ res, db, onPick, goSettings, smart, onSmart }) {
       {!googleAvailable() && !db.settings.apiKey && (
         <Notice tone="info">
           Google Books חוסם חיפושים בלי מפתח (המכסה המשותפת לכל המשתמשים נגמרת כל יום). מפתח אישי הוא בחינם ומחזיר את הכיסוי המלא לספרים בעברית.
-          <button type="button" onClick={goSettings} className="block mt-1 text-accent font-bold min-h-[40px]">להוספת מפתח חינמי ←</button>
+          <button type="button" onClick={goSettings} className="block mt-1 text-accent font-semibold min-h-[40px]">להוספת מפתח חינמי ←</button>
         </Notice>
       )}
       {res.fromAi && <Notice tone="ok">זוהה בעזרת Claude ואומת מול המאגרים{res.tried && res.tried.length ? `: ${res.tried.slice(0, 3).join(' · ')}` : ''}.</Notice>}
@@ -1921,8 +1922,8 @@ function SearchResults({ res, db, onPick, goSettings, smart, onSmart }) {
       {(groups.length === 0 || weak || partial) && onSmart && <SmartBox st={smart} onRun={onSmart} prominent />}
       {partial && <Notice tone="warn">לא נמצאה התאמה מלאה. בדקו שהספר נכון, או דייקו את השם והמחבר.</Notice>}
       {weak ? (
-        <details className="bg-surface border border-line rounded-2xl p-3">
-          <summary className="font-bold text-[14px] text-muted cursor-pointer min-h-[32px]">תוצאות רחוקות ({groups.length})</summary>
+        <details className="bg-surface border border-line rounded-xl p-3">
+          <summary className="font-semibold text-[14px] text-muted cursor-pointer min-h-[32px]">תוצאות רחוקות ({groups.length})</summary>
           <div className="mt-2">{list}</div>
         </details>
       ) : groups.length > 0 && (
@@ -1966,14 +1967,14 @@ function SingleSearch({ db, onPick, goSettings }) {
           <span className="absolute top-1/2 -translate-y-1/2 right-3 text-muted"><Icon name={mode === 'link' ? 'Link' : mode === 'isbn' ? 'ScanBarcode' : 'Search'} size={20} /></span>
           <input id="book-q" value={text} onChange={e => setText(e.target.value)} autoComplete="off" enterKeyHint="search"
             placeholder="למשל: סיפור על אהבה וחושך / Project Hail Mary"
-            className="w-full min-h-[54px] pr-11 pl-3 rounded-2xl border border-line bg-surface text-[17px]" />
+            className="w-full min-h-[54px] pr-11 pl-3 rounded-xl border border-line bg-surface text-[17px]" />
         </div>
         {mode !== 'text' && <p className="text-[13px] text-accent font-semibold">{mode === 'link' ? 'זוהה קישור: נאמת אותו ישירות מול המקור' : 'זוהה ISBN: נחפש מהדורה מדויקת'}</p>}
         {mode === 'text' && (showAuthor
           ? <><label htmlFor="book-author" className="sr-only">שם המחבר</label>
               <input id="book-author" value={author} onChange={e => setAuthor(e.target.value)} placeholder="שם המחבר (לדיוק החיפוש)"
                 className="w-full min-h-[48px] px-3 rounded-xl border border-line bg-surface text-[16px]" /></>
-          : <button type="button" className="text-accent font-bold text-[14px] text-right min-h-[36px]" onClick={() => setShowAuthor(true)}>+ צמצום לפי מחבר</button>)}
+          : <button type="button" className="text-accent font-semibold text-[14px] text-right min-h-[36px]" onClick={() => setShowAuthor(true)}>+ צמצום לפי מחבר</button>)}
         <Btn type="submit" disabled={!text.trim() || state.loading}>{state.loading ? <><Spinner />מחפש ומאמת…</> : <><Icon name="Search" size={20} />חיפוש</>}</Btn>
       </form>
       {state.error && <Notice tone="error">{state.error}</Notice>}
@@ -2014,7 +2015,7 @@ const Q_STATUS = {
   ready: { label: 'לבחירה', cls: 'bg-accentSoft text-accent' },
   notfound: { label: 'לא נמצא', cls: 'bg-surface2 text-warn' },
   error: { label: 'שגיאה', cls: 'bg-surface2 text-danger' },
-  saved: { label: 'נוסף', cls: 'bg-accent text-accentInk' },
+  saved: { label: 'נוסף', cls: 'bg-accentSoft text-ok' },
   exists: { label: 'כבר קיים', cls: 'bg-surface2 text-ok' },
   skipped: { label: 'דולג', cls: 'bg-surface2 text-muted' }
 };
@@ -2128,7 +2129,7 @@ function BulkImport({ db, onPick, goSettings }) {
         <label htmlFor="bulk-list" className="text-[15px]">הדביקו או הקלידו רשימה, <b>ספר בכל שורה</b>. אפשר להוסיף מחבר אחרי מקף, ואפשר גם ISBN או קישור.</label>
         <textarea id="bulk-list" value={draft} onChange={e => setDraft(e.target.value)} rows={8}
           placeholder={'יער נורווגי - מורקמי\nסיפור על אהבה וחושך\nProject Hail Mary - Andy Weir\n9789650731234'}
-          className="w-full rounded-2xl border border-line bg-surface p-3 text-[16px] leading-relaxed" />
+          className="w-full rounded-xl border border-line bg-surface p-3 text-[16px] leading-relaxed" />
         {parsed.length > 0 && (
           <div className="text-[14px] text-muted">
             זוהו <b className="tabular text-ink">{parsed.length}</b> ספרים{parsed.some(p => p.author) ? `, ${parsed.filter(p => p.author).length} עם מחבר` : ''}.
@@ -2150,10 +2151,10 @@ function BulkImport({ db, onPick, goSettings }) {
 
   return (
     <div className="grid gap-3" ref={topRef}>
-      <div className="bg-surface border border-line rounded-2xl p-3">
+      <div className="bg-surface border border-line rounded-xl p-3">
         <div className="flex items-center justify-between gap-2 mb-2">
-          <div className="font-bold text-[16px] tabular">{doneCount} מתוך {items.length} טופלו · {savedCount} נוספו</div>
-          <button type="button" className="text-muted text-[14px] font-bold min-h-[40px] px-2" onClick={() => { setQueue(null); setResults({}); }}>סגירת הרשימה</button>
+          <div className="font-semibold text-[16px] tabular">{doneCount} מתוך {items.length} טופלו · {savedCount} נוספו</div>
+          <button type="button" className="text-muted text-[14px] font-semibold min-h-[40px] px-2" onClick={() => { setQueue(null); setResults({}); }}>סגירת הרשימה</button>
         </div>
         <div className="h-2 rounded-full bg-surface2 overflow-hidden mb-2" aria-hidden="true">
           <div className="h-full bg-accent transition-all" style={{ width: `${(doneCount / items.length) * 100}%` }} />
@@ -2161,10 +2162,10 @@ function BulkImport({ db, onPick, goSettings }) {
         <div className="grid grid-cols-3 gap-2">
           {[['todo', `לטיפול (${items.length - doneCount})`], ['done', `טופלו (${doneCount})`]].map(([k, l]) => (
             <button key={k} type="button" onClick={() => setListOpen(listOpen === k ? false : k)} aria-expanded={listOpen === k}
-              className={`min-h-[44px] rounded-xl border font-bold text-[14px] ${listOpen === k ? 'border-accent bg-accentSoft text-accent' : 'border-line'}`}>{l}</button>
+              className={`min-h-[44px] rounded-xl border font-semibold text-[14px] ${listOpen === k ? 'border-accent bg-accentSoft text-accent' : 'border-line'}`}>{l}</button>
           ))}
           <button type="button" onClick={() => { setListDraft(items.filter(it => !isDone(it.status)).map(lineOf).join('\n')); setListOpen(false); }}
-            className="min-h-[44px] rounded-xl border border-line font-bold text-[14px] inline-flex items-center justify-center gap-1"><Icon name="Pencil" size={15} />עריכה</button>
+            className="min-h-[44px] rounded-xl border border-line font-semibold text-[14px] inline-flex items-center justify-center gap-1"><Icon name="Pencil" size={15} />עריכה</button>
         </div>
         {aiAvailable() && (bulkSmart.busy || items.some(it => it.status === 'notfound' || it.status === 'error')) && (
           <div className="mt-2 grid gap-1">
@@ -2185,11 +2186,11 @@ function BulkImport({ db, onPick, goSettings }) {
                   <button type="button" onClick={() => { setQueue(q => ({ ...q, current: it.id })); setListOpen(false); }}
                     className={`flex-1 min-w-0 min-h-[44px] flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-right border ${it.id === queue.current ? 'border-accent bg-accentSoft' : 'border-transparent'}`}>
                     <span className="flex-1 min-w-0 text-[14px] font-semibold truncate">{it.savedTitle || it.title}{it.author ? <span className="text-muted font-normal"> · {it.author}</span> : null}</span>
-                    <span className={`shrink-0 text-[11px] font-bold px-2 py-0.5 rounded-full ${Q_STATUS[it.status].cls}`}>{Q_STATUS[it.status].label}</span>
+                    <span className={`shrink-0 text-[11px] font-semibold px-2 py-0.5 rounded-full ${Q_STATUS[it.status].cls}`}>{Q_STATUS[it.status].label}</span>
                   </button>
                   {listOpen === 'done' && it.status !== 'saved' && (
                     <button type="button" onClick={() => { setItem(it.id, { status: 'pending', savedTitle: '' }); setQueue(q => ({ ...q, current: it.id })); setListOpen(false); }}
-                      className="shrink-0 min-h-[40px] px-2 rounded-lg text-accent font-bold text-[13px]">חזרה לטיפול</button>
+                      className="shrink-0 min-h-[40px] px-2 rounded-lg text-accent font-semibold text-[13px]">חזרה לטיפול</button>
                   )}
                 </li>
               ))}
@@ -2199,8 +2200,8 @@ function BulkImport({ db, onPick, goSettings }) {
       </div>
 
       {listDraft !== null && (
-        <div className="fade-in bg-surface border border-accent rounded-2xl p-3 grid gap-2">
-          <label htmlFor="bulk-list-edit" className="font-bold text-[15px]">עריכת הרשימה</label>
+        <div className="fade-in bg-surface border border-accent rounded-xl p-3 grid gap-2">
+          <label htmlFor="bulk-list-edit" className="font-semibold text-[15px]">עריכת הרשימה</label>
           <p className="text-[13px] text-muted">הספרים שממתינים לטיפול, ספר בכל שורה. אפשר לתקן שם, להוסיף מחבר אחרי מקף, להוסיף ספרים או למחוק שורות. ספרים שכבר טופלו לא מושפעים.</p>
           <textarea id="bulk-list-edit" value={listDraft} onChange={e => setListDraft(e.target.value)} rows={Math.min(12, Math.max(4, items.length + 1))}
             className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px] leading-relaxed" />
@@ -2212,8 +2213,8 @@ function BulkImport({ db, onPick, goSettings }) {
       )}
 
       {!cur && (
-        <div className="bg-surface border border-line rounded-2xl p-4 text-center grid gap-3">
-          <div className="font-display font-bold text-[22px]">הרשימה הושלמה</div>
+        <div className="bg-surface border border-line rounded-xl p-4 text-center grid gap-3">
+          <div className="font-display font-medium text-[22px]">הרשימה הושלמה</div>
           <p className="text-muted tabular">{savedCount} ספרים נוספו לספרייה · {items.filter(i => i.status === 'exists').length} כבר היו בה · {items.filter(i => i.status === 'skipped').length} דולגו</p>
           <Btn onClick={() => { setQueue(null); setResults({}); }}>רשימה חדשה</Btn>
         </div>
@@ -2223,17 +2224,17 @@ function BulkImport({ db, onPick, goSettings }) {
         <section className="grid gap-3" aria-live="polite">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
-              <div className="text-[13px] font-bold text-muted tabular">ספר {curIdx + 1} מתוך {items.length}</div>
-              <h2 className="font-display font-bold text-[22px] leading-tight">{cur.title}</h2>
+              <div className="text-[13px] font-semibold text-muted tabular">ספר {curIdx + 1} מתוך {items.length}</div>
+              <h2 className="font-display font-medium text-[22px] leading-tight">{cur.title}</h2>
               {cur.author && <div className="text-muted text-[15px]">{cur.author}</div>}
             </div>
-            <span className={`shrink-0 text-[12px] font-bold px-2 py-1 rounded-full ${Q_STATUS[cur.status].cls}`}>{Q_STATUS[cur.status].label}</span>
+            <span className={`shrink-0 text-[12px] font-semibold px-2 py-1 rounded-full ${Q_STATUS[cur.status].cls}`}>{Q_STATUS[cur.status].label}</span>
           </div>
 
           {cur.status === 'saved' && <Notice tone="ok">נוסף לספרייה: {cur.savedTitle}</Notice>}
 
-          <form className="grid gap-2 bg-surface border border-line rounded-2xl p-3" onSubmit={(e) => { e.preventDefault(); research(cur.id, form.title, form.author); }}>
-            <div className="text-[13px] font-bold text-muted">דיוק החיפוש</div>
+          <form className="grid gap-2 bg-surface border border-line rounded-xl p-3" onSubmit={(e) => { e.preventDefault(); research(cur.id, form.title, form.author); }}>
+            <div className="text-[13px] font-semibold text-muted">דיוק החיפוש</div>
             <label htmlFor="bulk-edit-title" className="sr-only">שם הספר</label>
             <input id="bulk-edit-title" value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="שם הספר, ISBN או קישור"
               className="w-full min-h-[48px] px-3 rounded-xl border border-line bg-bg text-[16px]" />
@@ -2249,7 +2250,7 @@ function BulkImport({ db, onPick, goSettings }) {
           </form>
 
           {(cur.status === 'pending' || cur.status === 'searching') && (
-            <div className="bg-surface border border-line rounded-2xl p-4 text-muted inline-flex items-center gap-2"><Spinner />מחפש ומאמת מול המאגרים…</div>
+            <div className="bg-surface border border-line rounded-xl p-4 text-muted inline-flex items-center gap-2"><Spinner />מחפש ומאמת מול המאגרים…</div>
           )}
           {cur.status === 'error' && <Notice tone="error">החיפוש נכשל (בעיית רשת). לחצו "חיפוש מחדש".</Notice>}
           {res && !isDone(cur.status) && (() => {
@@ -2260,7 +2261,7 @@ function BulkImport({ db, onPick, goSettings }) {
                 {already && (
                   <Notice tone="ok">
                     נראה שהספר "{already.title}" כבר בספרייה ({already.rating}★).
-                    <button type="button" className="block mt-1 text-accent font-bold min-h-[40px]" onClick={() => { setItem(cur.id, { status: 'exists', savedTitle: already.title }); goNext(cur.id); }}>סימון כקיים והמשך ←</button>
+                    <button type="button" className="block mt-1 text-accent font-semibold min-h-[40px]" onClick={() => { setItem(cur.id, { status: 'exists', savedTitle: already.title }); goNext(cur.id); }}>סימון כקיים והמשך ←</button>
                   </Notice>
                 )}
                 <SearchResults res={res} db={db} goSettings={goSettings} smart={smart}
@@ -2304,12 +2305,12 @@ function FreeTextIntake({ goBulk, goSettings }) {
       <label htmlFor="free-text" className="text-[15px]">כתבו בחופשיות על ספרים שקראתם: שמות, סופרים, מה אהבתם. Claude יזהה את הספרים, ואחר כך תבחרו ותדרגו כל אחד.</label>
       <textarea id="free-text" value={text} onChange={e => setText(e.target.value)} rows={7}
         placeholder={'למשל: השנה קראתי את החדש של אשכול נבו, ממש אהבתי. גם משהו של פרנזן על משפחה, ואת זה של מורקמי עם הבאר, שקצת שעמם אותי.'}
-        className="w-full rounded-2xl border border-line bg-surface p-3 text-[16px] leading-relaxed" />
+        className="w-full rounded-xl border border-line bg-surface p-3 text-[16px] leading-relaxed" />
       <Btn disabled={!text.trim() || st.busy} onClick={run}>{st.busy ? <><Spinner />מזהה ספרים…</> : <><Icon name="Sparkles" size={20} />זיהוי הספרים</>}</Btn>
       {st.err && <Notice tone="error">{st.err}</Notice>}
       {found && (
-        <div className="fade-in bg-surface border border-line rounded-2xl p-3 grid gap-2">
-          <div className="font-bold text-[15px]">זוהו {found.length} ספרים{st.cost ? <span className="text-muted font-normal text-[13px]"> · עלות משוערת ${st.cost.toFixed(2)}</span> : null}</div>
+        <div className="fade-in bg-surface border border-line rounded-xl p-3 grid gap-2">
+          <div className="font-semibold text-[15px]">זוהו {found.length} ספרים{st.cost ? <span className="text-muted font-normal text-[13px]"> · עלות משוערת ${st.cost.toFixed(2)}</span> : null}</div>
           {found.length === 0 && <p className="text-muted text-[14px]">לא זוהו ספרים בטקסט. נסו לכתוב שמות של ספרים או סופרים.</p>}
           <ul className="grid gap-1.5">
             {found.map((b, i) => (
@@ -2340,13 +2341,13 @@ function AddTab({ db, onPick, goSettings }) {
   return (
     <div className="fade-in">
       <header className="pt-4 pb-3">
-        <h1 className="font-display font-black text-[30px] leading-tight">הוספת ספר</h1>
+        <h1 className="font-display font-medium text-[26px] leading-snug">הוספת ספר</h1>
         <p className="text-muted text-[15px]">שם ספר בעברית או באנגלית, ISBN או קישור. רק תוצאות שחזרו מהמאגרים יוצגו.</p>
       </header>
-      <div className="grid grid-cols-3 gap-1 p-1 rounded-2xl bg-surface2 mb-4" role="tablist" aria-label="אופן ההוספה">
+      <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-surface2 mb-4" role="tablist" aria-label="אופן ההוספה">
         {[['single', 'ספר אחד', 'Search'], ['bulk', 'רשימה', 'ListChecks'], ['text', 'טקסט חופשי', 'PenLine']].map(([k, l, ic]) => (
           <button key={k} type="button" role="tab" aria-selected={mode === k} onClick={() => setMode(k)}
-            className={`min-h-[44px] rounded-xl font-bold text-[15px] inline-flex items-center justify-center gap-1.5 transition-colors ${mode === k ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}>
+            className={`min-h-[44px] rounded-xl font-semibold text-[15px] inline-flex items-center justify-center gap-1.5 transition-colors ${mode === k ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}>
             <Icon name={ic} size={17} />{l}
           </button>
         ))}
@@ -2372,7 +2373,7 @@ function Bubble({ from, children }) {
   const bot = from === 'bot';
   return (
     <div className={`fade-in flex ${bot ? 'justify-start' : 'justify-end'}`}>
-      <div className={`max-w-[85%] min-w-0 break-words [overflow-wrap:anywhere] px-3.5 py-2.5 text-[15px] leading-relaxed ${bot ? 'bg-surface border border-line rounded-2xl rounded-tr-md' : 'bg-accent text-accentInk rounded-2xl rounded-tl-md font-semibold'}`}>{children}</div>
+      <div className={`max-w-[85%] min-w-0 break-words [overflow-wrap:anywhere] px-3.5 py-2.5 font-reading ${bot ? 'bg-surface border border-line rounded-xl rounded-tr-sm' : 'bg-accentSoft text-ink rounded-xl rounded-tl-sm'}`}>{children}</div>
     </div>
   );
 }
@@ -2396,7 +2397,7 @@ function FormatInfo({ book }) {
   const yn = { yes: 'יש', no: 'אין', unknown: 'לא ידוע' };
   return (
     <div className="mt-2.5 border border-line rounded-xl p-2.5 grid gap-1.5">
-      <div className="text-[13px] font-bold text-muted flex items-center gap-1"><Icon name="BookCopy" size={14} />זמינות: מודפס, דיגיטלי, קולי</div>
+      <div className="text-[13px] font-semibold text-muted flex items-center gap-1"><Icon name="BookCopy" size={14} />זמינות: מודפס, דיגיטלי, קולי</div>
       {facts.length
         ? <ul className="grid gap-0.5 text-[14px]">{facts.map((f, i) => (
             <li key={i} className="flex items-start gap-1.5"><span className="text-ok mt-0.5"><Icon name="CircleCheck" size={15} /></span>
@@ -2404,7 +2405,7 @@ function FormatInfo({ book }) {
         : <p className="text-[13px] text-muted">המאגרים לא מציינים פורמטים לספר הזה.</p>}
       {af && (
         <div className="text-[13px] border-t border-line pt-1.5">
-          <div className="font-bold text-muted mb-0.5">לפי המקורות שנקראו:</div>
+          <div className="font-semibold text-muted mb-0.5">לפי המקורות שנקראו:</div>
           <div className="flex flex-wrap gap-1.5">
             {[['print', 'מודפס'], ['ebook', 'דיגיטלי'], ['audiobook', 'קולי']].map(([k, l]) => (
               <span key={k} className={`px-2 py-0.5 rounded-full font-semibold ${af[k] === 'yes' ? 'bg-accentSoft text-ok' : 'bg-surface2 text-muted'}`}>{l}: {yn[af[k]] || 'לא ידוע'}</span>
@@ -2415,13 +2416,13 @@ function FormatInfo({ book }) {
       )}
       {book.sources && book.sources.length > 0 && (
         <div className="text-[13px] border-t border-line pt-1.5">
-          <div className="font-bold text-muted mb-0.5">מקורות:</div>
+          <div className="font-semibold text-muted mb-0.5">מקורות:</div>
           <ul className="grid gap-0.5">{book.sources.slice(0, 6).map((src, i) => (
             <li key={i} className="truncate"><a href={src.url} target="_blank" rel="noopener noreferrer" className="underline">{src.title || src.url}</a></li>))}</ul>
         </div>
       )}
       <details>
-      <summary className="text-[13px] font-bold text-accent cursor-pointer min-h-[32px] flex items-center">בדיקה בחנויות: e-vrit, Storytel, סטימצקי ועוד</summary>
+      <summary className="text-[13px] font-semibold text-accent cursor-pointer min-h-[32px] flex items-center">בדיקה בחנויות: e-vrit, Storytel, סטימצקי ועוד</summary>
       <div className="text-[12px] text-muted mb-1">כל קישור פותח חיפוש באתר עצמו. זו בדיקה ידנית, לא אימות.</div>
       <div className="flex flex-wrap gap-1.5">
         {STORES.map(st => (
@@ -2439,25 +2440,25 @@ function FormatInfo({ book }) {
 function RecCard({ r, onRead, onDismiss, inLib }) {
   const [extra, setExtra] = useState({});
   return (
-    <li className="fade-in bg-surface border border-line rounded-2xl p-3">
+    <li className="fade-in bg-surface border border-line rounded-xl p-3">
       <div className="flex gap-3">
         <Cover book={r} className="w-20 h-28" />
         <div className="min-w-0 flex-1">
-          <div className="font-display font-bold text-[18px] leading-snug">{r.title}</div>
+          <div className="font-display font-medium text-[18px] leading-snug">{r.title}</div>
           <div className="text-[15px]">{r.authors.join(', ')}</div>
           <div className="text-muted text-[13px] tabular">{[r.year, r.pageCount ? r.pageCount + ' עמ\'' : '', langLabel(r.language)].filter(Boolean).join(' · ')}</div>
           <div className="mt-1.5 flex flex-wrap gap-1 items-center"><SourceBadge book={r} /><span className="text-[12px] text-muted">{fmtDateTime(r.verifiedAt)}</span></div>
         </div>
       </div>
       <div className="mt-3 rounded-xl bg-accentSoft border border-line p-2.5">
-        <div className="text-[13px] font-bold text-accent mb-1 flex items-center gap-1"><Icon name="Sparkles" size={14} />למה זה מתאים לך</div>
+        <div className="text-[13px] font-semibold text-accent mb-1 flex items-center gap-1"><Icon name="Sparkles" size={14} />למה זה מתאים לך</div>
         <ul className="text-[14px] grid gap-0.5 list-disc pr-5">{r.reasons.map((x, i) => <li key={i}>{x}</li>)}</ul>
       </div>
       <Synopsis book={r} className="mt-2.5" onChange={(patch) => setExtra(x => ({ ...x, ...patch }))} />
       <FormatInfo book={r} />
       <div className="grid grid-cols-[1fr_auto_auto] gap-2 mt-2">
         {inLib
-          ? <div className="min-h-[48px] rounded-xl bg-surface2 text-ok font-bold grid place-items-center text-[14px]">בספרייה ({inLib.rating}★)</div>
+          ? <div className="min-h-[48px] rounded-xl bg-surface2 text-ok font-semibold grid place-items-center text-[14px]">בספרייה ({inLib.rating}★)</div>
           : <Btn variant="soft" onClick={() => onRead({ ...r, ...extra })}><Icon name="BookPlus" size={18} />קראתי, להוספה</Btn>}
         <button type="button" onClick={() => onDismiss(r)} aria-label="לא מעניין אותי" className="min-h-[48px] w-12 grid place-items-center rounded-xl border border-line text-muted"><Icon name="ThumbsDown" size={18} /></button>
         <a href={r.link} target="_blank" rel="noopener noreferrer" aria-label="לרשומה במקור" className="min-h-[48px] w-12 grid place-items-center rounded-xl border border-line text-muted"><Icon name="ExternalLink" size={18} /></a>
@@ -2480,21 +2481,21 @@ function HistoryView({ db, update, onPick, notify, openId, setOpenId }) {
   if (open) {
     return (
       <div className="fade-in grid gap-3">
-        <button type="button" onClick={() => setOpenId(null)} className="justify-self-start min-h-[40px] text-accent font-bold inline-flex items-center gap-1"><Icon name="ChevronRight" size={18} />לכל ההיסטוריה</button>
-        <div className="bg-surface border border-line rounded-2xl p-3">
-          <div className="font-bold text-[16px]">{fmtDateTime(open.at)}</div>
+        <button type="button" onClick={() => setOpenId(null)} className="justify-self-start min-h-[40px] text-accent font-semibold inline-flex items-center gap-1"><Icon name="ChevronRight" size={18} />לכל ההיסטוריה</button>
+        <div className="bg-surface border border-line rounded-xl p-3">
+          <div className="font-semibold text-[16px]">{fmtDateTime(open.at)}</div>
           <div className="flex flex-wrap gap-1.5 mt-1.5">
             {answersSummary(open.answers).map((t, i) => <span key={i} className="text-[12px] font-semibold px-2 py-0.5 rounded-full bg-surface2">{t}</span>)}
             <span className="text-[12px] font-semibold px-2 py-0.5 rounded-full bg-surface2">שפה: {recLangLabel(open.lang)}</span>
           </div>
         </div>
-        <details className="bg-surface border border-line rounded-2xl p-3">
-          <summary className="font-bold text-[15px] cursor-pointer min-h-[32px]">השיחה המלאה ({open.log.length} הודעות)</summary>
+        <details className="bg-surface border border-line rounded-xl p-3">
+          <summary className="font-semibold text-[15px] cursor-pointer min-h-[32px]">השיחה המלאה ({open.log.length} הודעות)</summary>
           <div className="grid gap-2 mt-2">
             {open.log.map((m, i) => <Bubble key={i} from={m.from}>{m.progress ? <span className="text-muted text-[14px]">{m.text}</span> : m.text}</Bubble>)}
           </div>
         </details>
-        <h2 className="font-display font-bold text-[20px]">{open.recs.length} המלצות</h2>
+        <h2 className="font-display font-medium text-[20px]">{open.recs.length} המלצות</h2>
         <ul className="grid gap-3">
           {open.recs.map(r => (
             <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)} onRead={(b) => onPick(b)}
@@ -2515,9 +2516,9 @@ function HistoryView({ db, update, onPick, notify, openId, setOpenId }) {
           const added = h.recs.filter(r => findInLibrary(r, db.books)).length;
           return (
             <li key={h.id}>
-              <button type="button" onClick={() => setOpenId(h.id)} className="w-full text-right bg-surface border border-line rounded-2xl p-3 active:bg-surface2">
+              <button type="button" onClick={() => setOpenId(h.id)} className="w-full text-right bg-surface border border-line rounded-xl p-3 active:bg-surface2">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-bold text-[15px] tabular">{fmtDateTime(h.at)}</span>
+                  <span className="font-semibold text-[15px] tabular">{fmtDateTime(h.at)}</span>
                   <span className="text-[13px] text-muted tabular">{h.recs.length} המלצות{added ? ` · ${added} בספרייה` : ''}</span>
                 </div>
                 <div className="text-[13px] text-muted mt-0.5 truncate">{answersSummary(h.answers).join(' · ')}</div>
@@ -2623,15 +2624,15 @@ function DiscoverTab({ db, update, onPick, notify }) {
   return (
     <div className="fade-in">
       <header className="pt-4 pb-3">
-        <h1 className="font-display font-black text-[30px] leading-tight">גלה ספר חדש</h1>
+        <h1 className="font-display font-medium text-[26px] leading-snug">גלה ספר חדש</h1>
         <p className="text-muted text-[15px]">4 שאלות קצרות. כל המלצה נבדקת מחדש מול המאגר לפני שהיא מוצגת.</p>
       </header>
-      <div className="grid grid-cols-2 gap-1 p-1 rounded-2xl bg-surface2 mb-4" role="tablist" aria-label="תצוגה">
+      <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2 mb-4" role="tablist" aria-label="תצוגה">
         {[['chat', 'שיחה', 'MessageCircle'], ['history', `היסטוריה (${(db.history || []).length})`, 'History']].map(([k, l, ic]) => {
           const on = k === 'chat' ? view === 'chat' : view !== 'chat';
           return (
             <button key={k} type="button" role="tab" aria-selected={on} onClick={() => setView(k)}
-              className={`min-h-[44px] rounded-xl font-bold text-[15px] inline-flex items-center justify-center gap-1.5 ${on ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}>
+              className={`min-h-[44px] rounded-xl font-semibold text-[15px] inline-flex items-center justify-center gap-1.5 ${on ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}>
               <Icon name={ic} size={17} />{l}
             </button>
           );
@@ -2643,8 +2644,8 @@ function DiscoverTab({ db, update, onPick, notify }) {
         <div className="mb-3"><Notice tone="info">בלי מפתח Google Books ההמלצות מגיעות בעיקר מ-Open Library, ויש שם מעט ספרים בעברית. אפשר להוסיף מפתח חינמי בלשונית "הגדרות".</Notice></div>
       )}
 
-      <div className="bg-surface border border-line rounded-2xl p-3 mb-4 grid gap-2">
-        <div className="text-[13px] font-bold tracking-wide text-muted">הפרופיל שלך</div>
+      <div className="bg-surface border border-line rounded-xl p-3 mb-4 grid gap-2">
+        <div className="text-[13px] font-semibold tracking-wide text-muted">הפרופיל שלך</div>
         {db.books.length
           ? <div className="text-[14px] leading-relaxed">
               {prof.topAuthors.length > 0 && <div><span className="text-muted">מחברים אהובים: </span>{prof.topAuthors.slice(0, 3).map(a => a.name).join(', ')}</div>}
@@ -2662,8 +2663,8 @@ function DiscoverTab({ db, update, onPick, notify }) {
       </div>
 
       {hasAi && step === 0 && !log.length && (
-        <div className="bg-surface border border-accent rounded-2xl p-3 mb-4 grid gap-2">
-          <label htmlFor="ai-request" className="font-bold text-[16px] flex items-center gap-1.5"><Icon name="Sparkles" size={18} />מה בא לך לקרוא?</label>
+        <div className="bg-surface border border-accent rounded-xl p-3 mb-4 grid gap-2">
+          <label htmlFor="ai-request" className="font-semibold text-[16px] flex items-center gap-1.5"><Icon name="Sparkles" size={18} />מה בא לך לקרוא?</label>
           <textarea id="ai-request" value={aiText} onChange={e => setAiText(e.target.value)} rows={3}
             placeholder="למשל: משהו כמו 'יער נורווגי' אבל פחות עצוב; רומן שמתרחש בארץ; ספר שאפשר גם לשמוע"
             className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px] leading-relaxed" />
@@ -2674,7 +2675,7 @@ function DiscoverTab({ db, update, onPick, notify }) {
       {!hasAi && step === 0 && !log.length && (
         <div className="mb-3"><Notice tone="info">המלצות חכמות עם Claude עוד לא זמינות באפליקציה. בינתיים: השאלון המהיר.</Notice></div>
       )}
-      {hasAi && step === 0 && !log.length && <h2 className="font-bold text-[15px] text-muted mb-2">או: שאלון מהיר, בלי AI</h2>}
+      {hasAi && step === 0 && !log.length && <h2 className="font-semibold text-[15px] text-muted mb-2">או: שאלון מהיר, בלי AI</h2>}
 
       <div className="grid gap-2.5 mb-3" aria-live="polite">
         <Bubble from="bot">היי! בואו נמצא את הספר הבא שלך. אני משתמש רק בספרים שקיימים באמת ב-Google Books או ב-Open Library.</Bubble>
@@ -2699,7 +2700,7 @@ function DiscoverTab({ db, update, onPick, notify }) {
 
       {recs.length > 0 && (
         <section className="mt-5">
-          <h2 className="font-display font-bold text-[22px] mb-2">ההמלצות שלך</h2>
+          <h2 className="font-display font-medium text-[22px] mb-2">ההמלצות שלך</h2>
           <ul className="grid gap-3">
             {recs.map(r => (
               <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)}
@@ -2762,10 +2763,10 @@ function SyncPanel() {
     <div className="grid gap-2">
       <div className="flex items-center justify-between gap-2">
         <span className="text-[14px] text-muted">כל המשתמשים והספרים מסתנכרנים אוטומטית בין הטלפונים.{sync.lastAt ? ` עדכון אחרון: ${fmtDateTime(sync.lastAt)}.` : ''}</span>
-        {label && <span className={`shrink-0 text-[13px] font-bold px-2 py-0.5 rounded-full ${sync.status === 'error' ? 'bg-surface2 text-danger' : 'bg-accentSoft text-ok'}`}>{label}</span>}
+        {label && <span className={`shrink-0 text-[13px] font-semibold px-2 py-0.5 rounded-full ${sync.status === 'error' ? 'bg-surface2 text-danger' : 'bg-accentSoft text-ok'}`}>{label}</span>}
       </div>
       {sync.error && <p className="text-[13px] text-danger">{sync.error}</p>}
-      <p className="text-[13px] text-muted">המלצות חכמות ותרגום (Claude): {sync.ai === false ? <span className="text-danger font-bold">לא פעילים, חסר מפתח ANTHROPIC_API_KEY בשרת</span> : sync.ai ? <span className="text-ok font-bold">פעילים</span> : 'בודק…'}</p>
+      <p className="text-[13px] text-muted">המלצות חכמות ותרגום (Claude): {sync.ai === false ? <span className="text-danger font-semibold">לא פעילים, חסר מפתח ANTHROPIC_API_KEY בשרת</span> : sync.ai ? <span className="text-ok font-semibold">פעילים</span> : 'בודק…'}</p>
       <Btn variant="ghost" onClick={() => syncNow()} disabled={sync.status === 'syncing'}><Icon name="RefreshCw" size={18} />סנכרון עכשיו</Btn>
     </div>
   );
@@ -2843,23 +2844,23 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
   const StatusRow = ({ ok, label, detail }) => (
     <div className="flex items-center justify-between gap-2 py-2 border-b border-line last:border-0">
       <span className="text-[15px]">{label}</span>
-      <span className={`text-[13px] font-bold px-2 py-0.5 rounded-full ${ok === true ? 'bg-accentSoft text-ok' : ok === false ? 'bg-surface2 text-danger' : 'bg-surface2 text-muted'}`}>{detail || (ok === true ? 'פעיל' : ok === false ? 'לא זמין' : 'בודק…')}</span>
+      <span className={`text-[13px] font-semibold px-2 py-0.5 rounded-full ${ok === true ? 'bg-accentSoft text-ok' : ok === false ? 'bg-surface2 text-danger' : 'bg-surface2 text-muted'}`}>{detail || (ok === true ? 'פעיל' : ok === false ? 'לא זמין' : 'בודק…')}</span>
     </div>
   );
 
   return (
     <div className="fade-in grid gap-4">
       <header className="pt-4">
-        <h1 className="font-display font-black text-[30px] leading-tight">הגדרות</h1>
+        <h1 className="font-display font-medium text-[26px] leading-snug">הגדרות</h1>
       </header>
 
-      <section className="bg-surface border border-line rounded-2xl p-3">
-        <h2 className="font-bold text-[17px] mb-2">סנכרון</h2>
+      <section className="bg-surface border border-line rounded-xl p-3">
+        <h2 className="font-semibold text-[17px] mb-2">סנכרון</h2>
         <SyncPanel />
       </section>
 
-      <section className="bg-surface border border-line rounded-2xl p-3 grid gap-2">
-        <h2 className="font-bold text-[17px]">המשתמש שלך</h2>
+      <section className="bg-surface border border-line rounded-xl p-3 grid gap-2">
+        <h2 className="font-semibold text-[17px]">המשתמש שלך</h2>
         <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (nameDraft.trim()) { onRenameProfile(nameDraft.trim()); notify('השם עודכן'); } }}>
           <label htmlFor="profile-name" className="sr-only">שם המשתמש</label>
           <input id="profile-name" value={nameDraft} onChange={e => setNameDraft(e.target.value)} maxLength={24}
@@ -2871,8 +2872,8 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
         </Btn>
       </section>
 
-      <section className="bg-surface border border-line rounded-2xl p-3 grid gap-3">
-        <h2 className="font-bold text-[17px]">הגדרות</h2>
+      <section className="bg-surface border border-line rounded-xl p-3 grid gap-3">
+        <h2 className="font-semibold text-[17px]">הגדרות</h2>
         <div>
           <div className="text-[14px] text-muted mb-1.5">שפת ברירת מחדל להמלצות ({profile.name})</div>
           <div className="flex gap-2 flex-wrap">
@@ -2890,17 +2891,17 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
           </div>
         </div>
         {SYNC.gbooks
-          ? <p className="text-[14px] text-muted">חיפוש ב-Google Books: <span className="text-ok font-bold">פעיל דרך השרת המשפחתי</span> (מפתח משותף, אין צורך במפתח אישי).</p>
+          ? <p className="text-[14px] text-muted">חיפוש ב-Google Books: <span className="text-ok font-semibold">פעיל דרך השרת המשפחתי</span> (מפתח משותף, אין צורך במפתח אישי).</p>
           : <>
         <form id="api-key-section" onSubmit={saveKey} className="grid gap-1.5">
-          <label htmlFor="api-key" className="text-[15px] font-bold">מפתח Google Books API</label>
+          <label htmlFor="api-key" className="text-[15px] font-semibold">מפתח Google Books API</label>
           <p className="text-[14px] text-muted">בלי מפתח, Google חוסם בדרך כלל את החיפוש בגלל מכסה משותפת לכל העולם, והאפליקציה עוברת ל-Open Library ו-Wikidata (כיסוי חלקי בעברית). מפתח אישי הוא בחינם ומאפשר 1,000 חיפושים ביום.</p>
           <details className="text-[14px] bg-bg border border-line rounded-xl p-2.5">
-            <summary className="font-bold text-accent cursor-pointer min-h-[32px]">איך משיגים מפתח (3 דקות, בחינם)</summary>
+            <summary className="font-semibold text-accent cursor-pointer min-h-[32px]">איך משיגים מפתח (3 דקות, בחינם)</summary>
             <ol className="list-decimal pr-5 mt-2 grid gap-1.5">
-              <li>נכנסים עם חשבון Google ל-<a className="text-accent font-bold underline" href="https://console.cloud.google.com/apis/library/books.googleapis.com" target="_blank" rel="noopener noreferrer">דף Books API ב-Google Cloud</a>. אם מתבקשים, יוצרים פרויקט חדש (כל שם).</li>
+              <li>נכנסים עם חשבון Google ל-<a className="text-accent font-semibold underline" href="https://console.cloud.google.com/apis/library/books.googleapis.com" target="_blank" rel="noopener noreferrer">דף Books API ב-Google Cloud</a>. אם מתבקשים, יוצרים פרויקט חדש (כל שם).</li>
               <li>לוחצים <b dir="ltr">Enable</b>.</li>
-              <li>עוברים ל-<a className="text-accent font-bold underline" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Credentials</a>, לוחצים <b dir="ltr">Create credentials ← API key</b> ומעתיקים את המפתח (מתחיל ב-<span dir="ltr">AIza</span>).</li>
+              <li>עוברים ל-<a className="text-accent font-semibold underline" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Credentials</a>, לוחצים <b dir="ltr">Create credentials ← API key</b> ומעתיקים את המפתח (מתחיל ב-<span dir="ltr">AIza</span>).</li>
               <li>מדביקים כאן ולוחצים "שמירה ובדיקה". לא נדרש כרטיס אשראי.</li>
               <li>רשות: ב-Credentials אפשר להגביל את המפתח ל-<span dir="ltr">yuvsaadon-coder.github.io/*</span> תחת <span dir="ltr">Website restrictions</span>.</li>
             </ol>
@@ -2920,19 +2921,19 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
         )}
       </section>
 
-      <details className="bg-surface border border-line rounded-2xl p-3">
-        <summary className="font-bold text-[17px] cursor-pointer min-h-[36px] flex items-center">גיבוי ידני לקובץ (לא חובה)</summary>
+      <details className="bg-surface border border-line rounded-xl p-3">
+        <summary className="font-semibold text-[17px] cursor-pointer min-h-[36px] flex items-center">גיבוי ידני לקובץ (לא חובה)</summary>
         <p className="text-[14px] text-muted mt-1 mb-3">הכול מסתנכרן ונשמר אוטומטית. כאן אפשר בנוסף לשמור עותק לקובץ או לייבא ממנו.</p>
         <div className="grid gap-4">
-      <section className="bg-surface border border-line rounded-2xl p-3">
-        <h2 className="font-bold text-[17px] mb-1">מצב אחסון</h2>
+      <section className="bg-surface border border-line rounded-xl p-3">
+        <h2 className="font-semibold text-[17px] mb-1">מצב אחסון</h2>
         <StatusRow ok={status.local} label="localStorage" />
         <StatusRow ok={status.idb} label="IndexedDB (עותק שני)" />
         <StatusRow ok={status.persisted} label="אחסון קבוע (מוגן מניקוי)" detail={status.persisted === true ? 'אושר' : status.persisted === false ? 'לא אושר' : 'לא ידוע'} />
         <p className="text-[13px] text-muted mt-2 tabular">{db.books.length} ספרים · נשמר לאחרונה {status.savedAt ? fmtDateTime(status.savedAt) : '—'} · משתמש: {profile.name}</p>
       </section>
-      <section className="bg-surface border border-line rounded-2xl p-3 grid gap-2">
-        <h2 className="font-bold text-[17px]">ייצוא</h2>
+      <section className="bg-surface border border-line rounded-xl p-3 grid gap-2">
+        <h2 className="font-semibold text-[17px]">ייצוא</h2>
         <Btn onClick={() => { downloadFile(`reading-backup-${profile.name}-${stamp}.json`, json(), 'application/json'); markBackup(); notify('קובץ הגיבוי נוצר'); }} disabled={!db.books.length}>
           <Icon name="Download" size={20} />הורדת גיבוי מלא (JSON)
         </Btn>
@@ -2945,8 +2946,8 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
           </Btn>
         </div>
       </section>
-      <section className="bg-surface border border-line rounded-2xl p-3 grid gap-2">
-        <h2 className="font-bold text-[17px]">ייבוא ושחזור</h2>
+      <section className="bg-surface border border-line rounded-xl p-3 grid gap-2">
+        <h2 className="font-semibold text-[17px]">ייבוא ושחזור</h2>
         <input ref={fileRef} id="import-file" type="file" accept="application/json,.json,text/plain" className="hidden" onChange={onFile} />
         <Btn variant="ghost" onClick={() => fileRef.current && fileRef.current.click()}><Icon name="Upload" size={20} />בחירת קובץ גיבוי</Btn>
         <label htmlFor="import-paste" className="text-[14px] text-muted">או הדביקו כאן את תוכן הגיבוי:</label>
@@ -2962,8 +2963,8 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
           </div>
         )}
       </section>
-      <section className="border border-danger rounded-2xl p-3 grid gap-2">
-        <h2 className="font-bold text-[17px] text-danger">מחיקת כל הנתונים</h2>
+      <section className="border border-danger rounded-xl p-3 grid gap-2">
+        <h2 className="font-semibold text-[17px] text-danger">מחיקת כל הנתונים</h2>
         <p className="text-[14px] text-muted">מוחק את כל הספרים, הדירוגים והתגיות מהמכשיר. אי אפשר לבטל, אלא אם שמרת גיבוי.</p>
         <Btn variant="danger" disabled={!db.books.length} onClick={() => {
           if (!confirmWipe) { setConfirmWipe(true); return; }
@@ -3010,11 +3011,11 @@ function InstallPrompt() {
     window.__installPrompt = null; setReady(false);
   };
   return (
-    <div className="fade-in mt-3 bg-surface border border-line rounded-2xl p-3 flex gap-3 items-start">
+    <div className="fade-in mt-3 bg-surface border border-line rounded-xl p-3 flex gap-3 items-start">
       <img src="icons/icon-192.png" alt="" width="48" height="48" className="w-12 h-12 rounded-xl shrink-0" />
       <div className="flex-1 min-w-0 grid gap-2">
         <div>
-          <div className="font-bold text-[16px]">להתקין על מסך הבית?</div>
+          <div className="font-semibold text-[16px]">להתקין על מסך הבית?</div>
           <div className="text-[14px] text-muted">נפתח כמו אפליקציה, במסך מלא, וגם בלי אינטרנט.</div>
         </div>
         {iosHelp ? (
@@ -3029,7 +3030,7 @@ function InstallPrompt() {
             <Btn variant="ghost" className="!min-h-[44px]" onClick={dismiss}>לא עכשיו</Btn>
           </div>
         )}
-        {iosHelp && <button type="button" className="text-muted text-[13px] font-bold justify-self-start min-h-[36px]" onClick={dismiss}>סגירה</button>}
+        {iosHelp && <button type="button" className="text-muted text-[13px] font-semibold justify-self-start min-h-[36px]" onClick={dismiss}>סגירה</button>}
       </div>
     </div>
   );
@@ -3090,9 +3091,9 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
         <div className="flex items-center justify-between gap-2 pt-3">
           <div className="flex items-center gap-2 min-w-0">
             <Avatar profile={profile} size={32} />
-            <span className="font-bold text-[15px] truncate">{profile.name}</span>
+            <span className="font-semibold text-[15px] truncate">{profile.name}</span>
           </div>
-          <button type="button" onClick={onSwitch} className="shrink-0 min-h-[40px] px-3 rounded-full border border-line text-[14px] font-bold text-muted inline-flex items-center gap-1.5">
+          <button type="button" onClick={onSwitch} className="shrink-0 min-h-[40px] px-3 rounded-full border border-line text-[14px] font-semibold text-muted inline-flex items-center gap-1.5">
             <Icon name="Users" size={16} />החלפת משתמש
           </button>
         </div>
@@ -3109,7 +3110,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
           {TABS.map(t => (
             <li key={t.id}>
               <button type="button" onClick={() => setTab(t.id)} aria-current={tab === t.id ? 'page' : undefined}
-                className={`w-full min-h-[62px] flex flex-col items-center justify-center gap-0.5 text-[12px] font-bold transition-colors ${tab === t.id ? 'text-accent' : 'text-muted'}`}>
+                className={`w-full min-h-[62px] flex flex-col items-center justify-center gap-0.5 text-[12px] font-semibold transition-colors ${tab === t.id ? 'text-accent' : 'text-muted'}`}>
                 <span className={`px-4 py-1 rounded-full transition-colors ${tab === t.id ? 'bg-accentSoft' : ''}`}><Icon name={t.icon} size={22} /></span>
                 {t.label}
               </button>
@@ -3127,10 +3128,10 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
 /* ============================================================
    משתמשים: הזדהות בלי סיסמה. כל משתמש מקבל ספרייה נפרדת במכשיר.
    ============================================================ */
-const AVATAR_COLORS = ['#1E5B4A', '#8A5A12', '#3D5A99', '#8E3B5B', '#4F6B2A', '#6A4C93', '#9A3E24', '#2F6F7E'];
+const AVATAR_COLORS = ['#56694F', '#8C6F4A', '#5C6B84', '#86596A', '#6E7A4E', '#6D5D86', '#8E5D48', '#4F7478'];
 function Avatar({ profile, size = 40 }) {
   return (
-    <span aria-hidden="true" className="shrink-0 rounded-full grid place-items-center font-bold text-white"
+    <span aria-hidden="true" className="shrink-0 rounded-full grid place-items-center font-semibold text-white"
       style={{ width: size, height: size, background: AVATAR_COLORS[profile.color % AVATAR_COLORS.length], fontSize: size * 0.45 }}>
       {(profile.name || '?').trim().charAt(0)}
     </span>
@@ -3156,18 +3157,18 @@ function WhoAreYou({ profiles, onPick, onCreate }) {
   return (
     <div className="min-h-screen bg-bg text-ink font-body">
       <main className="mx-auto max-w-md px-4 pt-10 pb-10 safe-top fade-in">
-        <img src="icons/icon-192.png" alt="" width="64" height="64" className="w-16 h-16 rounded-2xl mb-4 shadow-sm" />
-        <h1 className="font-display font-black text-[32px] leading-tight mb-1">של מי הספרייה?</h1>
+        <img src="icons/icon-192.png" alt="" width="64" height="64" className="w-16 h-16 rounded-xl mb-4 shadow-sm" />
+        <h1 className="font-display font-medium text-[28px] leading-snug mb-1">של מי הספרייה?</h1>
         <p className="text-muted text-[15px] mb-6">כל משתמש מקבל ספרייה, דירוגים והמלצות משלו. אין סיסמה, רק בוחרים שם.</p>
         {profiles.length > 0 && (
           <ul className="grid gap-2 mb-4">
             {profiles.map(p => (
               <li key={p.id}>
                 <button type="button" onClick={() => onPick(p.id)}
-                  className="w-full min-h-[64px] flex items-center gap-3 px-3 rounded-2xl bg-surface border border-line text-right active:bg-surface2">
+                  className="w-full min-h-[64px] flex items-center gap-3 px-3 rounded-xl bg-surface border border-line text-right active:bg-surface2">
                   <Avatar profile={p} size={44} />
                   <span className="flex-1 min-w-0">
-                    <span className="block font-bold text-[17px] truncate">{p.name}</span>
+                    <span className="block font-semibold text-[17px] truncate">{p.name}</span>
                     <span className="block text-muted text-[13px] tabular">{countBooks(p.id)} ספרים</span>
                   </span>
                   <Icon name="ChevronLeft" size={20} className="text-muted" />
@@ -3177,9 +3178,9 @@ function WhoAreYou({ profiles, onPick, onCreate }) {
           </ul>
         )}
         {adding ? (
-          <form className="grid gap-2 bg-surface border border-line rounded-2xl p-3" onSubmit={(e) => { e.preventDefault(); if (name.trim() && !taken) onCreate(name.trim()); }}>
+          <form className="grid gap-2 bg-surface border border-line rounded-xl p-3" onSubmit={(e) => { e.preventDefault(); if (name.trim() && !taken) onCreate(name.trim()); }}>
             {legacyCount > 0 && <Notice tone="info">במכשיר כבר יש ספרייה עם {legacyCount} ספרים. היא תשויך למשתמש הראשון שתיצרו.</Notice>}
-            <label htmlFor="new-profile" className="font-bold text-[15px]">{profiles.length ? 'משתמש חדש' : 'איך לקרוא לך?'}</label>
+            <label htmlFor="new-profile" className="font-semibold text-[15px]">{profiles.length ? 'משתמש חדש' : 'איך לקרוא לך?'}</label>
             <input id="new-profile" value={name} onChange={e => setName(e.target.value)} maxLength={24} autoFocus placeholder="שם או כינוי"
               className="w-full min-h-[52px] px-3 rounded-xl border border-line bg-bg text-[17px]" />
             {taken && <p className="text-[13px] text-danger">כבר יש משתמש בשם הזה.</p>}
