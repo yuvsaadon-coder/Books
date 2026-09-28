@@ -6,6 +6,8 @@
   "main": "worker.js",
   "compatibility_date": "2025-09-01",
   "observability": { "enabled": true },
+  // כתובת ציבורית books.<שם-החשבון>.workers.dev
+  "workers_dev": true,
   "kv_namespaces": [
     { "binding": "LIBRARY", "id": "b622c3fe36394ceaa0b02718aaf676b3" }
   ]
