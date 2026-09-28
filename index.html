@@ -820,7 +820,7 @@
        ספרייה משפחתית: סנכרון בין מכשירים דרך השרת המשפחתי (Cloudflare)
        ============================================================ */
     // כתובת השרת (Cloudflare Worker). האפליקציה מתחברת אליו לבד; אין קוד גישה.
-    const CLOUD_URL = '';
+    const CLOUD_URL = 'https://books.yuvsaadon.workers.dev';
     const cloudBase = (url) => url.trim().replace(/\/+$/, '');
     function loadCloud() {
       let url = CLOUD_URL;
