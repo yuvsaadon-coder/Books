@@ -969,9 +969,10 @@ async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', 
   const tools = [...(web ? WEB_TOOLS : []), { ...submitTool, strict: true }];
   let messages = [{ role: 'user', content: prompt }];
   let cost = 0;
+  const hits = [];   // תוצאות חיפוש אמיתיות מהמנוע (כתובת + כותרת), לא טקסט שהמודל כתב
   for (let turn = 0; turn < 4; turn++) {
     let msg;
-    try {
+    for (let attempt = 0; ; attempt++) try {
       const stream = client.messages.stream({
         model: AI_MODEL, max_tokens: 32000,
         thinking: { type: 'adaptive', display: 'summarized' }, output_config: { effort },
@@ -979,7 +980,9 @@ async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', 
       });
       if (onProgress) stream.on('contentBlock', (b) => { const d = describeBlock(b); if (d) onProgress(d); });
       msg = await stream.finalMessage();
+      break;
     } catch (e) {
+      if (attempt === 0 && e instanceof Anthropic.APIConnectionError) { onProgress && onProgress('החיבור נפל, מנסה שוב…'); continue; }
       if (e instanceof Anthropic.AuthenticationError) throw new Error('השרת לא הצליח להתחבר ל-Claude. בדקו את ANTHROPIC_API_KEY ב-Cloudflare.');
       if (e instanceof Anthropic.RateLimitError) throw new Error('הגעתם למגבלת השימוש היומית ב-AI, או שהשירות עמוס. נסו שוב מאוחר יותר.');
       if (e instanceof Anthropic.APIError) {
@@ -989,9 +992,12 @@ async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', 
       throw new Error('אין חיבור לשרת המשפחתי. בדקו אינטרנט ונסו שוב.');
     }
     cost += costOf(msg.usage);
+    msg.content.forEach(b => {
+      if (b.type === 'web_search_tool_result' && Array.isArray(b.content)) b.content.forEach(x => x && x.url && hits.push({ url: x.url, title: x.title || '' }));
+    });
     if (msg.stop_reason === 'refusal') throw new Error('המודל סירב לבקשה הזו. נסו לנסח אחרת.');
     const sub = msg.content.find(b => b.type === 'tool_use' && b.name === submitTool.name);
-    if (sub) return { input: sub.input, cost };
+    if (sub) return { input: sub.input, cost, hits };
     if (msg.stop_reason === 'max_tokens') throw new Error('התשובה נקטעה באמצע. נסו בקשה ממוקדת יותר.');
     messages = [...messages, { role: 'assistant', content: echoable(msg.content) }];
     if (msg.stop_reason !== 'pause_turn') messages.push({ role: 'user', content: `Now call ${submitTool.name} with your final answer.` });
@@ -1019,7 +1025,7 @@ async function aiExtractBooks(paragraph) {
 
 // 2. זיהוי חכם של ספר שהחיפוש הרגיל לא מצא
 async function aiResolveBook(text, author, onProgress) {
-  const { input, cost } = await aiRun({
+  const { input, cost, hits } = await aiRun({
     effort: 'medium', onProgress,
     system: 'A reader typed a book name that a catalogue search could not match: it may be misspelled, abbreviated, a Hebrew translation title, or mixed with the author name. Identify the most likely real books. Use web search on the allowed sites to confirm the exact published titles (Hebrew edition title when relevant), author and ISBN. New Hebrew books often exist only on Israeli store and publisher sites (e-vrit, Steimatzky, Tzomet/booknet, the publisher): search there and return the book page URL in page_url. Only return books you confirmed exist. ' + HEBREW_OUT,
     prompt: `Typed: "${text}"${author ? `\nAuthor typed: "${author}"` : ''}`,
@@ -1035,18 +1041,27 @@ async function aiResolveBook(text, author, onProgress) {
   });
   const found = [];
   for (const c of (input.candidates || []).slice(0, 4)) {
-    const v = await verifyAiBook({ title_he: c.title, title_original: c.original_title, author: c.author, isbn: c.isbn, page_url: c.page_url }, true);
+    const v = await verifyAiBook({ title_he: c.title, title_original: c.original_title, author: c.author, isbn: c.isbn, page_url: c.page_url }, true, hits);
     v.forEach(x => { if (!found.some(f => f.key === x.key)) found.push(withHebrewTitle(x, c.title)); });
   }
   return {
-    candidates: found, sources: ['Claude + ' + uniq(found.map(f => f.source === 'google' ? 'Google Books' : f.source === 'openlibrary' ? 'Open Library' : 'Wikidata')).join(' + ')],
+    candidates: found, sources: ['Claude + ' + uniq(found.map(f => f.source === 'google' ? 'Google Books' : f.source === 'openlibrary' ? 'Open Library' : f.source === 'web' ? f.verifiedVia : 'Wikidata')).join(' + ')],
     notes: found.length ? [] : ['גם הזיהוי החכם לא מצא ספר שאפשר לאמת במאגרים.'],
     tried: (input.candidates || []).map(c => `${c.title}${c.author ? ' מאת ' + c.author : ''}`), cost
   };
 }
 
 // בדיקה מול המאגרים: מחזיר רשומות אמיתיות שתואמות את השם/המחבר או את ה-ISBN
-async function verifyAiBook(r, many) {
+// אתרי חנויות והוצאות בישראל: דף ספר שם הוא הוכחה שהספר קיים
+const BOOK_SITES = ['e-vrit.co.il', 'steimatzky.co.il', 'booknet.co.il', 'simania.co.il', 'mendele.co.il', 'indiebook.co.il', 'nli.org.il',
+  'am-oved.co.il', 'kibutz-poalim.co.il', 'ybook.co.il', 'kinbooks.co.il', 'keter-books.co.il', 'modan.co.il', 'abayit-books.com', '9livespress.com'];
+const siteOf = (url) => { try { const h = new URL(url).hostname.replace(/^www\./, ''); return BOOK_SITES.find(d => h === d || h.endsWith('.' + d)) || ''; } catch (e) { return ''; } };
+// כותרת תוצאת החיפוש מכילה את שם הספר כמילים שלמות
+function hitMatches(hit, title) {
+  const ht = ' ' + skel(hit.title).join(' ') + ' ', t = skel(title).join(' ');
+  return t.length >= 2 && ht.includes(' ' + t + ' ');
+}
+async function verifyAiBook(r, many, hits) {
   const clean = (x) => (x || '').replace(/[^\dXx]/g, '');
   const isbn = clean(r.isbn);
   const titles = [r.title_he, r.title_original].filter(Boolean);
@@ -1070,6 +1085,21 @@ async function verifyAiBook(r, many) {
         authors: r.author ? [r.author] : [], year: '', description: w.description || r.synopsis_he || '', descSource: w.description ? w.site : '',
         categories: r.genres || [], cover: w.image || '', pageCount: 0, language: hasHebrew(r.title_he || '') ? 'he' : '',
         isbns: isbn ? [isbn] : [], link: w.url, avgRating: 0, ratingsCount: 0, publisher: '', verifiedVia: w.site
+      });
+    }
+  }
+  // אם אי אפשר להיכנס לדף (אתרים שחוסמים שרתים), מספיקה תוצאת חיפוש אמיתית של דף הספר באתר חנות/הוצאה
+  if (!out.length && hits && hits.length) {
+    const t = r.title_he || r.title_original;
+    const hit = hits.find(h => siteOf(h.url) && [r.title_he, r.title_original].filter(Boolean).some(x => hitMatches(h, x)));
+    if (hit) {
+      const w = loadCloud() ? await verifyPage(hit.url, t, r.author).catch(() => null) : null;
+      const ok = w && w.ok;
+      out.push({
+        key: 'web:' + hit.url, source: 'web', sourceId: hit.url, title: t, subtitle: r.title_he && r.title_original && r.title_original !== r.title_he ? r.title_original : '',
+        authors: r.author ? [r.author] : [], year: '', description: (ok && w.description) || r.synopsis_he || '', descSource: ok && w.description ? w.site : '',
+        categories: r.genres || [], cover: (ok && w.image) || '', pageCount: 0, language: hasHebrew(t) ? 'he' : '',
+        isbns: isbn ? [isbn] : [], link: hit.url, avgRating: 0, ratingsCount: 0, publisher: '', verifiedVia: siteOf(hit.url)
       });
     }
   }
@@ -1130,18 +1160,18 @@ async function aiRecommend({ books, request, answers, lang, exclude, dismissed, 
   const langText = { he: 'Hebrew only (books available in a Hebrew edition)', en: 'English only', both: 'Hebrew or English editions', any: 'any language', auto: 'Hebrew or English' }[lang] || 'Hebrew or English';
   const prefs = answersSummary(answers || {}).join('; ');
   const excludeTitles = uniq([...books.map(b => b.title), ...exclude, ...(history || []).flatMap(h => (h.recs || []).map(r => r.title))]).slice(0, 300);
-  onProgress && onProgress(`שולח ל-Claude את הספרייה שלך (${books.length} ספרים) ואת הבקשה. חיפוש וקריאה של ביקורות לוקחים בדרך כלל פחות מדקה.`);
-  const { input, cost } = await aiRun({
-    effort: 'medium', onProgress,
+  onProgress && onProgress(`שולח ל-Claude את הספרייה שלך (${books.length} ספרים) ואת הבקשה. זה לוקח בדרך כלל פחות מדקה.`);
+  const { input, cost, hits } = await aiRun({
+    effort: 'medium', web: false, onProgress,
     system: [
       'You are a literary advisor with deep knowledge of world and Israeli literature. Recommend books this specific reader will love.',
       'Think about the reader: what their highly rated books and notes have in common (themes, voice, structure, emotional register, pace, setting), and what they rated low.',
-      'Draw first on your own knowledge of critical reception and literary analysis to choose candidates. Then use web search sparingly (about 3-4 searches, at most 3 page reads) on the allowed sites, only to confirm the Hebrew edition titles and availability. Prefer well-regarded books over merely popular ones when the reader\'s taste is literary. Work quickly.',
-      'Every recommended book must be a real, published book you confirmed in the sources. Give the Hebrew edition title when one exists, the ISBN when you found it, and in page_url the book page on an Israeli store or publisher site when you read one. Never recommend a book the reader already has.',
-      '`why` must connect the book to specific books and notes from the reader\'s library and to what reviewers said, in 2–4 sentences. List the pages you relied on in `sources`.',
+      'Use your own knowledge of the books, their critical reception and literary analyses; you have no web access here, and every book you name is checked against Google Books and Open Library afterwards. Prefer well-regarded books over merely popular ones when the reader\'s taste is literary. Decide quickly.',
+      'Recommend only real, published books you know well. Give the exact Hebrew edition title when you know one exists (otherwise empty title_he), the ISBN only if you are sure, and leave page_url and sources empty. For formats use "unknown" unless you are sure. Never recommend a book the reader already has.',
+      '`why` must connect the book to specific books and notes from the reader\'s library and to how critics describe it, in 2–4 sentences.',
       `Language: ${langText}. ` + HEBREW_OUT
     ].join('\n'),
-    prompt: `READER'S LIBRARY (title — author | rating 1-5 | tags | notes):\n${libraryForPrompt(books) || '(empty)'}\n\nALREADY SEEN OR NOT WANTED (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 300).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history, books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs ? `\nQUICK PREFERENCES: ${prefs}` : ''}\n\nRecommend ${want + 1} books.`,
+    prompt: `READER'S LIBRARY (title — author | rating 1-5 | tags | notes):\n${libraryForPrompt(books) || '(empty)'}\n\nALREADY SEEN OR NOT WANTED (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 300).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history, books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs ? `\nQUICK PREFERENCES: ${prefs}` : ''}\n\nRecommend ${want + 3} books.`,
     submitTool: {
       name: 'submit_recommendations', description: 'Return the final recommendations.',
       input_schema: { type: 'object', additionalProperties: false, required: ['interpretation', 'recommendations'], properties: {
@@ -1160,7 +1190,7 @@ async function aiRecommend({ books, request, answers, lang, exclude, dismissed, 
   let rejected = 0;
   for (const r of input.recommendations) {
     if (recs.length >= want) break;
-    const [c] = await verifyAiBook(r, false);
+    const [c] = await verifyAiBook(r, false, hits);
     if (!c || findInLibrary(c, books) || exclude.includes(c.key)) { rejected++; continue; }
     recs.push({
       ...withHebrewTitle(c, r.title_he), reasons: [r.why], genres: r.genres, sources: r.sources, aiFormats: r.formats,
@@ -1742,15 +1772,21 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
     return n;
   });
   // ספרים שכבר בספרייה לא מוצגים שוב
-  const owned = useMemo(() => new Set(db.books.map(x => normTitle(x.title)).concat(db.books.map(x => normTitle(x.subtitle || '')))), [db.books]);
-  const visible = ([b]) => !owned.has(normTitle(b[0])) && !(b[2] && owned.has(normTitle(b[2])));
+  // ספר שכבר בספרייה (בשם העברי או בשם המקור, גם בכתיב אחר) לא מוצג בחפיסה ולא ניתן לסימון
+  const owned = useMemo(() => {
+    const k = (t) => skel(normTitle(t)).join(' ');
+    const set = new Set();
+    db.books.forEach(x => { [x.title, x.subtitle].forEach(t => { const v = t && k(t); if (v) set.add(v); }); });
+    return (b) => [b[0], b[2]].some(t => t && set.has(k(t)));
+  }, [db.books]);
+  const visible = ([b]) => !owned(b);
   let idx = pos;
   while (idx < STARTER_DECK.length && !visible(STARTER_DECK[idx])) idx++;
   let idx2 = idx + 1;
   while (idx2 < STARTER_DECK.length && !visible(STARTER_DECK[idx2])) idx2++;
   const cur = STARTER_DECK[idx], next = STARTER_DECK[idx2];
   useEffect(() => { [idx2, idx2 + 1, idx2 + 2].forEach(i => STARTER_DECK[i] && starterCover(STARTER_DECK[i][0])); }, [idx2]);
-  const count = Object.keys(picks).length;
+  const count = Object.values(picks).filter(p => !owned(p.b)).length;
   const nq = norm(q);
   const found = nq ? STARTER_DECK.filter(([b]) => norm(b.join(' ')).includes(nq)) : [];
 
@@ -1786,7 +1822,7 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
 
   // כל ספר שסומן נבדק מול המאגרים; מה שאומת נכנס לספרייה (בשם העברי), והשאר עובר לרשימת ההמתנה לאימות ידני
   const finish = async () => {
-    const entries = Object.values(picks);
+    const entries = Object.values(picks).filter(p => !owned(p.b));
     onBegin && onBegin();   // משאיר את המסך פתוח גם אחרי שהספרייה כבר לא ריקה
     setPhase('working');
     setProg({ done: 0, total: entries.length, added: 0, queued: 0 });
@@ -1857,19 +1893,20 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
           {!found.length && <li className="text-muted text-center py-6">אין ברשימה ספר כזה. אפשר להוסיף אותו בלשונית "הוספת ספר".</li>}
           {found.map(([b, gi]) => {
             const pick = picks[STARTER_KEY(b)];
+            const have = owned(b);
             return (
-              <li key={STARTER_KEY(b)} className={`bg-surface border rounded-xl px-3 py-2.5 flex items-center gap-2 ${pick ? 'border-accent' : 'border-line'}`}>
+              <li key={STARTER_KEY(b)} className={`bg-surface border rounded-xl px-3 py-2.5 flex items-center gap-2 ${pick ? 'border-accent' : 'border-line'} ${have ? 'opacity-60' : ''}`}>
                 <StarterCover b={b} className="w-10 h-14 rounded shrink-0 text-[0px]" />
                 <div className="flex-1 min-w-0">
                   <div className="font-display font-medium text-[17px] leading-snug">{b[0]}</div>
                   <div className="text-muted text-[13px] truncate">{b[1]} · {STARTER[gi].genre}</div>
                 </div>
-                <div className="flex gap-1 shrink-0" role="group" aria-label={`דירוג ${b[0]}`}>
+                {have ? <span className="shrink-0 text-[13px] text-muted">כבר בספרייה</span> : <div className="flex gap-1 shrink-0" role="group" aria-label={`דירוג ${b[0]}`}>
                   {STARTER_RATINGS.map(([r, l]) => (
                     <button key={r} type="button" aria-pressed={!!(pick && pick.rating === r)} onClick={() => togglePick(b, gi, r)}
                       className={`min-h-[36px] px-2.5 rounded-lg border text-[13px] ${pick && pick.rating === r ? 'bg-accentSoft text-accent border-accent font-semibold' : 'border-line text-muted'}`}>{l}</button>
                   ))}
-                </div>
+                </div>}
               </li>
             );
           })}
@@ -2387,8 +2424,10 @@ function BulkImport({ db, onPick, goSettings }) {
   const parsed = useMemo(() => parseBookList(draft), [draft]);
   // זיהוי חכם לכל הספרים שלא נמצאו, אחד אחרי השני
   const [bulkSmart, setBulkSmart] = useState({ busy: false, done: 0, total: 0, cost: 0, err: '' });
-  const smartAllNotFound = async () => {
-    const targets = (queue ? queue.items : []).filter(it => it.status === 'notfound' || it.status === 'error');
+  const smartAllNotFound = async (auto) => {
+    const targets = (queue ? queue.items : []).filter(it => (it.status === 'notfound' || it.status === 'error') && !(auto && it.aiTried));
+    if (!targets.length) return;
+    targets.forEach(it => setItem(it.id, { aiTried: true }));
     setBulkSmart({ busy: true, done: 0, total: targets.length, cost: 0, err: '' });
     let cost = 0;
     for (let i = 0; i < targets.length; i++) {
@@ -2412,6 +2451,39 @@ function BulkImport({ db, onPick, goSettings }) {
   }, [currentId]);
 
   const setItem = (id, patch) => setQueue(q => q && ({ ...q, items: q.items.map(it => it.id === id ? { ...it, ...patch } : it) }));
+  // ספר שכבר נמצא בספרייה יוצא לבד מרשימת הטיפול
+  const dbRef = useRef(db); dbRef.current = db;
+  const inLibrary = (it, res) => {
+    const top = res && res.candidates && res.candidates[0];
+    const byRes = top && (top.match || 0) >= 0.6 && findInLibrary(top, dbRef.current.books);
+    if (byRes) return byRes;
+    const text = skel(`${it.title} ${it.author || ''}`).join(' ');
+    return dbRef.current.books.find(b => {
+      const t = skel(normTitle(b.title)).join(' ');
+      if (t.length < 3 || !(text === t || text.startsWith(t + ' '))) return false;
+      const rest = text.slice(t.length).trim();
+      return !rest || (b.authors || []).some(a => skel(a).some(w => w.length > 1 && rest.includes(w)));
+    });
+  };
+  useEffect(() => {
+    if (!queue) return;
+    const hit = queue.items.map(it => [it, !isDone(it.status) && it.status !== 'searching' && inLibrary(it, results[it.id])]).filter(x => x[1]);
+    if (!hit.length) return;
+    setQueue(q => {
+      if (!q) return q;
+      const ids = new Map(hit.map(([it, b]) => [it.id, b.title]));
+      const items = q.items.map(it => ids.has(it.id) && !isDone(it.status) ? { ...it, status: 'exists', savedTitle: ids.get(it.id) } : it);
+      const cur = items.find(it => it.id === q.current);
+      const nx = cur && isDone(cur.status) ? items.find(it => !isDone(it.status)) : cur;
+      return { ...q, items, current: nx ? nx.id : null };
+    });
+  }, [queue, results, db.books]);
+  // בסוף החיפוש הרגיל: ספרים שלא נמצאו עוברים לבד לזיהוי החכם (פעם אחת לכל ספר)
+  useEffect(() => {
+    if (!queue || bulkSmart.busy || !aiAvailable()) return;
+    if (queue.items.some(it => it.status === 'pending' || it.status === 'searching')) return;
+    if (queue.items.some(it => (it.status === 'notfound' || it.status === 'error') && !it.aiTried)) smartAllNotFound(true);
+  }, [queue, bulkSmart.busy]);
 
   // חיפוש ברקע, פריט אחד בכל פעם; הפריט הנוכחי קודם
   useEffect(() => {
@@ -2517,7 +2589,7 @@ function BulkImport({ db, onPick, goSettings }) {
         </div>
         {aiAvailable() && (bulkSmart.busy || items.some(it => it.status === 'notfound' || it.status === 'error')) && (
           <div className="mt-2 grid gap-1">
-            <Btn variant="soft" disabled={bulkSmart.busy} onClick={smartAllNotFound}>
+            <Btn variant="soft" disabled={bulkSmart.busy} onClick={() => smartAllNotFound(false)}>
               {bulkSmart.busy ? <><Spinner />מזהה {bulkSmart.done + 1} מתוך {bulkSmart.total}…</> : <><Icon name="Sparkles" size={18} />זיהוי חכם לכל מה שלא נמצא ({items.filter(it => it.status === 'notfound' || it.status === 'error').length})</>}
             </Btn>
             {!bulkSmart.busy && bulkSmart.total > 0 && <p className="text-[13px] text-muted">זוהו {bulkSmart.done} ספרים · עלות משוערת ${bulkSmart.cost.toFixed(2)}</p>}
