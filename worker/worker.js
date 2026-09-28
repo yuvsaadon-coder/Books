@@ -22,8 +22,8 @@ const TRUSTED_DOMAINS = [
   'am-oved.co.il', 'kibutz-poalim.co.il', 'ybook.co.il', 'kinbooks.co.il', 'keter-books.co.il', 'modan.co.il',
   'abayit-books.com', '9livespress.com',
   // ביקורת וספרות
-  'haaretz.co.il', 'ynet.co.il', 'wikipedia.org', 'goodreads.com', 'theguardian.com', 'nytimes.com', 'newyorker.com',
-  'kirkusreviews.com', 'publishersweekly.com', 'lrb.co.uk', 'nybooks.com', 'bookbrowse.com',
+  // (newyorker.com, nytimes.com, theguardian.com נחסמים ע"י Anthropic ולכן לא ברשימה)
+  'haaretz.co.il', 'ynet.co.il', 'wikipedia.org', 'goodreads.com', 'kirkusreviews.com', 'publishersweekly.com', 'lrb.co.uk', 'nybooks.com', 'bookbrowse.com',
   // זמינות דיגיטלית וקולית, קטלוגים
   'storytel.com', 'audible.com', 'books.google.com', 'openlibrary.org', 'worldcat.org'
 ];
@@ -40,14 +40,15 @@ function corsHeaders(req) {
 }
 const json = (data, status, cors) => new Response(JSON.stringify(data), { status, headers: { ...cors, 'content-type': 'application/json; charset=utf-8' } });
 
-export function sanitizeTools(tools) {
+export function sanitizeTools(tools, blocked = []) {
+  const allowed = TRUSTED_DOMAINS.filter(d => !blocked.includes(d));
   const out = [];
   for (const t of Array.isArray(tools) ? tools : []) {
     if (t && t.name === 'web_search' && /^web_search_/.test(t.type || '')) {
       // בלי user_location: חיפוש הרשת של Anthropic לא תומך בקוד מדינה IL (מחזיר 400)
-      out.push({ type: t.type, name: 'web_search', allowed_domains: TRUSTED_DOMAINS, max_uses: 12 });
+      out.push({ type: t.type, name: 'web_search', allowed_domains: allowed, max_uses: 12 });
     } else if (t && t.name === 'web_fetch' && /^web_fetch_/.test(t.type || '')) {
-      out.push({ type: t.type, name: 'web_fetch', allowed_domains: TRUSTED_DOMAINS, max_uses: 15, max_content_tokens: 20000 });
+      out.push({ type: t.type, name: 'web_fetch', allowed_domains: allowed, max_uses: 15, max_content_tokens: 20000 });
     } else if (t && !t.type && t.name && t.input_schema) {
       out.push(t);   // כלים של האפליקציה עצמה (למשל החזרת תוצאה במבנה קבוע)
     }
@@ -67,8 +68,8 @@ async function handleAI(req, env, cors) {
   try { body = await req.json(); } catch (e) { return json({ type: 'error', error: { type: 'invalid_request_error', message: 'bad json' } }, 400, cors); }
   if (!ALLOWED_MODELS.includes(body.model)) body.model = ALLOWED_MODELS[0];
   body.max_tokens = Math.min(Number(body.max_tokens) || 16000, MAX_TOKENS);
-  body.tools = sanitizeTools(body.tools);
-  if (!body.tools.length) delete body.tools;
+  const requestedTools = body.tools;
+  let blocked = (await env.LIBRARY.get('blocked-domains', 'json')) || [];
   delete body.mcp_servers; delete body.container;
 
   const betas = (req.headers.get('anthropic-beta') || '').split(',').map(s => s.trim()).filter(b => ALLOWED_BETAS.includes(b));
@@ -81,8 +82,30 @@ async function handleAI(req, env, cors) {
   if (betas.length) headers['anthropic-beta'] = betas.join(',');
 
   const url = new URL(req.url);
-  const upstream = await fetch('https://api.anthropic.com' + url.pathname + url.search, { method: 'POST', headers, body: JSON.stringify(body) });
-  return new Response(upstream.body, { status: upstream.status, headers: { ...cors, 'content-type': upstream.headers.get('content-type') || 'application/json' } });
+  // אתר שהסורק של Anthropic לא יכול לגשת אליו גורם ל-400; מסירים אותו, זוכרים, ומנסים שוב
+  for (let attempt = 0; attempt < 3; attempt++) {
+    body.tools = sanitizeTools(requestedTools, blocked);
+    if (!body.tools.length) delete body.tools;
+    const upstream = await fetch('https://api.anthropic.com' + url.pathname + url.search, { method: 'POST', headers, body: JSON.stringify(body) });
+    if (upstream.status === 400) {
+      const text = await upstream.text();
+      const newlyBlocked = blockedDomainsFrom(text).filter(d => !blocked.includes(d));
+      if (newlyBlocked.length && attempt < 2) {
+        blocked = [...blocked, ...newlyBlocked];
+        await env.LIBRARY.put('blocked-domains', JSON.stringify(blocked));
+        continue;
+      }
+      return new Response(text, { status: 400, headers: { ...cors, 'content-type': 'application/json' } });
+    }
+    return new Response(upstream.body, { status: upstream.status, headers: { ...cors, 'content-type': upstream.headers.get('content-type') || 'application/json' } });
+  }
+}
+
+// "The following domains are not accessible to our user agent: ['a.com', 'b.com']"
+export function blockedDomainsFrom(text) {
+  const m = /not accessible[^\[]*\[([^\]]*)\]/i.exec(text || '');
+  if (!m) return [];
+  return [...m[1].matchAll(/['"]([a-z0-9.-]+\.[a-z]{2,})['"]/gi)].map(x => x[1].toLowerCase());
 }
 
 // Google Books דרך השרת: מוסיף את המפתח (שמור בשרת) ושומר תוצאות במטמון ל-12 שעות,
