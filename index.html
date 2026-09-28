@@ -5,6 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#1E5B4A">
   <title>מנהל קריאה ומנוע המלצות חכם</title>
+  <meta name="description" content="ספרייה אישית מאומתת, דירוגים והמלצות קריאה חכמות">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="icons/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="הספרים שלי">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Assistant:wght@400;500;600;700&family=Frank+Ruhl+Libre:wght@500;700;900&display=swap">
@@ -80,6 +89,15 @@
 </head>
 <body>
   <div id="root"><div class="boot">טוען את מנהל הקריאה…</div></div>
+  <script>
+    // אירוע ההתקנה עלול להגיע לפני ש-React נטען, לכן תופסים אותו כאן
+    window.__installPrompt = null;
+    window.addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); window.__installPrompt = e; window.dispatchEvent(new Event('vrt-install-ready')); });
+    window.addEventListener('appinstalled', function () { window.__installPrompt = null; window.dispatchEvent(new Event('vrt-install-ready')); });
+    if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+      window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function () {}); });
+    }
+  </script>
   <script type="text/babel" data-presets="react">
     const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
@@ -2970,6 +2988,59 @@
     /* ============================================================
        אפליקציה
        ============================================================ */
+    /* ---------- התקנה על מסך הבית ---------- */
+    const INSTALL_DISMISS_KEY = 'vrt_install_dismissed_at';
+    const isStandalone = () => { try { return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true; } catch (e) { return false; } };
+    const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    function InstallPrompt() {
+      const [ready, setReady] = useState(!!window.__installPrompt);
+      const [hidden, setHidden] = useState(() => {
+        try { const t = Number(localStorage.getItem(INSTALL_DISMISS_KEY) || 0); return Date.now() - t < 14 * 86400000; } catch (e) { return false; }
+      });
+      const [iosHelp, setIosHelp] = useState(false);
+      useEffect(() => {
+        const f = () => setReady(!!window.__installPrompt);
+        window.addEventListener('vrt-install-ready', f);
+        return () => window.removeEventListener('vrt-install-ready', f);
+      }, []);
+      if (hidden || isStandalone() || !/^https?:$/.test(location.protocol)) return null;
+      const ios = isIOS();
+      if (!ready && !ios) return null;
+      const dismiss = () => { try { localStorage.setItem(INSTALL_DISMISS_KEY, String(Date.now())); } catch (e) { /* */ } setHidden(true); };
+      const install = async () => {
+        if (ios) { setIosHelp(true); return; }
+        const ev = window.__installPrompt;
+        if (!ev) return;
+        ev.prompt();
+        try { const r = await ev.userChoice; if (r && r.outcome === 'accepted') setHidden(true); } catch (e) { /* */ }
+        window.__installPrompt = null; setReady(false);
+      };
+      return (
+        <div className="fade-in mt-3 bg-surface border border-line rounded-2xl p-3 flex gap-3 items-start">
+          <img src="icons/icon-192.png" alt="" width="48" height="48" className="w-12 h-12 rounded-xl shrink-0" />
+          <div className="flex-1 min-w-0 grid gap-2">
+            <div>
+              <div className="font-bold text-[16px]">להתקין על מסך הבית?</div>
+              <div className="text-[14px] text-muted">נפתח כמו אפליקציה, במסך מלא, וגם בלי אינטרנט.</div>
+            </div>
+            {iosHelp ? (
+              <ol className="text-[14px] list-decimal pr-5 grid gap-1">
+                <li>לוחצים על כפתור השיתוף <Icon name="Share" size={15} className="inline align-text-bottom" /> בתחתית Safari.</li>
+                <li>בוחרים <b>"הוספה למסך הבית"</b>.</li>
+                <li>לוחצים <b>"הוסף"</b>.</li>
+              </ol>
+            ) : (
+              <div className="flex gap-2">
+                <Btn className="!min-h-[44px]" onClick={install}><Icon name="Download" size={18} />התקנה</Btn>
+                <Btn variant="ghost" className="!min-h-[44px]" onClick={dismiss}>לא עכשיו</Btn>
+              </div>
+            )}
+            {iosHelp && <button type="button" className="text-muted text-[13px] font-bold justify-self-start min-h-[36px]" onClick={dismiss}>סגירה</button>}
+          </div>
+        </div>
+      );
+    }
+
     const TABS = [
       { id: 'library', label: 'ספרים שלי', icon: 'Library' },
       { id: 'add', label: 'הוספת ספר', icon: 'BookPlus' },
@@ -3031,6 +3102,7 @@
                 <Icon name="Users" size={16} />החלפת משתמש
               </button>
             </div>
+            <InstallPrompt />
             {tab === 'library' && <LibraryTab db={db} onEdit={(b) => setPending({ book: b, existing: b })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id), tombstones: { ...d.tombstones, books: { ...d.tombstones.books, [id]: Date.now() } } })); notify('הספר נמחק'); }}
               onUpdateBook={(id, patch) => update(d => ({ ...d, books: d.books.map(b => b.id === id ? sanitizeBook({ ...b, ...patch, editedAt: Date.now() }) : b) }))} goAdd={() => setTab('add')} />}
             {tab === 'add' && <AddTab db={db} onPick={pick} goSettings={() => setTab('backup')} />}
@@ -3090,7 +3162,7 @@
       return (
         <div className="min-h-screen bg-bg text-ink font-body">
           <main className="mx-auto max-w-md px-4 pt-10 pb-10 safe-top fade-in">
-            <div className="text-accent mb-3"><Icon name="Library" size={40} /></div>
+            <img src="icons/icon-192.png" alt="" width="64" height="64" className="w-16 h-16 rounded-2xl mb-4 shadow-sm" />
             <h1 className="font-display font-black text-[32px] leading-tight mb-1">של מי הספרייה?</h1>
             <p className="text-muted text-[15px] mb-6">כל משתמש מקבל ספרייה, דירוגים והמלצות משלו. אין סיסמה, רק בוחרים שם.</p>
             {profiles.length > 0 && (
