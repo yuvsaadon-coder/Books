@@ -32,3 +32,12 @@ assert.equal(sent.length, 2);
 assert.ok(sent[0].tools[0].allowed_domains.includes('goodreads.com') && !sent[1].tools[0].allowed_domains.includes('goodreads.com'));
 assert.deepEqual(JSON.parse(kv.get('blocked-domains')), ['goodreads.com']);
 console.log('worker retry round-trip: ok');
+import { checkPage } from '../worker/worker.js';
+const page = `<html><head><title>העיר וחומתה החמקמקה - הרוקי מורקמי | עברית</title>
+<meta property="og:title" content="העיר וחומתה החמקמקה"><meta property="og:image" content="https://www.e-vrit.co.il/img/1.jpg">
+<meta name="description" content="העיר, שספק נוצרה בדמיונם של השניים, היא מקום קודר ולירי"></head><body><h1>הָעִיר וְחוֹמָתָהּ הַחֲמַקְמַקָּה</h1><a>הרוקי מורקמי</a></body></html>`;
+const ok = checkPage(page, 'העיר וחומתה החמקמקה', 'הרוקי מורקמי');
+assert.ok(ok.ok); assert.equal(ok.image, 'https://www.e-vrit.co.il/img/1.jpg'); assert.ok(ok.description.startsWith('העיר'));
+assert.equal(checkPage(page, 'ספר אחר לגמרי', 'הרוקי מורקמי').ok, false);
+assert.equal(checkPage(page, 'העיר וחומתה החמקמקה', 'עמוס עוז').ok, false);
+console.log('worker page verification: ok');

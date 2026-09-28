@@ -74,6 +74,10 @@ async function phone(browser, name) {
         if (step.error) return route.fulfill({ status: step.error, headers: cors, json: { type: 'error', error: { type: 'invalid_request_error', message: 'tools.0.web_search_20260209: something_very_long_without_spaces_'.repeat(4) } } });
         return route.fulfill({ headers: { ...cors, 'content-type': 'text/event-stream' }, body: sse(step.blocks, step.stop) });
       }
+      if (u.pathname === '/page') {
+        const title = u.searchParams.get('title');
+        return route.fulfill({ headers: cors, json: { ok: title === 'העיר וחומתה החמקמקה', url: u.searchParams.get('url'), site: 'e-vrit.co.il', title, image: '', description: 'העיר, שספק נוצרה בדמיונם של השניים, היא מקום קודר ולירי.' } });
+      }
       if (u.pathname.startsWith('/gbooks')) { viaProxy++; return googleMock(route, new URL(u.searchParams.get('u') || 'https://x/')); }
     }
     if (u.host === 'www.googleapis.com') { direct++; return googleMock(route, u); }
@@ -146,6 +150,17 @@ try {
     const call = aiCalls.at(-1);
     assert.equal(call.model, 'claude-sonnet-4-6');
     assert.deepEqual(call.tools.map(t => t.name), ['web_search', 'web_fetch', 'submit_matches']);
+  });
+  await step('new Hebrew book found only on an Israeli store page is verified via that page', async () => {
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 't5', name: 'submit_matches', input: { candidates: [
+      { title: 'העיר וחומתה החמקמקה', author: 'הרוקי מורקמי', original_title: '', isbn: '', page_url: 'https://www.e-vrit.co.il/Product/1/x' },
+      { title: 'ספר מזויף', author: 'אף אחד', original_title: '', isbn: '', page_url: 'https://www.e-vrit.co.il/Product/2/y' }] } }], stop: 'tool_use' });
+    await A.click('nav >> text=הוספת ספר'); await A.click('button[role=tab]:has-text("ספר אחד")');
+    await A.fill('#book-q', 'העיר וחומתה'); await A.click('form button[type=submit]');
+    await A.waitForSelector('text=לא נמצא ספר שתואם לחיפוש');
+    await A.click('button:has-text("זיהוי חכם עם AI")'); await A.waitForSelector('main ul > li:has-text("העיר וחומתה החמקמקה")');
+    assert.deepEqual(await texts(A.locator('main ul > li > div .font-display.text-\\[18px\\]')), ['העיר וחומתה החמקמקה']);
+    assert.ok((await A.locator('main ul > li').first().textContent()).includes('מאומת · עברית'));
   });
   await step('free text → queue; to-do and done lists', async () => {
     aiScript.push({ blocks: [{ type: 'tool_use', id: 't3', name: 'submit_books', input: { books: [{ title: 'סיפור פשוט', author: 'עגנון', note: 'אהב מאוד' }, { title: 'קפקא על החוף', author: 'הרוקי מורקמי', note: '' }] } }], stop: 'tool_use' });

@@ -987,20 +987,21 @@ async function aiExtractBooks(paragraph) {
 async function aiResolveBook(text, author, onProgress) {
   const { input, cost } = await aiRun({
     effort: 'medium', onProgress,
-    system: 'A reader typed a book name that a catalogue search could not match: it may be misspelled, abbreviated, a Hebrew translation title, or mixed with the author name. Identify the most likely real books. Use web search on the allowed sites to confirm the exact published titles (Hebrew edition title when relevant), author and ISBN. Only return books you confirmed exist. ' + HEBREW_OUT,
+    system: 'A reader typed a book name that a catalogue search could not match: it may be misspelled, abbreviated, a Hebrew translation title, or mixed with the author name. Identify the most likely real books. Use web search on the allowed sites to confirm the exact published titles (Hebrew edition title when relevant), author and ISBN. New Hebrew books often exist only on Israeli store and publisher sites (e-vrit, Steimatzky, Tzomet/booknet, the publisher): search there and return the book page URL in page_url. Only return books you confirmed exist. ' + HEBREW_OUT,
     prompt: `Typed: "${text}"${author ? `\nAuthor typed: "${author}"` : ''}`,
     submitTool: {
       name: 'submit_matches', description: 'Return the confirmed candidate books, best first.',
       input_schema: { type: 'object', additionalProperties: false, required: ['candidates'], properties: {
-        candidates: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['title', 'author', 'original_title', 'isbn'], properties: {
+        candidates: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['title', 'author', 'original_title', 'isbn', 'page_url'], properties: {
           title: { type: 'string', description: 'title as published in the edition the reader most likely means' },
           author: { type: 'string' }, original_title: { type: 'string', description: 'empty if same' },
-          isbn: { type: 'string', description: 'ISBN-13 or ISBN-10 if found, else empty' } } } } } }
+          isbn: { type: 'string', description: 'ISBN-13 or ISBN-10 if found, else empty' },
+          page_url: { type: 'string', description: 'URL of the book page on a store or publisher site you read (e-vrit, Steimatzky, Tzomet/booknet, the publisher). Empty if none.' } } } } } }
     }
   });
   const found = [];
   for (const c of (input.candidates || []).slice(0, 4)) {
-    const v = await verifyAiBook({ title_he: c.title, title_original: c.original_title, author: c.author, isbn: c.isbn }, true);
+    const v = await verifyAiBook({ title_he: c.title, title_original: c.original_title, author: c.author, isbn: c.isbn, page_url: c.page_url }, true);
     v.forEach(x => { if (!found.some(f => f.key === x.key)) found.push(x); });
   }
   return {
@@ -1026,7 +1027,25 @@ async function verifyAiBook(r, many) {
     for (const c of res.candidates.slice(0, 10)) if (ok(c) && !out.some(o => o.key === c.key)) out.push(c);
     if (out.length && !many) break;
   }
+  // לא במאגרים (נפוץ בספרים עבריים חדשים)? מאמתים מול דף הספר באתר אמין: השרת נכנס לדף ובודק שהשם והמחבר מופיעים בו
+  if (!out.length && r.page_url && loadCloud()) {
+    const w = await verifyPage(r.page_url, r.title_he || r.title_original, r.author).catch(() => null);
+    if (w && w.ok) {
+      out.push({
+        key: 'web:' + w.url, source: 'web', sourceId: w.url, title: r.title_he || r.title_original, subtitle: r.title_he && r.title_original && r.title_original !== r.title_he ? r.title_original : '',
+        authors: r.author ? [r.author] : [], year: '', description: w.description || r.synopsis_he || '', descSource: w.description ? w.site : '',
+        categories: r.genres || [], cover: w.image || '', pageCount: 0, language: hasHebrew(r.title_he || '') ? 'he' : '',
+        isbns: isbn ? [isbn] : [], link: w.url, avgRating: 0, ratingsCount: 0, publisher: '', verifiedVia: w.site
+      });
+    }
+  }
   return out;
+}
+async function verifyPage(url, title, author) {
+  const c = loadCloud();
+  const r = await fetch(c.url + '/page?' + new URLSearchParams({ url, title: title || '', author: author || '' }));
+  if (!r.ok) return null;
+  return r.json();
 }
 
 // 3. השלמת תקציר, ז'אנרים וזמינות מהמקורות
@@ -1084,7 +1103,7 @@ async function aiRecommend({ books, request, answers, lang, exclude, dismissed, 
       'You are a literary advisor with deep knowledge of world and Israeli literature. Recommend books this specific reader will love.',
       'Think about the reader: what their highly rated books and notes have in common (themes, voice, structure, emotional register, pace, setting), and what they rated low.',
       'Use web search on the allowed sites to read critical reviews, literary analyses, reader ratings and publisher synopses, both to find strong candidates and to check each one against the reader\'s taste. Prefer well-regarded books over merely popular ones when the reader\'s taste is literary.',
-      'Every recommended book must be a real, published book you confirmed in the sources. Give the Hebrew edition title when one exists and the ISBN when you found it. Never recommend a book the reader already has.',
+      'Every recommended book must be a real, published book you confirmed in the sources. Give the Hebrew edition title when one exists, the ISBN when you found it, and in page_url the book page on an Israeli store or publisher site when you read one. Never recommend a book the reader already has.',
       '`why` must connect the book to specific books and notes from the reader\'s library and to what reviewers said, in 2–4 sentences. List the pages you relied on in `sources`.',
       `Language: ${langText}. ` + HEBREW_OUT
     ].join('\n'),
@@ -1094,9 +1113,10 @@ async function aiRecommend({ books, request, answers, lang, exclude, dismissed, 
       input_schema: { type: 'object', additionalProperties: false, required: ['interpretation', 'recommendations'], properties: {
         interpretation: { type: 'string', description: 'one or two sentences in Hebrew: how you understood the reader and the request' },
         recommendations: { type: 'array', items: { type: 'object', additionalProperties: false,
-          required: ['title_he', 'title_original', 'author', 'isbn', 'why', 'synopsis_he', 'genres', 'formats', 'sources'], properties: {
+          required: ['title_he', 'title_original', 'author', 'isbn', 'page_url', 'why', 'synopsis_he', 'genres', 'formats', 'sources'], properties: {
             title_he: { type: 'string', description: 'Hebrew edition title, empty if none' }, title_original: { type: 'string' },
             author: { type: 'string' }, isbn: { type: 'string', description: 'empty if not found' },
+            page_url: { type: 'string', description: 'URL of the book page on a store or publisher site you read (e-vrit, Steimatzky, Tzomet/booknet, the publisher). Empty if none.' },
             why: { type: 'string' }, synopsis_he: { type: 'string' }, genres: { type: 'array', items: { type: 'string' } },
             formats: FORMAT_SCHEMA, sources: SOURCES_SCHEMA } } } } }
     }
@@ -1405,7 +1425,8 @@ function Cover({ book, className = 'w-16 h-24' }) {
 }
 
 function SourceBadge({ book }) {
-  const src = book.verifiedVia || (book.source === 'google' ? 'Google Books' : book.source === 'openlibrary' ? 'Open Library' : book.source === 'wikidata' ? 'Wikidata' : 'מקור');
+  const SITE_NAMES = { 'e-vrit.co.il': 'עברית', 'steimatzky.co.il': 'סטימצקי', 'booknet.co.il': 'צומת ספרים', 'kinbooks.co.il': 'כנרת זמורה דביר', 'ybook.co.il': 'ידיעות ספרים', 'am-oved.co.il': 'עם עובד', 'kibutz-poalim.co.il': 'הקיבוץ המאוחד', 'keter-books.co.il': 'כתר', 'modan.co.il': 'מודן', 'simania.co.il': 'סימניה' };
+  const src = SITE_NAMES[book.verifiedVia] || book.verifiedVia || (book.source === 'google' ? 'Google Books' : book.source === 'openlibrary' ? 'Open Library' : book.source === 'wikidata' ? 'Wikidata' : 'מקור');
   return (
     <span className="inline-flex items-center gap-1 text-[12px] font-semibold px-2 py-0.5 rounded-full bg-accentSoft text-accent">
       <Icon name="ShieldCheck" size={13} /> מאומת · {src}
@@ -2015,6 +2036,24 @@ function BulkImport({ db, onPick, goSettings }) {
     setItem(id, { status: res.candidates.length ? 'ready' : 'notfound' });
   });
   const parsed = useMemo(() => parseBookList(draft), [draft]);
+  // זיהוי חכם לכל הספרים שלא נמצאו, אחד אחרי השני
+  const [bulkSmart, setBulkSmart] = useState({ busy: false, done: 0, total: 0, cost: 0, err: '' });
+  const smartAllNotFound = async () => {
+    const targets = (queue ? queue.items : []).filter(it => it.status === 'notfound' || it.status === 'error');
+    setBulkSmart({ busy: true, done: 0, total: targets.length, cost: 0, err: '' });
+    let cost = 0;
+    for (let i = 0; i < targets.length; i++) {
+      const it = targets[i];
+      try {
+        const res = await aiResolveBook(it.title, it.author || '');
+        cost += res.cost || 0;
+        setResults(r => ({ ...r, [it.id]: { ...res, fromAi: true } }));
+        setItem(it.id, { status: res.candidates.length ? 'ready' : 'notfound' });
+      } catch (e) { setBulkSmart(b => ({ ...b, err: e.message })); break; }
+      setBulkSmart(b => ({ ...b, done: i + 1, cost }));
+    }
+    setBulkSmart(b => ({ ...b, busy: false, cost }));
+  };
 
   useEffect(() => { saveQueue(queue); }, [queue]);
   const currentId = queue ? queue.current : null;
@@ -2127,6 +2166,15 @@ function BulkImport({ db, onPick, goSettings }) {
           <button type="button" onClick={() => { setListDraft(items.filter(it => !isDone(it.status)).map(lineOf).join('\n')); setListOpen(false); }}
             className="min-h-[44px] rounded-xl border border-line font-bold text-[14px] inline-flex items-center justify-center gap-1"><Icon name="Pencil" size={15} />עריכה</button>
         </div>
+        {aiAvailable() && (bulkSmart.busy || items.some(it => it.status === 'notfound' || it.status === 'error')) && (
+          <div className="mt-2 grid gap-1">
+            <Btn variant="soft" disabled={bulkSmart.busy} onClick={smartAllNotFound}>
+              {bulkSmart.busy ? <><Spinner />מזהה {bulkSmart.done + 1} מתוך {bulkSmart.total}…</> : <><Icon name="Sparkles" size={18} />זיהוי חכם לכל מה שלא נמצא ({items.filter(it => it.status === 'notfound' || it.status === 'error').length})</>}
+            </Btn>
+            {!bulkSmart.busy && bulkSmart.total > 0 && <p className="text-[13px] text-muted">זוהו {bulkSmart.done} ספרים · עלות משוערת ${bulkSmart.cost.toFixed(2)}</p>}
+            {bulkSmart.err && <p className="text-[13px] text-danger">{bulkSmart.err}</p>}
+          </div>
+        )}
         {listOpen && (() => {
           const shownItems = items.filter(it => listOpen === 'done' ? isDone(it.status) : !isDone(it.status));
           return (

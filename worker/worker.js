@@ -128,6 +128,56 @@ async function handleGoogleBooks(req, env, cors, ctx) {
   return new Response(body, { status: up.status, headers: { ...cors, 'content-type': 'application/json' } });
 }
 
+// אימות ספר מדף באתר אמין (חנות/הוצאה): השרת נכנס לדף, בודק שהשם (והמחבר) מופיעים בו,
+// ומחזיר כותרת, כריכה ותקציר מתגי ה-og של הדף. משמש לספרים עבריים שאינם במאגרים הפתוחים.
+const heNorm = (t) => (t || '').toLowerCase().replace(/[\u0591-\u05C7]/g, '').replace(/&[#a-z0-9]+;/gi, ' ')
+  .replace(/[״׳"'`’‘]/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+function decodeEntities(t) {
+  return (t || '').replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n)).replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)));
+}
+function metaOf(html, names) {
+  for (const n of names) {
+    const re = new RegExp(`<meta[^>]+(?:property|name)=["']${n}["'][^>]*>`, 'i');
+    const tag = re.exec(html);
+    if (tag) { const c = /content=["']([^"']*)["']/i.exec(tag[0]); if (c && c[1].trim()) return decodeEntities(c[1].trim()); }
+  }
+  return '';
+}
+export function checkPage(html, expectTitle, expectAuthor) {
+  const text = heNorm(html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' '));
+  const words = heNorm(expectTitle).split(' ').filter(w => w.length > 1);
+  const titleOk = words.length > 0 && words.every(w => text.includes(w));
+  const surname = heNorm(expectAuthor).split(' ').filter(Boolean).pop();
+  const authorOk = !surname || text.includes(surname);
+  const titleTag = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+  return {
+    ok: titleOk && authorOk, titleOk, authorOk,
+    title: metaOf(html, ['og:title', 'twitter:title']) || decodeEntities((titleTag && titleTag[1] || '').trim()),
+    image: metaOf(html, ['og:image', 'twitter:image']),
+    description: metaOf(html, ['og:description', 'description', 'twitter:description'])
+  };
+}
+async function handlePage(req, cors, ctx) {
+  const q = new URL(req.url).searchParams;
+  let u;
+  try { u = new URL(q.get('url') || ''); } catch (e) { return json({ ok: false, error: 'bad_url' }, 400, cors); }
+  const host = u.hostname.replace(/^www\./, '');
+  if (u.protocol !== 'https:' || !TRUSTED_DOMAINS.some(d => host === d || host.endsWith('.' + d))) return json({ ok: false, error: 'not_trusted' }, 400, cors);
+  const cacheKey = new Request('https://page-cache/' + encodeURIComponent(u.toString()));
+  let html = null;
+  const hit = await caches.default.match(cacheKey);
+  if (hit) html = await hit.text();
+  else {
+    const r = await fetch(u.toString(), { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BooksFamilyApp/1.0)', 'Accept-Language': 'he,en;q=0.8' }, redirect: 'follow' });
+    if (!r.ok) return json({ ok: false, error: 'http_' + r.status }, 200, cors);
+    html = (await r.text()).slice(0, 2000000);
+    ctx.waitUntil(caches.default.put(cacheKey, new Response(html, { headers: { 'content-type': 'text/html', 'cache-control': 'public, max-age=86400' } })));
+  }
+  const res = checkPage(html, q.get('title') || '', q.get('author') || '');
+  return json({ ...res, url: u.toString(), site: host }, 200, cors);
+}
+
 async function handleSync(req, env, cors) {
   if (req.method === 'GET') {
     const cur = await env.LIBRARY.get('state', 'json');
@@ -158,6 +208,7 @@ export default {
     try {
       if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY, gbooks: !!env.GOOGLE_BOOKS_KEY }, 200, cors);
       if (path === '/gbooks' && req.method === 'GET') return await handleGoogleBooks(req, env, cors, ctx);
+      if (path === '/page' && req.method === 'GET') return await handlePage(req, cors, ctx);
       if (path === '/sync') return await handleSync(req, env, cors);
       if (path.startsWith('/v1/messages') && req.method === 'POST') return await handleAI(req, env, cors);
       return json({ error: 'not_found' }, 404, cors);
