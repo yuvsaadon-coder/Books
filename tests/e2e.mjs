@@ -224,6 +224,7 @@ try {
     await C.mouse.move(box.x + box.width / 2 + 80, box.y + box.height / 2, { steps: 4 });
     await C.mouse.move(box.x + box.width / 2 + 200, box.y + box.height / 2, { steps: 4 }); await C.mouse.up();
     await C.waitForSelector(`text=איך היה`);
+    await C.waitForSelector(`text=✓ קראתי: ${first}`);
     await C.locator(`[aria-label="דירוג ${first}"] button:has-text("פחות")`).click();
     const second = (await C.locator('[role=group][aria-label*=","]').last().getAttribute('aria-label')).split(',')[0];
     assert.notEqual(second, first);
@@ -231,9 +232,9 @@ try {
     await C.click('[aria-label="חזרה לספר הקודם"]');
     assert.equal((await C.locator('[role=group][aria-label*=","]').last().getAttribute('aria-label')).split(',')[0], second);
     await C.waitForSelector('button:has-text("הוספת 1 ספרים")');
-    const g1 = await C.locator('text=/ז\'אנר \\d+ מתוך/').textContent();
+    const g1 = await C.locator('text=/· \\d+ מתוך \\d+/').textContent();
     await C.click('button:has-text("ז\'אנר הבא")');
-    assert.notEqual(await C.locator('text=/ז\'אנר \\d+ מתוך/').textContent(), g1);
+    assert.notEqual(await C.locator('text=/· \\d+ מתוך \\d+/').textContent(), g1);
     await C.click('[aria-label="חזרה לספר הקודם"]');
     const rate = async (title, label) => { await C.fill('#starter-q', title); await C.locator(`li:has-text("${title}")`).first().locator(`button:has-text("${label}")`).click(); };
     await rate('מיכאל שלי', 'אהבתי'); await rate('יער נורווגי', 'בסדר'); await rate('חסמבה', 'אהבתי');

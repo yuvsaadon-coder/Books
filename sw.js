@@ -2,7 +2,7 @@
 // דף האפליקציה: קודם מהרשת (כדי לקבל עדכונים), ואם אין רשת – מהמטמון.
 // ספריות מ-CDN, אייקונים ו-manifest: מהמטמון, עם רענון ברקע.
 // קריאות ל-API (Google Books, Open Library, Wikidata, השרת המשפחתי) לא נשמרות במטמון.
-const CACHE = 'books-app-v11';
+const CACHE = 'books-app-v12';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/favicon.svg', './icons/icon-192.png', './icons/icon-512.png',
   './fonts/frank-ruhl-libre-hebrew-400-normal.woff2', './fonts/assistant-hebrew-400-normal.woff2', './fonts/assistant-hebrew-600-normal.woff2'];
 const STATIC_HOSTS = ['cdn.jsdelivr.net'];
@@ -18,7 +18,8 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (req.mode === 'navigate') {
-    e.respondWith(fetch(req).then(res => {
+    // בלי מטמון הדפדפן: אחרת GitHub Pages מגיש גרסה ישנה עד 10 דקות אחרי עדכון
+    e.respondWith(fetch(req.url, { cache: 'no-store', credentials: 'same-origin' }).then(res => {
       const copy = res.clone();
       caches.open(CACHE).then(c => c.put('./index.html', copy));
       return res;

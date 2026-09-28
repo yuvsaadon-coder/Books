@@ -7,6 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
+const APP_VERSION = '12';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -1042,7 +1043,7 @@ async function aiResolveBook(text, author, onProgress) {
   const found = [];
   for (const c of (input.candidates || []).slice(0, 4)) {
     const v = await verifyAiBook({ title_he: c.title, title_original: c.original_title, author: c.author, isbn: c.isbn, page_url: c.page_url }, true, hits);
-    v.forEach(x => { if (!found.some(f => f.key === x.key)) found.push(withHebrewTitle(x, c.title)); });
+    v.forEach(x => { if (!found.some(f => f.key === x.key)) found.push(x); });
   }
   return {
     candidates: found, sources: ['Claude + ' + uniq(found.map(f => f.source === 'google' ? 'Google Books' : f.source === 'openlibrary' ? 'Open Library' : f.source === 'web' ? f.verifiedVia : 'Wikidata')).join(' + ')],
@@ -1068,8 +1069,10 @@ async function verifyAiBook(r, many, hits) {
   const ok = (c) => (isbn && (c.isbns || []).some(x => clean(x) === isbn)) || titles.some(t => matchScore(c, `${t} ${r.author || ''}`) >= 0.6);
   const out = [];
   const tries = [];
+  // קודם השם העברי: אם יש מהדורה עברית אמיתית, היא תימצא ותוצג. שם עברי שהמודל תרגם בעצמו לא יימצא, ואז מוצגת המהדורה המקורית
+  if (r.title_he) tries.push(() => searchBooks(r.title_he, r.author || ''));
   if (isbn.length === 10 || isbn.length === 13) tries.push(() => lookupISBN(isbn));
-  titles.forEach(t => tries.push(() => searchBooks(t, r.author || '')));
+  if (r.title_original && r.title_original !== r.title_he) tries.push(() => searchBooks(r.title_original, r.author || ''));
   for (const t of tries) {
     const res = await t().catch(() => null);
     if (!res) continue;
@@ -1193,7 +1196,7 @@ async function aiRecommend({ books, request, answers, lang, exclude, dismissed, 
     const [c] = await verifyAiBook(r, false, hits);
     if (!c || findInLibrary(c, books) || exclude.includes(c.key)) { rejected++; continue; }
     recs.push({
-      ...withHebrewTitle(c, r.title_he), reasons: [r.why], genres: r.genres, sources: r.sources, aiFormats: r.formats,
+      ...c, reasons: [r.why], genres: r.genres, sources: r.sources, aiFormats: r.formats,
       description: c.description || r.synopsis_he, descSource: c.description ? c.descSource : (r.synopsis_he ? 'מקורות ברשת' : ''),
       descriptionHe: c.description && !hasHebrew(c.description) && r.synopsis_he ? r.synopsis_he : '',
       verifiedAt: Date.now(), verifiedVia: c.verifiedVia || (c.source === 'google' ? 'Google Books' : 'Open Library')
@@ -1681,7 +1684,22 @@ function starterCover(b) {
         if (doc) url = `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg`;
       } catch (e) { failed = true; }
     };
+    // ויקיפדיה (דרך Wikidata, עם בדיקת מחבר): כמעט לכל ספר מוכר יש שם תמונת כריכה
+    const wiki = async (t) => {
+      if (url || !t) return;
+      try {
+        const w = (await wikidataBooks(t, author))[0];
+        if (!w) return;
+        for (const [lang, page] of [['he', w.hewiki], ['en', w.enwiki]]) {
+          if (url || !page) continue;
+          const sm = await wikiSummary(lang, page).catch(() => null);
+          if (sm && sm.thumb) url = sm.thumb;
+        }
+      } catch (e) { failed = true; }
+    };
     await google(`intitle:${title} inauthor:${surname}`, [`${title} ${author}`]);
+    await wiki(title);
+    if (original) await wiki(original);
     await google(`${title} ${author}`, [`${title} ${author}`]);
     if (original) await google(`intitle:${original} inauthor:${surname}`, [original, `${original} ${author}`]);
     await ol(original || title);
@@ -1730,12 +1748,14 @@ function SwipeCard({ b, gi, onSwipe, top }) {
   const [gone, setGone] = useState(0);
   const drag = useRef(null);
   useEffect(() => { setDx(0); setGone(0); }, [b]);
-  const down = (e) => { if (!top) return; drag.current = { x: e.clientX, y: e.clientY, id: e.pointerId }; e.currentTarget.setPointerCapture && e.currentTarget.setPointerCapture(e.pointerId); };
-  const move = (e) => { if (drag.current && drag.current.id === e.pointerId) setDx(e.clientX - drag.current.x); };
-  const up = (e) => {
-    if (!drag.current) return;
+  const down = (e) => { if (!top) return; drag.current = { x: e.clientX, id: e.pointerId, t: Date.now() }; try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* */ } };
+  const move = (e) => { if (drag.current && drag.current.id === e.pointerId) { drag.current.dx = e.clientX - drag.current.x; setDx(drag.current.dx); } };
+  const up = () => {
+    const d = drag.current;
+    if (!d) return;
     drag.current = null;
-    if (Math.abs(dx) > 90) { setGone(dx > 0 ? 1 : -1); setTimeout(() => onSwipe(dx > 0), 160); } else setDx(0);
+    const moved = d.dx || 0, fast = Math.abs(moved) > 35 && Math.abs(moved) / Math.max(1, Date.now() - d.t) > 0.45;
+    if (Math.abs(moved) > 70 || fast) { setGone(moved > 0 ? 1 : -1); setTimeout(() => onSwipe(moved > 0), 160); } else setDx(0);
   };
   const x = gone ? gone * 480 : dx;
   const hint = x > 30 ? 'read' : x < -30 ? 'unread' : '';
@@ -1764,6 +1784,7 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
   const { pos, picks, trail } = state;
   const [q, setQ] = useState('');
   const [rateKey, setRateKey] = useState('');
+  const [last, setLast] = useState(null);   // מה סומן בסוויפ האחרון, כדי שיהיה ברור שזה נקלט
   const [phase, setPhase] = useState('pick');
   const [prog, setProg] = useState({ done: 0, total: 0, added: 0, queued: 0 });
   const save = (patch) => setState(s => {
@@ -1795,15 +1816,18 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
     const [b, gi] = cur, k = STARTER_KEY(b);
     const n = { ...picks };
     if (read) n[k] = { rating: 4, gi, b, rated: false }; else delete n[k];
-    save({ pos: idx + 1, picks: n, trail: [...trail, idx].slice(-50) });
+    const no = (state.no || []).filter(x => x !== k).concat(read ? [] : [k]);
+    save({ pos: idx + 1, picks: n, no, trail: [...trail, idx].slice(-50) });
     setRateKey(read ? k : '');
+    setLast({ title: b[0], read });
   };
   const undo = () => {
     if (!trail.length) return;
     const back = trail[trail.length - 1];
-    const n = { ...picks }; delete n[STARTER_KEY(STARTER_DECK[back][0])];
-    save({ pos: back, picks: n, trail: trail.slice(0, -1) });
-    setRateKey('');
+    const bk = STARTER_KEY(STARTER_DECK[back][0]);
+    const n = { ...picks }; delete n[bk];
+    save({ pos: back, picks: n, no: (state.no || []).filter(x => x !== bk), trail: trail.slice(0, -1) });
+    setRateKey(''); setLast(null);
   };
   const rate = (k, r) => { if (picks[k]) save({ picks: { ...picks, [k]: { ...picks[k], rating: r, rated: true } } }); setRateKey(''); };
   const togglePick = (b, gi, r) => {
@@ -1913,7 +1937,7 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
         </ul>
       ) : cur ? (
         <div className="grid gap-3">
-          <div className="relative mx-auto w-full max-w-[340px] h-[min(44vh,380px)]">
+          <div className="relative mx-auto w-full max-w-[340px] h-[min(40vh,340px)]">
             {next && <SwipeCard key={'n' + idx2} b={next[0]} gi={next[1]} top={false} onSwipe={() => {}} />}
             <SwipeCard key={'c' + idx} b={cur[0]} gi={cur[1]} top onSwipe={swipe} />
           </div>
@@ -1928,6 +1952,11 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
               <Icon name="X" size={20} />לא קראתי
             </button>
           </div>
+          {last && (
+            <div className={`fade-in text-center text-[14px] rounded-lg py-1.5 ${last.read ? 'bg-accentSoft text-accent font-semibold' : 'bg-surface2 text-muted'}`} role="status">
+              {last.read ? `✓ קראתי: ${last.title}` : `לא קראתי: ${last.title}`}
+            </div>
+          )}
           {rated ? (
             <div className="fade-in bg-surface border border-line rounded-xl p-2.5 grid gap-2" role="group" aria-label={`דירוג ${rated.b[0]}`}>
               <div className="text-[14px] text-center">איך היה <span className="font-semibold">{rated.b[0]}</span>? <span className="text-muted">(לא חובה)</span></div>
@@ -1941,7 +1970,7 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
           ) : (
             <div className="flex justify-between items-center text-[13px] text-muted px-1">
               <span className="tabular">{STARTER[cur[1]].genre} · {inGenre[0]} מתוך {inGenre[1]}</span>
-              <span className="tabular">ז'אנר {cur[1] + 1} מתוך {STARTER.length}</span>
+              <span className="tabular">קראתי {count} · לא קראתי {(state.no || []).length}</span>
             </div>
           )}
         </div>
@@ -2959,8 +2988,7 @@ function HistoryView({ db, update, onPick, notify, openId, setOpenId }) {
 const REC_STORES = {};
 function getRecStore(pid, db) {
   if (!REC_STORES[pid]) {
-    const h = (db.history || [])[0];
-    const resume = h && Date.now() - h.at < 3 * 86400000 ? h : null;
+    const resume = null;   // כל כניסה מתחילה שיחה חדשה; שיחות קודמות נמצאות בהיסטוריה
     REC_STORES[pid] = {
       step: resume ? QUESTIONS.length : 0, answers: resume ? resume.answers || {} : { avoid: [] },
       log: resume ? resume.log || [] : [], running: false, recs: resume ? resume.recs || [] : [],
@@ -3414,7 +3442,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
       </section>
         </div>
       </details>
-      <p className="text-center text-[12px] text-muted pb-2">נתוני ספרים: Google Books · Open Library · Wikidata.</p>
+      <p className="text-center text-[12px] text-muted pb-2">נתוני ספרים: Google Books · Open Library · Wikidata. · גרסה {APP_VERSION}</p>
     </div>
   );
 }
