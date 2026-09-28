@@ -334,6 +334,92 @@
       return list.map((b, i) => ({ b, i, s: score(b) })).sort((x, y) => y.s - x.s || x.i - y.i).map(x => x.b);
     }
 
+    /* ---------- גשר עברית: Wikidata + ויקיפדיה ----------
+       Open Library כמעט לא מכיל שמות בעברית. Wikidata ממפה שם עברי לשם המקור ולמחבר,
+       ומשם מאתרים את הרשומה ב-Open Library. אם אין שם רשומה, מציגים את רשומת Wikidata עצמה עם התקציר מוויקיפדיה. */
+    const WD_API = 'https://www.wikidata.org/w/api.php';
+    async function wdApi(params) {
+      const u = new URL(WD_API);
+      Object.entries({ ...params, format: 'json', origin: '*' }).forEach(([k, v]) => u.searchParams.set(k, v));
+      return fetchJSON(u.toString());
+    }
+    const wdClaims = (ent, p) => (((ent && ent.claims) || {})[p] || []).map(c => c.mainsnak && c.mainsnak.datavalue && c.mainsnak.datavalue.value).filter(Boolean);
+    const wdLabel = (ent, l) => (ent && ent.labels && ent.labels[l] && ent.labels[l].value) || '';
+    async function wikiSummary(lang, title) {
+      const d = await fetchJSON(`https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title.replace(/ /g, '_'))}`);
+      return { text: d.type === 'disambiguation' ? '' : (d.extract || ''), thumb: (d.thumbnail && d.thumbnail.source) || '', url: (d.content_urls && d.content_urls.desktop && d.content_urls.desktop.page) || '' };
+    }
+    async function wikidataBooks(text, author) {
+      const s = await wdApi({ action: 'wbsearchentities', search: text, language: hasHebrew(text) ? 'he' : 'en', uselang: 'he', type: 'item', limit: 12 });
+      const ids = (s.search || []).map(x => x.id);
+      if (!ids.length) return [];
+      const e = await wdApi({ action: 'wbgetentities', ids: ids.join('|'), props: 'labels|claims|sitelinks', languages: 'he|en' });
+      const ents = ids.map(id => (e.entities || {})[id]).filter(x => x && wdClaims(x, 'P50').length);   // רק יצירות עם מחבר
+      if (!ents.length) return [];
+      const authorIds = Array.from(new Set(ents.flatMap(x => wdClaims(x, 'P50').map(v => v.id)))).slice(0, 50);
+      const a = await wdApi({ action: 'wbgetentities', ids: authorIds.join('|'), props: 'labels', languages: 'he|en' });
+      const na = norm(author || '');
+      return ents.map(x => {
+        const aIds = wdClaims(x, 'P50').map(v => v.id);
+        const pub = wdClaims(x, 'P577')[0];
+        return {
+          qid: x.id, heTitle: wdLabel(x, 'he'), enTitle: wdLabel(x, 'en'),
+          heAuthors: aIds.map(id => wdLabel((a.entities || {})[id], 'he')).filter(Boolean),
+          enAuthors: aIds.map(id => wdLabel((a.entities || {})[id], 'en')).filter(Boolean),
+          year: pub && pub.time ? pub.time.slice(1, 5) : '',
+          olId: wdClaims(x, 'P648').find(v => /^OL\d+W$/.test(v)) || '',
+          isbns: [].concat(wdClaims(x, 'P212'), wdClaims(x, 'P957')).map(v => String(v).replace(/-/g, '')),
+          hewiki: (x.sitelinks && x.sitelinks.hewiki && x.sitelinks.hewiki.title) || '',
+          enwiki: (x.sitelinks && x.sitelinks.enwiki && x.sitelinks.enwiki.title) || ''
+        };
+      }).filter(w => !na || w.heAuthors.concat(w.enAuthors).some(n => {
+        const nn = norm(n);
+        return nn.includes(na) || na.includes(nn.split(' ').pop());
+      }));
+    }
+    async function bridgeFromWikidata(text, author) {
+      const works = (await wikidataBooks(text, author)).slice(0, 4);
+      const out = [];
+      for (const w of works) {
+        let b = null;
+        try {
+          if (w.olId) b = await olByWorkKey('/works/' + w.olId);
+          else if (w.enTitle && w.enAuthors[0]) {
+            const r = await olSearch({ title: w.enTitle, author: w.enAuthors[0], limit: 3 });
+            b = r.find(x => normTitle(x.title) === normTitle(w.enTitle)) || null;
+            if (b) await olEnrich([b], 1);
+          }
+        } catch (e) { b = null; }
+        let wiki = null;
+        const needWiki = !b || !b.description || !b.cover;
+        if (needWiki && (w.hewiki || w.enwiki)) {
+          try { wiki = await wikiSummary(w.hewiki ? 'he' : 'en', w.hewiki || w.enwiki); } catch (e) { wiki = null; }
+        }
+        if (b) {
+          if (w.heTitle && w.heTitle !== b.title) { b.subtitle = b.title; b.title = w.heTitle; }
+          if (w.heAuthors.length && hasHebrew(text)) b.authors = w.heAuthors;
+          if (!b.description && wiki && wiki.text) { b.description = wiki.text; b.descSource = 'ויקיפדיה'; }
+          if (!b.cover && wiki && wiki.thumb) b.cover = wiki.thumb;
+          b.isbns = Array.from(new Set((b.isbns || []).concat(w.isbns)));
+          b.verifiedVia = 'Open Library + Wikidata';
+          out.push(b);
+        } else {
+          const title = w.heTitle || w.enTitle;
+          if (!title) continue;
+          out.push({
+            key: 'wd:' + w.qid, source: 'wikidata', sourceId: w.qid, title,
+            subtitle: w.heTitle && w.enTitle && w.heTitle !== w.enTitle ? w.enTitle : '',
+            authors: w.heAuthors.length ? w.heAuthors : w.enAuthors, year: w.year,
+            description: (wiki && wiki.text) || '', descSource: wiki && wiki.text ? 'ויקיפדיה' : '',
+            categories: [], cover: (wiki && wiki.thumb) || '', pageCount: 0, language: w.heTitle ? 'he' : '',
+            isbns: w.isbns, link: (wiki && wiki.url) || ('https://www.wikidata.org/wiki/' + w.qid),
+            avgRating: 0, ratingsCount: 0, publisher: '', verifiedVia: 'Wikidata'
+          });
+        }
+      }
+      return out;
+    }
+
     // חיפוש ספר מטקסט חופשי / ISBN / קישור — מחזיר רק רשומות שחזרו מ-API בפועל
     async function searchBooks(input, author) {
       const text = (input || '').trim();
@@ -361,7 +447,15 @@
           const before = results.length;
           results = mergeUnique(results, ol);
           if (results.length > before) sources.add('Open Library');
-        } catch (e) { notes.push('גם Open Library לא הגיב. בדקו חיבור לרשת ונסו שוב.'); }
+        } catch (e) { notes.push('Open Library לא הגיב.'); }
+      }
+      if (results.length < 3 || (hasHebrew(text) && !sources.has('Google Books'))) {
+        try {
+          const wd = await bridgeFromWikidata(text, author);
+          const before = results.length;
+          results = mergeUnique(wd, results);
+          if (results.length > before) sources.add('Wikidata');
+        } catch (e) { notes.push('Wikidata לא הגיב.'); }
       }
       return { candidates: rankByTitle(results, text).slice(0, 10), notes, sources: Array.from(sources) };
     }
@@ -427,7 +521,8 @@
         description: str(b.description), categories: arr(b.categories), cover: str(b.cover),
         pageCount: Number(b.pageCount) || 0, language: str(b.language), isbns: arr(b.isbns), link: str(b.link),
         publisher: str(b.publisher), rating: Math.min(5, Math.max(1, Number(b.rating) || 1)), tags: arr(b.tags),
-        addedAt: Number(b.addedAt) || Date.now(), verifiedAt: Number(b.verifiedAt) || 0
+        addedAt: Number(b.addedAt) || Date.now(), verifiedAt: Number(b.verifiedAt) || 0,
+        verifiedVia: str(b.verifiedVia), descSource: str(b.descSource)
       };
     }
     function sanitizeDB(raw) {
@@ -800,7 +895,7 @@
     }
 
     function SourceBadge({ book }) {
-      const src = book.verifiedVia || (book.source === 'google' ? 'Google Books' : book.source === 'openlibrary' ? 'Open Library' : 'מקור');
+      const src = book.verifiedVia || (book.source === 'google' ? 'Google Books' : book.source === 'openlibrary' ? 'Open Library' : book.source === 'wikidata' ? 'Wikidata' : 'מקור');
       return (
         <span className="inline-flex items-center gap-1 text-[12px] font-semibold px-2 py-0.5 rounded-full bg-accentSoft text-accent">
           <Icon name="ShieldCheck" size={13} /> מאומת · {src}
@@ -1037,6 +1132,7 @@
                 </div>
               </div>
               <div className="flex flex-wrap gap-1.5 mb-3"><SourceBadge book={current} />{current.tags.map(t => <span key={t} className="text-[13px] px-2 py-0.5 rounded-full bg-surface2 font-semibold">{t}</span>)}</div>
+              {current.descSource && current.description && <div className="text-[12px] font-bold text-muted mb-0.5">תקציר מ{current.descSource}</div>}
               {current.description ? <p className="text-[15px] leading-relaxed whitespace-pre-line mb-3">{current.description}</p> : <p className="text-muted text-[14px] mb-3">לא נמצא תקציר רשמי במקור.</p>}
               <p className="text-muted text-[13px] mb-3">נוסף ב-{fmtDate(current.addedAt)}{current.isbns[0] ? ` · ISBN ${current.isbns[0]}` : ''}</p>
               {current.link && <a href={current.link} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent font-bold mb-4 min-h-[44px]"><Icon name="ExternalLink" size={16} />לרשומה במקור</a>}
@@ -1072,6 +1168,7 @@
           <div className="mt-2.5">
             {c.description
               ? <>
+                  {c.descSource && <div className="text-[12px] font-bold text-muted mb-0.5">תקציר מ{c.descSource}</div>}
                   <p className={`text-[15px] leading-relaxed whitespace-pre-line ${more ? '' : 'clamp-3'}`}>{c.description}</p>
                   {c.description.length > 180 && <button type="button" className="text-accent font-bold text-[14px] min-h-[36px]" onClick={() => setMore(!more)}>{more ? 'פחות' : 'לתקציר המלא'}</button>}
                 </>
@@ -1087,7 +1184,7 @@
       );
     }
 
-    function AddTab({ db, onPick }) {
+    function AddTab({ db, onPick, goSettings }) {
       const [text, setText] = useState('');
       const [author, setAuthor] = useState('');
       const [showAuthor, setShowAuthor] = useState(false);
@@ -1135,11 +1232,17 @@
           {state.res && (
             <div className="grid gap-3">
               {state.res.notes.map((n, i) => <Notice key={i} tone="warn">{n}</Notice>)}
+              {!googleAvailable() && !db.settings.apiKey && (
+                <Notice tone="info">
+                  Google Books חוסם חיפושים בלי מפתח (המכסה המשותפת לכל המשתמשים נגמרת כל יום). מפתח אישי הוא בחינם ומחזיר את הכיסוי המלא לספרים בעברית.
+                  <button type="button" onClick={goSettings} className="block mt-1 text-accent font-bold min-h-[40px]">להוספת מפתח חינמי ←</button>
+                </Notice>
+              )}
               {state.res.candidates.length > 0 && (
                 <p className="text-[14px] text-muted">{state.res.candidates.length} מועמדים מ-{state.res.sources.join(' + ')}. בחרו את הספר שקראתם:</p>
               )}
-              {state.res.candidates.length === 0 && !state.res.notes.length && (
-                <Notice tone="info">לא נמצא ספר תואם. נסו איות אחר, את השם באנגלית, להוסיף מחבר, או להדביק ISBN / קישור ל-Google Books או Open Library.</Notice>
+              {state.res.candidates.length === 0 && (
+                <Notice tone="error">לא נמצא ספר תואם באף מאגר. נסו את השם המלא או איות אחר, את השם בשפת המקור (למשל Norwegian Wood), או הדביקו ISBN מהכריכה האחורית.</Notice>
               )}
               <ul className="grid gap-3">
                 {state.res.candidates.map(c => <CandidateCard key={c.key} c={c} inLib={findInLibrary(c, db.books)} onPick={onPick} />)}
@@ -1248,6 +1351,9 @@
             <h1 className="font-display font-black text-[30px] leading-tight">גלה ספר חדש</h1>
             <p className="text-muted text-[15px]">4 שאלות קצרות. כל המלצה נבדקת מחדש מול המאגר לפני שהיא מוצגת.</p>
           </header>
+          {!db.settings.apiKey && (
+            <div className="mb-3"><Notice tone="info">בלי מפתח Google Books ההמלצות מגיעות בעיקר מ-Open Library, ויש שם מעט ספרים בעברית. אפשר להוסיף מפתח חינמי בלשונית "גיבוי נתונים".</Notice></div>
+          )}
 
           <div className="bg-surface border border-line rounded-2xl p-3 mb-4 grid gap-2">
             <div className="text-[13px] font-bold tracking-wide text-muted">הפרופיל שלך</div>
@@ -1351,8 +1457,27 @@
       const [confirmReplace, setConfirmReplace] = useState(false);
       const [confirmWipe, setConfirmWipe] = useState(false);
       const [keyDraft, setKeyDraft] = useState(db.settings.apiKey || '');
+      const [keyTest, setKeyTest] = useState(null);
       const taRef = useRef(null);
       const fileRef = useRef(null);
+      const saveKey = async (e) => {
+        e.preventDefault();
+        const k = keyDraft.trim();
+        update(d => ({ ...d, settings: { ...d.settings, apiKey: k } }));
+        CONFIG.apiKey = k;
+        googleState.blockedUntil = 0; googleState.lastError = '';
+        if (!k) { setKeyTest(null); notify('המפתח הוסר'); return; }
+        setKeyTest('testing');
+        try {
+          const r = await fetch(googleUrl('', { q: 'isbn:9780099448822', maxResults: 1 }));
+          if (r.ok) setKeyTest({ ok: true, msg: 'המפתח עובד. החיפוש ב-Google Books פעיל.' });
+          else {
+            const body = await r.json().catch(() => ({}));
+            const m = (body.error && body.error.message) || ('שגיאה ' + r.status);
+            setKeyTest({ ok: false, msg: /not been used|disabled/i.test(m) ? 'המפתח תקין, אבל Books API לא הופעל בפרויקט. חזרו לשלב 2 ולחצו Enable.' : /API key not valid/i.test(m) ? 'המפתח לא תקין. בדקו שהעתקתם אותו במלואו.' : /referer|referrer/i.test(m) ? 'המפתח מוגבל לאתר אחר. בדקו את Website restrictions.' : 'Google החזיר שגיאה: ' + m });
+          }
+        } catch (err) { setKeyTest({ ok: false, msg: 'אין חיבור לרשת. נסו שוב.' }); }
+      };
       const stamp = new Date().toISOString().slice(0, 10);
       const json = () => JSON.stringify({ ...db, exportedAt: Date.now(), app: 'verified-reading-tracker' }, null, 2);
       const markBackup = () => update(d => ({ ...d, lastBackupAt: Date.now() }));
@@ -1459,13 +1584,25 @@
                 ))}
               </div>
             </div>
-            <form onSubmit={(e) => { e.preventDefault(); update(d => ({ ...d, settings: { ...d.settings, apiKey: keyDraft.trim() } })); notify(keyDraft.trim() ? 'מפתח ה-API נשמר' : 'מפתח ה-API הוסר'); }} className="grid gap-1.5">
-              <label htmlFor="api-key" className="text-[14px] text-muted">מפתח Google Books API (רשות). האפליקציה עובדת בלעדיו; מפתח אישי מונע חסימות מכסה.</label>
+            <form id="api-key-section" onSubmit={saveKey} className="grid gap-1.5">
+              <label htmlFor="api-key" className="text-[15px] font-bold">מפתח Google Books API</label>
+              <p className="text-[14px] text-muted">בלי מפתח, Google חוסם בדרך כלל את החיפוש בגלל מכסה משותפת לכל העולם, והאפליקציה עוברת ל-Open Library ו-Wikidata (כיסוי חלקי בעברית). מפתח אישי הוא בחינם ומאפשר 1,000 חיפושים ביום.</p>
+              <details className="text-[14px] bg-bg border border-line rounded-xl p-2.5">
+                <summary className="font-bold text-accent cursor-pointer min-h-[32px]">איך משיגים מפתח (3 דקות, בחינם)</summary>
+                <ol className="list-decimal pr-5 mt-2 grid gap-1.5">
+                  <li>נכנסים עם חשבון Google ל-<a className="text-accent font-bold underline" href="https://console.cloud.google.com/apis/library/books.googleapis.com" target="_blank" rel="noopener noreferrer">דף Books API ב-Google Cloud</a>. אם מתבקשים, יוצרים פרויקט חדש (כל שם).</li>
+                  <li>לוחצים <b dir="ltr">Enable</b>.</li>
+                  <li>עוברים ל-<a className="text-accent font-bold underline" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Credentials</a>, לוחצים <b dir="ltr">Create credentials ← API key</b> ומעתיקים את המפתח (מתחיל ב-<span dir="ltr">AIza</span>).</li>
+                  <li>מדביקים כאן ולוחצים "שמירה ובדיקה". לא נדרש כרטיס אשראי.</li>
+                  <li>רשות: ב-Credentials אפשר להגביל את המפתח ל-<span dir="ltr">yuvsaadon-coder.github.io/*</span> תחת <span dir="ltr">Website restrictions</span>.</li>
+                </ol>
+              </details>
               <div className="flex gap-2">
                 <input id="api-key" value={keyDraft} onChange={e => setKeyDraft(e.target.value)} dir="ltr" autoComplete="off" placeholder="AIza…"
                   className="flex-1 min-w-0 min-h-[48px] px-3 rounded-xl border border-line bg-bg text-[15px]" />
-                <Btn variant="soft" type="submit">שמירה</Btn>
+                <Btn variant="soft" type="submit" disabled={keyTest === 'testing'}>{keyTest === 'testing' ? <Spinner /> : 'שמירה ובדיקה'}</Btn>
               </div>
+              {keyTest && keyTest !== 'testing' && <Notice tone={keyTest.ok ? 'ok' : 'error'}>{keyTest.msg}</Notice>}
             </form>
             {db.dismissed.length > 0 && (
               <Btn variant="ghost" onClick={() => { update(d => ({ ...d, dismissed: [] })); notify('רשימת הספרים שסומנו "לא מעניין" אופסה'); }}>
@@ -1540,7 +1677,7 @@
         <div className="min-h-screen bg-bg text-ink font-body">
           <main className="mx-auto max-w-xl px-4 pb-28 safe-top">
             {tab === 'library' && <LibraryTab db={db} onEdit={(b) => setPending({ book: b, existing: b })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id) })); notify('הספר נמחק'); }} goAdd={() => setTab('add')} />}
-            {tab === 'add' && <AddTab db={db} onPick={pick} />}
+            {tab === 'add' && <AddTab db={db} onPick={pick} goSettings={() => setTab('backup')} />}
             {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} />}
             {tab === 'backup' && <BackupTab db={db} update={update} replace={replace} status={status} notify={notify} />}
           </main>
