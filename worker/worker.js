@@ -46,9 +46,9 @@ export function sanitizeTools(tools, blocked = []) {
   for (const t of Array.isArray(tools) ? tools : []) {
     if (t && t.name === 'web_search' && /^web_search_/.test(t.type || '')) {
       // בלי user_location: חיפוש הרשת של Anthropic לא תומך בקוד מדינה IL (מחזיר 400)
-      out.push({ type: t.type, name: 'web_search', allowed_domains: allowed, max_uses: 12 });
+      out.push({ type: t.type, name: 'web_search', allowed_domains: allowed, max_uses: 5 });
     } else if (t && t.name === 'web_fetch' && /^web_fetch_/.test(t.type || '')) {
-      out.push({ type: t.type, name: 'web_fetch', allowed_domains: allowed, max_uses: 15, max_content_tokens: 20000 });
+      out.push({ type: t.type, name: 'web_fetch', allowed_domains: allowed, max_uses: 4, max_content_tokens: 6000 });
     } else if (t && !t.type && t.name && t.input_schema) {
       out.push(t);   // כלים של האפליקציה עצמה (למשל החזרת תוצאה במבנה קבוע)
     }

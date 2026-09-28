@@ -588,6 +588,39 @@ async function resolveLink(url) {
   return { candidates: [], notes, sources: [] };
 }
 
+/* ---------- שמות בעברית: אם יש מהדורה עברית מציגים את שמה, ושם המקור עובר לשורת המשנה ---------- */
+function withHebrewTitle(c, he) {
+  if (!c || !he || !hasHebrew(he) || hasHebrew(c.title)) return c;
+  return { ...c, title: he.trim(), subtitle: c.title };
+}
+const STARTER_BY_ORIGINAL = (() => {
+  const m = new Map();
+  STARTER.forEach(g => g.books.forEach(([he, author, original]) => { if (original) m.set(normTitle(original), [he, author]); }));
+  return m;
+})();
+const lastName = (s) => skel(norm(s || '').split(' ').pop());
+function knownHebrewTitle(b) {
+  const hit = STARTER_BY_ORIGINAL.get(normTitle(b.title));
+  if (!hit) return '';
+  const a = (b.authors || [])[0];
+  // שם המחבר חייב להתאים, בעברית או בלועזית (בדיקה רכה: שם משפחה, או ספר בלי מחבר)
+  if (a && hasHebrew(a) && lastName(a) !== lastName(hit[1])) return '';
+  return hit[0];
+}
+// מחפש ב-Wikidata את השם העברי של יצירה (רק כשהמחבר תואם), לספרים שנשמרו בשם לועזי
+async function lookupHebrewTitle(b) {
+  if (hasHebrew(b.title)) return '';
+  const known = knownHebrewTitle(b);
+  if (known) return known;
+  const author = (b.authors || [])[0] || '';
+  if (!author) return '';
+  const base = b.title.split(/[:(]/)[0].trim();
+  const works = await wikidataBooks(base, author);
+  const nt = normTitle(base);
+  const w = works.find(x => x.heTitle && hasHebrew(x.heTitle) && normTitle(x.enTitle) === nt);
+  return w ? w.heTitle : '';
+}
+
 /* ============================================================
    שכבת אחסון: localStorage + IndexedDB
    ============================================================ */
@@ -936,7 +969,7 @@ async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', 
   const tools = [...(web ? WEB_TOOLS : []), { ...submitTool, strict: true }];
   let messages = [{ role: 'user', content: prompt }];
   let cost = 0;
-  for (let turn = 0; turn < 6; turn++) {
+  for (let turn = 0; turn < 4; turn++) {
     let msg;
     try {
       const stream = client.messages.stream({
@@ -1003,7 +1036,7 @@ async function aiResolveBook(text, author, onProgress) {
   const found = [];
   for (const c of (input.candidates || []).slice(0, 4)) {
     const v = await verifyAiBook({ title_he: c.title, title_original: c.original_title, author: c.author, isbn: c.isbn, page_url: c.page_url }, true);
-    v.forEach(x => { if (!found.some(f => f.key === x.key)) found.push(x); });
+    v.forEach(x => { if (!found.some(f => f.key === x.key)) found.push(withHebrewTitle(x, c.title)); });
   }
   return {
     candidates: found, sources: ['Claude + ' + uniq(found.map(f => f.source === 'google' ? 'Google Books' : f.source === 'openlibrary' ? 'Open Library' : 'Wikidata')).join(' + ')],
@@ -1083,8 +1116,8 @@ async function aiTranslate(text) {
 
 // 4. המלצות: המודל קורא את הספרייה, מחפש ביקורות וניתוחים באתרים המאושרים, וחושב
 function libraryForPrompt(books) {
-  const list = books.slice().sort((a, b) => b.rating - a.rating || (b.addedAt || 0) - (a.addedAt || 0)).slice(0, 150);
-  return list.map(b => `- "${b.title}"${b.subtitle ? ` / ${b.subtitle}` : ''} — ${(b.authors || []).join(', ') || '?'}${b.year ? ` (${b.year})` : ''} | ${b.rating}★${b.tags.length ? ' | tags: ' + b.tags.join(', ') : ''}${b.note ? ' | reader notes: ' + b.note.replace(/\s+/g, ' ').slice(0, 400) : ''}`).join('\n');
+  const list = books.slice().sort((a, b) => b.rating - a.rating || (b.addedAt || 0) - (a.addedAt || 0)).slice(0, 80);
+  return list.map(b => `- ${b.title} — ${(b.authors || [])[0] || '?'} | ${b.rating}${b.tags.length ? ' | ' + b.tags.slice(0, 3).join(', ') : ''}${b.note ? ' | ' + b.note.replace(/\s+/g, ' ').slice(0, 160) : ''}`).join('\n');
 }
 function historyForPrompt(history, books) {
   return (history || []).slice(0, 6).map(h => {
@@ -1097,18 +1130,18 @@ async function aiRecommend({ books, request, answers, lang, exclude, dismissed, 
   const langText = { he: 'Hebrew only (books available in a Hebrew edition)', en: 'English only', both: 'Hebrew or English editions', any: 'any language', auto: 'Hebrew or English' }[lang] || 'Hebrew or English';
   const prefs = answersSummary(answers || {}).join('; ');
   const excludeTitles = uniq([...books.map(b => b.title), ...exclude, ...(history || []).flatMap(h => (h.recs || []).map(r => r.title))]).slice(0, 300);
-  onProgress && onProgress(`שולח ל-Claude את הספרייה שלך (${books.length} ספרים) ואת הבקשה. חיפוש וקריאה של ביקורות לוקחים בדרך כלל 1–3 דקות.`);
+  onProgress && onProgress(`שולח ל-Claude את הספרייה שלך (${books.length} ספרים) ואת הבקשה. חיפוש וקריאה של ביקורות לוקחים בדרך כלל פחות מדקה.`);
   const { input, cost } = await aiRun({
-    effort: 'high', onProgress,
+    effort: 'medium', onProgress,
     system: [
       'You are a literary advisor with deep knowledge of world and Israeli literature. Recommend books this specific reader will love.',
       'Think about the reader: what their highly rated books and notes have in common (themes, voice, structure, emotional register, pace, setting), and what they rated low.',
-      'Use web search on the allowed sites to read critical reviews, literary analyses, reader ratings and publisher synopses, both to find strong candidates and to check each one against the reader\'s taste. Prefer well-regarded books over merely popular ones when the reader\'s taste is literary.',
+      'Draw first on your own knowledge of critical reception and literary analysis to choose candidates. Then use web search sparingly (about 3-4 searches, at most 3 page reads) on the allowed sites, only to confirm the Hebrew edition titles and availability. Prefer well-regarded books over merely popular ones when the reader\'s taste is literary. Work quickly.',
       'Every recommended book must be a real, published book you confirmed in the sources. Give the Hebrew edition title when one exists, the ISBN when you found it, and in page_url the book page on an Israeli store or publisher site when you read one. Never recommend a book the reader already has.',
       '`why` must connect the book to specific books and notes from the reader\'s library and to what reviewers said, in 2–4 sentences. List the pages you relied on in `sources`.',
       `Language: ${langText}. ` + HEBREW_OUT
     ].join('\n'),
-    prompt: `READER'S LIBRARY (title — author | rating | tags | notes):\n${libraryForPrompt(books) || '(empty)'}\n\nALREADY SEEN OR NOT WANTED (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 300).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history, books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs ? `\nQUICK PREFERENCES: ${prefs}` : ''}\n\nRecommend ${want + 2} books.`,
+    prompt: `READER'S LIBRARY (title — author | rating 1-5 | tags | notes):\n${libraryForPrompt(books) || '(empty)'}\n\nALREADY SEEN OR NOT WANTED (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 300).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history, books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs ? `\nQUICK PREFERENCES: ${prefs}` : ''}\n\nRecommend ${want + 1} books.`,
     submitTool: {
       name: 'submit_recommendations', description: 'Return the final recommendations.',
       input_schema: { type: 'object', additionalProperties: false, required: ['interpretation', 'recommendations'], properties: {
@@ -1130,7 +1163,7 @@ async function aiRecommend({ books, request, answers, lang, exclude, dismissed, 
     const [c] = await verifyAiBook(r, false);
     if (!c || findInLibrary(c, books) || exclude.includes(c.key)) { rejected++; continue; }
     recs.push({
-      ...c, reasons: [r.why], genres: r.genres, sources: r.sources, aiFormats: r.formats,
+      ...withHebrewTitle(c, r.title_he), reasons: [r.why], genres: r.genres, sources: r.sources, aiFormats: r.formats,
       description: c.description || r.synopsis_he, descSource: c.description ? c.descSource : (r.synopsis_he ? 'מקורות ברשת' : ''),
       descriptionHe: c.description && !hasHebrew(c.description) && r.synopsis_he ? r.synopsis_he : '',
       verifiedAt: Date.now(), verifiedVia: c.verifiedVia || (c.source === 'google' ? 'Google Books' : 'Open Library')
@@ -1577,25 +1610,167 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose }) {
    ============================================================ */
 /* ---------- היכרות ראשונה: סימון ספרים מוכרים ---------- */
 const STARTER_RATINGS = [[5, 'אהבתי'], [3, 'בסדר'], [2, 'פחות']];
+const STARTER_KEY = (b) => b[0] + '|' + b[1];
+// חפיסה אחת שמערבבת ז'אנרים (ספר מכל ז'אנר בתורו), כדי שהסוויפים לא ייתקעו בז'אנר אחד
+const STARTER_DECK = (() => {
+  const out = [];
+  const max = Math.max(...STARTER.map(g => g.books.length));
+  for (let i = 0; i < max; i++) STARTER.forEach((g, gi) => { if (g.books[i]) out.push([g.books[i], gi]); });
+  return out;
+})();
+
+/* ---------- כריכות לכרטיסי ההיכרות: חיפוש קל ב-Google ואז Open Library, נשמר במטמון מקומי ---------- */
+const COVER_CACHE_KEY = 'vrt-starter-covers';
+let coverCache = null;
+const coverPending = {};
+function coverCacheGet() {
+  if (!coverCache) { try { coverCache = JSON.parse(localStorage.getItem(COVER_CACHE_KEY) || '{}') || {}; } catch (e) { coverCache = {}; } }
+  return coverCache;
+}
+function starterCover(b) {
+  const k = STARTER_KEY(b);
+  const cache = coverCacheGet();
+  if (k in cache) return Promise.resolve(cache[k]);
+  if (coverPending[k]) return coverPending[k];
+  const [title, author, original] = b;
+  coverPending[k] = (async () => {
+    let url = '';
+    try {
+      const data = await googleFetch(googleUrl('', { q: `intitle:${title} inauthor:${author.split(' ').pop()}`, maxResults: 5, printType: 'books' }));
+      const hit = (data.items || []).map(normGoogle).find(c => c.cover && matchScore(c, `${title} ${author}`) >= 0.5);
+      if (hit) url = hit.cover;
+    } catch (e) { /* ממשיכים ל-Open Library */ }
+    if (!url) {
+      try {
+        const d = await fetchJSON(OL_BASE + '/search.json?' + new URLSearchParams({ title: original || title, author: author.split(' ').pop(), limit: '3', fields: 'cover_i' }));
+        const doc = (d.docs || []).find(x => x.cover_i);
+        if (doc) url = `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg`;
+      } catch (e) { /* בלי כריכה */ }
+    }
+    cache[k] = url;
+    try { localStorage.setItem(COVER_CACHE_KEY, JSON.stringify(cache)); } catch (e) { /* */ }
+    delete coverPending[k];
+    return url;
+  })();
+  return coverPending[k];
+}
+function useStarterCover(b) {
+  const [url, setUrl] = useState(() => (b ? coverCacheGet()[STARTER_KEY(b)] || '' : ''));
+  useEffect(() => {
+    if (!b) return undefined;
+    let alive = true;
+    setUrl(coverCacheGet()[STARTER_KEY(b)] || '');
+    starterCover(b).then(u => { if (alive) setUrl(u || ''); });
+    return () => { alive = false; };
+  }, [b && STARTER_KEY(b)]);
+  return url;
+}
+function StarterCover({ b, className }) {
+  const url = useStarterCover(b);
+  const [bad, setBad] = useState(false);
+  useEffect(() => setBad(false), [url]);
+  if (url && !bad) return <img src={url} alt="" className={`object-cover ${className}`} onError={() => setBad(true)} referrerPolicy="no-referrer" draggable="false" />;
+  return (
+    <div className={`bg-accentSoft text-accent grid place-items-center text-center p-3 ${className}`} aria-hidden="true">
+      <span className="font-display font-medium text-[18px] leading-snug">{b[0]}</span>
+    </div>
+  );
+}
+
+/* ---------- היכרות ראשונה: סוויפ ימינה "קראתי", שמאלה "לא קראתי", ואז דירוג אם רוצים ---------- */
+function loadStarterState() {
+  try { const s = JSON.parse(localStorage.getItem('vrt-starter-' + ACTIVE.id) || 'null'); if (s && typeof s.pos === 'number' && s.picks) return s; } catch (e) { /* */ }
+  return { pos: 0, picks: {}, trail: [], skipGenres: [] };
+}
+function SwipeCard({ b, gi, onSwipe, top }) {
+  const [dx, setDx] = useState(0);
+  const [gone, setGone] = useState(0);
+  const drag = useRef(null);
+  useEffect(() => { setDx(0); setGone(0); }, [b]);
+  const down = (e) => { if (!top) return; drag.current = { x: e.clientX, y: e.clientY, id: e.pointerId }; e.currentTarget.setPointerCapture && e.currentTarget.setPointerCapture(e.pointerId); };
+  const move = (e) => { if (drag.current && drag.current.id === e.pointerId) setDx(e.clientX - drag.current.x); };
+  const up = (e) => {
+    if (!drag.current) return;
+    drag.current = null;
+    if (Math.abs(dx) > 90) { setGone(dx > 0 ? 1 : -1); setTimeout(() => onSwipe(dx > 0), 160); } else setDx(0);
+  };
+  const x = gone ? gone * 480 : dx;
+  const hint = x > 30 ? 'read' : x < -30 ? 'unread' : '';
+  return (
+    <div role={top ? 'group' : undefined} aria-label={top ? `${b[0]}, ${b[1]}` : undefined} aria-hidden={top ? undefined : 'true'}
+      onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
+      className={`absolute inset-0 bg-surface border border-line rounded-2xl shadow-md overflow-hidden select-none flex flex-col ${top ? 'cursor-grab' : 'scale-[.96] translate-y-2 opacity-70'}`}
+      style={top ? { transform: `translateX(${x}px) rotate(${x / 22}deg)`, transition: drag.current ? 'none' : 'transform .18s ease-out', touchAction: 'pan-y' } : undefined}>
+      <div className="relative flex-1 min-h-0 bg-surface2 flex justify-center">
+        <StarterCover b={b} className="h-full w-full max-w-[240px]" />
+        {hint && (
+          <span className={`absolute top-4 ${hint === 'read' ? 'right-4 border-ok text-ok' : 'left-4 border-danger text-danger'} border-2 rounded-lg px-3 py-1 font-bold text-[18px] bg-surface`}
+            style={{ opacity: Math.min(1, Math.abs(x) / 90) }}>{hint === 'read' ? 'קראתי' : 'לא קראתי'}</span>
+        )}
+      </div>
+      <div className="px-4 py-3 text-center">
+        <div className="font-display font-medium text-[21px] leading-snug">{b[0]}</div>
+        <div className="text-muted text-[14px]">{b[1]}{b[2] && b[2] !== b[0] ? <> · <bdi>{b[2]}</bdi></> : null}</div>
+        <div className="text-[12.5px] text-accent mt-0.5">{STARTER[gi].genre}</div>
+      </div>
+    </div>
+  );
+}
 function Starter({ db, update, onClose, goQueue, onBegin }) {
-  const [picks, setPicks] = useState({});
-  const [genre, setGenre] = useState(0);
+  const [state, setState] = useState(loadStarterState);
+  const { pos, picks, trail, skipGenres } = state;
   const [q, setQ] = useState('');
+  const [rateKey, setRateKey] = useState('');
   const [phase, setPhase] = useState('pick');
   const [prog, setProg] = useState({ done: 0, total: 0, added: 0, queued: 0 });
-  const keyOf = (b) => b[0] + '|' + b[1];
-  const nq = norm(q);
-  const list = nq
-    ? STARTER.flatMap((g, gi) => g.books.filter(b => norm(b.join(' ')).includes(nq)).map(b => [b, gi]))
-    : STARTER[genre].books.map(b => [b, genre]);
-  const count = Object.keys(picks).length;
-  const perGenre = STARTER.map((_, gi) => Object.values(picks).filter(p => p.gi === gi).length);
-  const setRating = (b, gi, r) => setPicks(p => {
-    const k = keyOf(b); const n = { ...p };
-    if (n[k] && n[k].rating === r) delete n[k]; else n[k] = { rating: r, gi, b };
+  const save = (patch) => setState(s => {
+    const n = { ...s, ...patch };
+    try { localStorage.setItem('vrt-starter-' + ACTIVE.id, JSON.stringify(n)); } catch (e) { /* */ }
     return n;
   });
-  // כל ספר שסומן נבדק מול המאגרים; מה שאומת נכנס לספרייה, והשאר עובר לרשימת ההמתנה לאימות ידני
+  // ספרים שכבר בספרייה לא מוצגים שוב
+  const owned = useMemo(() => new Set(db.books.map(x => normTitle(x.title)).concat(db.books.map(x => normTitle(x.subtitle || '')))), [db.books]);
+  const visible = ([b, gi]) => !skipGenres.includes(gi) && !owned.has(normTitle(b[0])) && !(b[2] && owned.has(normTitle(b[2])));
+  let idx = pos;
+  while (idx < STARTER_DECK.length && !visible(STARTER_DECK[idx])) idx++;
+  let idx2 = idx + 1;
+  while (idx2 < STARTER_DECK.length && !visible(STARTER_DECK[idx2])) idx2++;
+  const cur = STARTER_DECK[idx], next = STARTER_DECK[idx2];
+  useEffect(() => { [idx2, idx2 + 1, idx2 + 2].forEach(i => STARTER_DECK[i] && starterCover(STARTER_DECK[i][0])); }, [idx2]);
+  const count = Object.keys(picks).length;
+  const nq = norm(q);
+  const found = nq ? STARTER_DECK.filter(([b]) => norm(b.join(' ')).includes(nq)) : [];
+
+  const swipe = (read) => {
+    if (!cur) return;
+    const [b, gi] = cur, k = STARTER_KEY(b);
+    const n = { ...picks };
+    if (read) n[k] = { rating: 4, gi, b, rated: false }; else delete n[k];
+    save({ pos: idx + 1, picks: n, trail: [...trail, idx].slice(-50) });
+    setRateKey(read ? k : '');
+  };
+  const undo = () => {
+    if (!trail.length) return;
+    const back = trail[trail.length - 1];
+    const n = { ...picks }; delete n[STARTER_KEY(STARTER_DECK[back][0])];
+    save({ pos: back, picks: n, trail: trail.slice(0, -1) });
+    setRateKey('');
+  };
+  const rate = (k, r) => { if (picks[k]) save({ picks: { ...picks, [k]: { ...picks[k], rating: r, rated: true } } }); setRateKey(''); };
+  const togglePick = (b, gi, r) => {
+    const k = STARTER_KEY(b), n = { ...picks };
+    if (n[k] && n[k].rating === r) delete n[k]; else n[k] = { rating: r, gi, b, rated: true };
+    save({ picks: n });
+  };
+  const skipGenre = () => cur && save({ skipGenres: [...skipGenres, cur[1]] });
+  useEffect(() => {
+    if (phase !== 'pick' || nq) return undefined;
+    const onKey = (e) => { if (e.target.closest && e.target.closest('input,textarea')) return; if (e.key === 'ArrowRight') swipe(true); else if (e.key === 'ArrowLeft') swipe(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
+  // כל ספר שסומן נבדק מול המאגרים; מה שאומת נכנס לספרייה (בשם העברי), והשאר עובר לרשימת ההמתנה לאימות ידני
   const finish = async () => {
     const entries = Object.values(picks);
     onBegin && onBegin();   // משאיר את המסך פתוח גם אחרי שהספרייה כבר לא ריקה
@@ -1610,6 +1785,10 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
         const c = res && res.candidates[0];
         if (c && (c.match >= 0.6 || matchScore(c, `${title} ${author}`) >= 0.6 || (original && matchScore(c, original) >= 0.6))) { best = c; break; }
       }
+      if (best) {
+        best = withHebrewTitle(best, title);
+        if (!best.cover) best.cover = coverCacheGet()[STARTER_KEY(b)] || '';
+      }
       if (best && !findInLibrary(best, db.books) && !findInLibrary(best, added)) {
         const now = Date.now();
         added.push(sanitizeBook({ ...best, id: uid(), rating, tags: [STARTER[gi].tag], addedAt: now, editedAt: now, verifiedAt: now }));
@@ -1619,9 +1798,10 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
     for (let i = 0; i < entries.length; i += 3) await Promise.all(entries.slice(i, i + 3).map(one));
     update(d => ({ ...d, books: [...added, ...d.books], tagLibrary: uniq([...d.tagLibrary, ...added.flatMap(x => x.tags)]), settings: { ...d.settings, onboarded: true } }));
     if (queued.length) {
-      const cur = loadQueue();
-      saveQueue(cur ? { ...cur, items: [...cur.items, ...queued] } : { items: queued, current: queued[0].id, createdAt: Date.now() });
+      const cur0 = loadQueue();
+      saveQueue(cur0 ? { ...cur0, items: [...cur0.items, ...queued] } : { items: queued, current: queued[0].id, createdAt: Date.now() });
     }
+    save({ picks: {} });
     setPhase('done');
   };
   const skip = () => { update(d => ({ ...d, settings: { ...d.settings, onboarded: true } })); onClose(); };
@@ -1644,52 +1824,82 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
       </div>
     );
   }
+  const rated = rateKey && picks[rateKey];
   return (
     <div className="fade-in pb-24">
-      <header className="pt-4 pb-3">
+      <header className="pt-4 pb-2">
         <h1 className="font-display font-medium text-[26px] leading-snug">אילו ספרים כבר קראת?</h1>
-        <p className="text-muted text-[15px]">250 ספרים מוכרים לפי ז'אנרים. סמנו מה שקראתם ואיך היה, כדי שנכיר את הטעם שלכם בלי להקליד רשימות. אפשר לסמן כמה שרוצים ולהוסיף עוד אחר כך.</p>
+        <p className="text-muted text-[15px]">החליקו ימינה אם קראתם, שמאלה אם לא. אחרי "קראתי" אפשר לדרג, או פשוט להמשיך.</p>
       </header>
       <div className="relative mb-3">
         <span className="absolute top-1/2 -translate-y-1/2 right-3 text-muted"><Icon name="Search" size={18} /></span>
         <label htmlFor="starter-q" className="sr-only">חיפוש ברשימה</label>
-        <input id="starter-q" value={q} onChange={e => setQ(e.target.value)} placeholder="חיפוש שם או סופר ברשימה"
+        <input id="starter-q" value={q} onChange={e => setQ(e.target.value)} placeholder="מחפשים ספר מסוים? שם או סופר"
           className="w-full min-h-[46px] pr-10 pl-3 rounded-xl border border-line bg-surface text-[16px]" />
       </div>
-      {!nq && (
-        <div className="flex flex-wrap gap-1.5 mb-3" role="tablist" aria-label="ז'אנרים">
-          {STARTER.map((g, gi) => (
-            <button key={g.genre} type="button" role="tab" aria-selected={genre === gi} onClick={() => setGenre(gi)}
-              className={`min-h-[36px] px-3 rounded-full border text-[14px] ${genre === gi ? 'bg-accentSoft text-accent border-accent font-semibold' : 'bg-surface border-line text-ink'}`}>
-              {g.genre}{perGenre[gi] ? <span className="tabular text-accent"> · {perGenre[gi]}</span> : null}
+      {nq ? (
+        <ul className="grid gap-1.5">
+          {!found.length && <li className="text-muted text-center py-6">אין ברשימה ספר כזה. אפשר להוסיף אותו בלשונית "הוספת ספר".</li>}
+          {found.map(([b, gi]) => {
+            const pick = picks[STARTER_KEY(b)];
+            return (
+              <li key={STARTER_KEY(b)} className={`bg-surface border rounded-xl px-3 py-2.5 flex items-center gap-2 ${pick ? 'border-accent' : 'border-line'}`}>
+                <StarterCover b={b} className="w-10 h-14 rounded shrink-0 text-[0px]" />
+                <div className="flex-1 min-w-0">
+                  <div className="font-display font-medium text-[17px] leading-snug">{b[0]}</div>
+                  <div className="text-muted text-[13px] truncate">{b[1]} · {STARTER[gi].genre}</div>
+                </div>
+                <div className="flex gap-1 shrink-0" role="group" aria-label={`דירוג ${b[0]}`}>
+                  {STARTER_RATINGS.map(([r, l]) => (
+                    <button key={r} type="button" aria-pressed={!!(pick && pick.rating === r)} onClick={() => togglePick(b, gi, r)}
+                      className={`min-h-[36px] px-2.5 rounded-lg border text-[13px] ${pick && pick.rating === r ? 'bg-accentSoft text-accent border-accent font-semibold' : 'border-line text-muted'}`}>{l}</button>
+                  ))}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      ) : cur ? (
+        <div className="grid gap-3">
+          <div className="relative mx-auto w-full max-w-[340px] h-[min(48vh,400px)]">
+            {next && <SwipeCard key={'n' + idx2} b={next[0]} gi={next[1]} top={false} onSwipe={() => {}} />}
+            <SwipeCard key={'c' + idx} b={cur[0]} gi={cur[1]} top onSwipe={swipe} />
+          </div>
+          <div className="flex justify-center gap-3">
+            <button type="button" onClick={() => swipe(true)} className="min-h-[52px] px-5 whitespace-nowrap rounded-full border-2 border-ok text-ok font-semibold bg-surface flex items-center gap-1.5">
+              <Icon name="Check" size={20} />קראתי
             </button>
-          ))}
-        </div>
-      )}
-      <ul className="grid gap-1.5">
-        {!list.length && <li className="text-muted text-center py-6">אין ברשימה ספר כזה. אפשר להוסיף אותו בלשונית "הוספת ספר".</li>}
-        {list.map(([b, gi]) => {
-          const pick = picks[keyOf(b)];
-          return (
-            <li key={keyOf(b)} className={`bg-surface border rounded-xl px-3 py-2.5 flex items-center gap-2 ${pick ? 'border-accent' : 'border-line'}`}>
-              <div className="flex-1 min-w-0">
-                <div className="font-display font-medium text-[17px] leading-snug">{b[0]}</div>
-                {b[1] && <div className="text-muted text-[13px] truncate">{b[1]}{nq ? ` · ${STARTER[gi].genre}` : ''}</div>}
-              </div>
-              <div className="flex gap-1 shrink-0" role="group" aria-label={`דירוג ${b[0]}`}>
+            <button type="button" onClick={undo} disabled={!trail.length} aria-label="חזרה לספר הקודם" className="min-h-[52px] w-[52px] rounded-full border border-line text-muted bg-surface grid place-items-center disabled:opacity-40">
+              <Icon name="Undo2" size={20} />
+            </button>
+            <button type="button" onClick={() => swipe(false)} className="min-h-[52px] px-5 whitespace-nowrap rounded-full border-2 border-line text-muted font-semibold bg-surface flex items-center gap-1.5">
+              <Icon name="X" size={20} />לא קראתי
+            </button>
+          </div>
+          {rated ? (
+            <div className="fade-in bg-surface border border-line rounded-xl p-2.5 grid gap-2" role="group" aria-label={`דירוג ${rated.b[0]}`}>
+              <div className="text-[14px] text-center">איך היה <span className="font-semibold">{rated.b[0]}</span>? <span className="text-muted">(לא חובה)</span></div>
+              <div className="flex gap-1.5 justify-center">
                 {STARTER_RATINGS.map(([r, l]) => (
-                  <button key={r} type="button" aria-pressed={!!(pick && pick.rating === r)} onClick={() => setRating(b, gi, r)}
-                    className={`min-h-[36px] px-2.5 rounded-lg border text-[13px] ${pick && pick.rating === r ? 'bg-accentSoft text-accent border-accent font-semibold' : 'border-line text-muted'}`}>{l}</button>
+                  <button key={r} type="button" onClick={() => rate(rateKey, r)}
+                    className={`min-h-[40px] px-3.5 rounded-lg border text-[14px] ${rated.rated && rated.rating === r ? 'bg-accentSoft text-accent border-accent font-semibold' : 'border-line'}`}>{l}</button>
                 ))}
               </div>
-            </li>
-          );
-        })}
-      </ul>
+            </div>
+          ) : (
+            <div className="flex justify-between items-center text-[13px] text-muted px-1">
+              <span className="tabular">{idx + 1} מתוך {STARTER_DECK.length}</span>
+              <button type="button" onClick={skipGenre} className="underline underline-offset-2 min-h-[36px]">לא קורא {STARTER[cur[1]].genre}</button>
+            </div>
+          )}
+        </div>
+      ) : (
+        <p className="text-center text-muted py-10">עברתם על כל הרשימה. {count ? 'אפשר להוסיף את מה שסימנתם.' : ''}</p>
+      )}
       <div className="fixed inset-x-0 z-20 px-4" style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 76px)' }}>
         <div className="mx-auto max-w-xl flex gap-2 bg-surface border border-line rounded-xl p-2 shadow-md">
           <Btn className="flex-1" disabled={!count} onClick={finish}><Icon name="Check" size={18} />{count ? `הוספת ${count} ספרים` : 'סמנו ספרים שקראתם'}</Btn>
-          <Btn variant="ghost" onClick={skip}>{count ? 'ביטול' : 'דילוג'}</Btn>
+          <Btn variant="ghost" onClick={skip}>{count ? 'אחר כך' : 'דילוג'}</Btn>
         </div>
       </div>
     </div>
@@ -2657,21 +2867,37 @@ function HistoryView({ db, update, onPick, notify, openId, setOpenId }) {
   );
 }
 
+// מצב שיחת ההמלצות לכל משתמש, מחוץ לעץ הרכיבים: שורד יציאה מהלשונית, והמלצה שרצה ממשיכה לעדכן אותו
+const REC_STORES = {};
+function getRecStore(pid, db) {
+  if (!REC_STORES[pid]) {
+    const h = (db.history || [])[0];
+    const resume = h && Date.now() - h.at < 3 * 86400000 ? h : null;
+    REC_STORES[pid] = {
+      step: resume ? QUESTIONS.length : 0, answers: resume ? resume.answers || {} : { avoid: [] },
+      log: resume ? resume.log || [] : [], running: false, recs: resume ? resume.recs || [] : [],
+      shown: new Set(resume ? (resume.recs || []).flatMap(r => [r.key, r.title]) : []),
+      session: resume ? { id: resume.id, at: resume.at } : { id: null, at: 0 }, listeners: new Set()
+    };
+  }
+  return REC_STORES[pid];
+}
+function recSet(st, patch) { Object.assign(st, patch); st.listeners.forEach(f => f()); }
+function useRecStore(pid, db) {
+  const st = getRecStore(pid, db);
+  const [, force] = useState(0);
+  useEffect(() => { const f = () => force(x => x + 1); st.listeners.add(f); return () => { st.listeners.delete(f); }; }, [st]);
+  return st;
+}
+
 function DiscoverTab({ db, update, onPick, notify }) {
-  // ממשיכים את השיחה האחרונה (משלושת הימים האחרונים) גם אחרי מעבר לשונית או פתיחה מחדש
-  const [resume] = useState(() => { const h = (db.history || [])[0]; return h && Date.now() - h.at < 3 * 86400000 ? h : null; });
-  const [step, setStep] = useState(resume ? QUESTIONS.length : 0);
-  const [answers, setAnswers] = useState(resume ? resume.answers || {} : { avoid: [] });
-  const [log, setLog] = useState(resume ? resume.log || [] : []);
-  const [running, setRunning] = useState(false);
-  const [recs, setRecs] = useState(resume ? resume.recs || [] : []);
-  const [shown, setShown] = useState(() => new Set(resume ? (resume.recs || []).flatMap(r => [r.key, r.title]) : []));
+  // מצב השיחה נשמר מחוץ ללשונית (לכל משתמש): יציאה מהלשונית לא מאפסת את השיחה, והמלצה שרצה ממשיכה ברקע
+  const st = useRecStore(ACTIVE.id, db);
+  const { step, answers, log, running, recs, shown } = st;
   const [multi, setMulti] = useState([]);
   const [view, setView] = useState('chat');   // 'chat' | 'history' | מזהה שיחה
   const [aiText, setAiText] = useState('');
   const hasAi = aiAvailable();
-  const session = useRef(resume ? { id: resume.id, at: resume.at } : { id: null, at: 0 });
-  const logRef = useRef(resume ? resume.log || [] : []);
   const endRef = useRef(null);
   const prof = useMemo(() => buildProfile(db.books), [db.books]);
   const autoLang = 'he';   // עדיפות לעברית; אפשר לבחור ידנית עברית ואנגלית / כל שפה
@@ -2679,8 +2905,8 @@ function DiscoverTab({ db, update, onPick, notify }) {
 
   useEffect(() => { if (log.length || recs.length) endRef.current && endRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [log.length, step, recs.length]);
 
-  const pushLog = (...entries) => { logRef.current = [...logRef.current, ...entries]; setLog(logRef.current); };
-  const reset = () => { setStep(0); setAnswers({ avoid: [] }); logRef.current = []; setLog([]); setRecs([]); setMulti([]); session.current = { id: null, at: 0 }; setShown(new Set()); };
+  const pushLog = (...entries) => recSet(st, { log: [...st.log, ...entries] });
+  const reset = () => { recSet(st, { step: 0, answers: { avoid: [] }, log: [], recs: [], session: { id: null, at: 0 }, shown: new Set() }); setMulti([]); };
   const slim = (r) => ({
     key: r.key, source: r.source, sourceId: r.sourceId, title: r.title, subtitle: r.subtitle || '', authors: r.authors, year: r.year,
     description: (r.description || '').slice(0, 1200), categories: (r.categories || []).slice(0, 6), cover: r.cover, pageCount: r.pageCount,
@@ -2689,56 +2915,53 @@ function DiscoverTab({ db, update, onPick, notify }) {
     sources: r.sources || [], aiFormats: r.aiFormats || null, genres: r.genres || [], descSource: r.descSource || '', descriptionHe: (r.descriptionHe || '').slice(0, 1500)
   });
   const saveSession = (ans, usedLang, allRecs) => {
-    if (!session.current.id) session.current = { id: uid(), at: Date.now() };
-    const entry = { id: session.current.id, at: session.current.at, answers: ans, lang: usedLang, log: logRef.current.slice(-60), recs: allRecs.map(slim) };
+    if (!st.session.id) st.session = { id: uid(), at: Date.now() };
+    const entry = { id: st.session.id, at: st.session.at, answers: ans, lang: usedLang, log: st.log.slice(-60), recs: allRecs.map(slim) };
     update(d => ({ ...d, history: [entry, ...(d.history || []).filter(h => h.id !== entry.id)].slice(0, 40) }));
   };
   const answer = (q, value, label) => {
     const next = { ...answers, [q.id]: value };
-    setAnswers(next);
     pushLog({ from: 'bot', text: q.text }, { from: 'me', text: label });
     setMulti([]);
     const ns = step + 1;
-    setStep(ns);
+    recSet(st, { answers: next, step: ns });
     if (ns >= QUESTIONS.length) go(next, new Set(shown));
   };
   const go = async (ans, exclude) => {
-    setRunning(true);
+    recSet(st, { running: true });
     const progress = (t) => pushLog({ from: 'bot', text: t, progress: true });
     try {
       if (!db.books.length) progress('הספרייה ריקה, אז ההמלצות יתבססו רק על התשובות שלך. דירוג ספרים שקראת ישפר מאוד את הדיוק.');
       const { recs: r } = await recommend({ books: db.books, answers: ans, lang, exclude, dismissed: db.dismissed, want: 5, onProgress: progress });
       if (!r.length) progress('לא נמצאו ספרים שעברו את כל שלבי האימות. נסו לשנות תשובה (למשל אורך או שפה), או להוסיף עוד ספרים מדורגים.');
-      const all = [...recs, ...r];
-      setRecs(all);
-      setShown(s => { const n = new Set(s); r.forEach(x => { n.add(x.key); n.add(dedupeKey(x)); }); return n; });
+      const all = [...st.recs, ...r];
+      const sh = new Set(st.shown); r.forEach(x => { sh.add(x.key); sh.add(dedupeKey(x)); });
+      recSet(st, { recs: all, shown: sh });
       saveSession(ans, lang, all);
     } catch (e) {
       progress('אירעה שגיאת רשת בזמן החיפוש. בדקו חיבור לאינטרנט ונסו שוב.');
     }
-    setRunning(false);
+    recSet(st, { running: false });
   };
   const goAi = async () => {
     const request = aiText.trim();
     const ans = { mode: 'ai', request };
-    setAnswers(ans);
-    setStep(QUESTIONS.length);
+    recSet(st, { answers: ans, step: QUESTIONS.length, running: true });
     pushLog({ from: 'me', text: request || 'תמליץ לי על הספר הבא' });
-    setRunning(true);
     const progress = (t) => pushLog({ from: 'bot', text: t, progress: true });
     try {
       const { recs: r, interpretation } = await aiRecommend({
-        books: db.books, request, answers: {}, lang, exclude: [...recs.map(x => x.title), ...[...shown].filter(k => !k.includes(':') && !k.includes('|'))],
+        books: db.books, request, answers: {}, lang, exclude: [...st.recs.map(x => x.title), ...[...st.shown].filter(k => !k.includes(':') && !k.includes('|'))],
         dismissed: db.dismissed, history: db.history, want: 5, onProgress: progress
       });
       if (interpretation) pushLog({ from: 'bot', text: interpretation });
       if (!r.length) progress('לא נשארו המלצות שעברו את האימות. נסו לנסח את הבקשה אחרת.');
-      const all = [...recs, ...r];
-      setRecs(all);
-      setShown(sh => { const n = new Set(sh); r.forEach(x => { n.add(x.key); n.add(x.title); }); return n; });
+      const all = [...st.recs, ...r];
+      const sh = new Set(st.shown); r.forEach(x => { sh.add(x.key); sh.add(x.title); });
+      recSet(st, { recs: all, shown: sh });
       saveSession(ans, lang, all);
     } catch (e) { progress(e.message); }
-    setRunning(false);
+    recSet(st, { running: false });
   };
   const q = QUESTIONS[step];
   const done = step >= QUESTIONS.length;
@@ -2829,7 +3052,7 @@ function DiscoverTab({ db, update, onPick, notify }) {
                 onRead={(b) => onPick(b)}
                 onDismiss={(b) => {
                   update(d => ({ ...d, dismissed: Array.from(new Set([...d.dismissed, b.key, dedupeKey(b)])) }));
-                  setRecs(rs => rs.filter(x => x.key !== b.key));
+                  recSet(st, { recs: st.recs.filter(x => x.key !== b.key) });
                   notify('הוסר. לא נמליץ עליו שוב.');
                 }} />
             ))}
@@ -3188,6 +3411,31 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
     if (db.settings.theme === 'light' || db.settings.theme === 'dark') root.setAttribute('data-theme', db.settings.theme);
     else root.removeAttribute('data-theme');
   }, [db.settings.theme]);
+  // ספרים שנשמרו בשם לועזי: מחפשים ברקע את שם המהדורה העברית (פעם אחת לכל ספר)
+  const heBusy = useRef(false);
+  useEffect(() => {
+    if (heBusy.current) return;
+    let checked = {};
+    try { checked = JSON.parse(localStorage.getItem('vrt-he-checked') || '{}') || {}; } catch (e) { /* */ }
+    const todo = db.books.filter(b => !hasHebrew(b.title) && !checked[b.id]).slice(0, 20);
+    if (!todo.length) return;
+    heBusy.current = true;
+    (async () => {
+      const found = {};
+      for (const b of todo) {
+        const he = await lookupHebrewTitle(b).catch(() => null);
+        if (he === null) continue;   // תקלת רשת: ננסה בפעם הבאה
+        checked[b.id] = 1;
+        if (he) found[b.id] = he;
+      }
+      try { localStorage.setItem('vrt-he-checked', JSON.stringify(checked)); } catch (e) { /* */ }
+      if (Object.keys(found).length) {
+        const now = Date.now();
+        update(d => ({ ...d, books: d.books.map(b => found[b.id] && !hasHebrew(b.title) ? { ...withHebrewTitle(b, found[b.id]), editedAt: now } : b) }));
+      }
+      heBusy.current = false;
+    })();
+  }, [db.books]);
 
   const notify = (t) => {
     setToast(t);
