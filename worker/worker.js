@@ -8,7 +8,7 @@
 //   KV       LIBRARY            מאגר KV לשמירת הספרייה
 
 const ALLOWED_ORIGINS = ['https://yuvsaadon-coder.github.io'];
-const ALLOWED_MODELS = ['claude-opus-5', 'claude-sonnet-5'];
+const ALLOWED_MODELS = ['claude-sonnet-4-6', 'claude-opus-5'];
 const ALLOWED_BETAS = ['server-side-fallback-2026-07-01'];
 const MAX_TOKENS = 32000;
 const DAILY_AI_LIMIT = 150;          // מספר קריאות ל-Claude ביום לכל הספרייה

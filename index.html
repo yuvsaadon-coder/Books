@@ -953,10 +953,10 @@
        המודל מחפש וקורא רק באתרים שברשימה המאושרת בשרת. כל ספר שהוא מציע נבדק מחדש
        מול Google Books / Open Library לפני שהוא מוצג, ומה שלא אומת נפסל.
        ============================================================ */
-    const AI_MODEL = 'claude-opus-5';
+    const AI_MODEL = 'claude-sonnet-4-6';
     const ANTHROPIC_SDK_URL = 'https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.129.0/+esm';
-    // מחירי מחירון: Opus 5 ‏$5 / $25 למיליון טוקנים, חיפוש ברשת ‏$10 לאלף חיפושים
-    const PRICE = { in: 5 / 1e6, out: 25 / 1e6, cacheRead: 0.5 / 1e6, search: 10 / 1000 };
+    // מחירי מחירון: Sonnet 4.6 ‏$3 / $15 למיליון טוקנים, חיפוש ברשת ‏$10 לאלף חיפושים
+    const PRICE = { in: 3 / 1e6, out: 15 / 1e6, cacheRead: 0.3 / 1e6, search: 10 / 1000 };
     let sdkPromise = null;
     async function aiClient() {
       const c = loadCloud();
@@ -1003,8 +1003,8 @@
       for (let turn = 0; turn < 6; turn++) {
         let msg;
         try {
-          const stream = client.beta.messages.stream({
-            model: AI_MODEL, max_tokens: 32000, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default',
+          const stream = client.messages.stream({
+            model: AI_MODEL, max_tokens: 32000,
             thinking: { type: 'adaptive', display: 'summarized' }, output_config: { effort },
             system, tools, messages
           });
@@ -2597,7 +2597,7 @@
                 placeholder="למשל: משהו כמו 'יער נורווגי' אבל פחות עצוב; רומן שמתרחש בארץ; ספר שאפשר גם לשמוע"
                 className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px] leading-relaxed" />
               <Btn onClick={goAi} disabled={running}><Icon name="Sparkles" size={20} />המלצה חכמה</Btn>
-              <p className="text-[12px] text-muted">Claude קורא את הספרייה, ההערות והדירוגים שלך, מחפש ביקורות וניתוחים באתרים המאושרים, וממליץ. כל ספר נבדק מול המאגרים לפני שהוא מוצג. לוקח 1–3 דקות, עלות משוערת 0.3–0.6 דולר.</p>
+              <p className="text-[12px] text-muted">Claude קורא את הספרייה, ההערות והדירוגים שלך, מחפש ביקורות וניתוחים באתרים המאושרים, וממליץ. כל ספר נבדק מול המאגרים לפני שהוא מוצג. לוקח 1–3 דקות, עלות משוערת 20–35 סנט.</p>
             </div>
           )}
           {!hasAi && step === 0 && !log.length && (
