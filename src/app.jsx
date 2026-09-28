@@ -143,7 +143,7 @@ function googleUrl(path, params) {
 async function googleFetch(url) {
   // אם בשרת המשפחתי מוגדר מפתח Google Books, עוברים דרכו (מפתח משותף + מטמון); מפתח אישי במכשיר גובר
   const c = loadCloud();
-  if (c && SYNC.gbooks && !CONFIG.apiKey) {
+  if (c && SYNC.gbooks !== false && !CONFIG.apiKey) {   // גם לפני שה-ping חזר: השרת עונה גם בלי מפתח
     try { return await fetchJSON(c.url + '/gbooks?u=' + encodeURIComponent(url)); }
     catch (e) { if (e.status === 400) throw e; /* נופלים לחיפוש ישיר */ }
   }
@@ -1611,13 +1611,9 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose }) {
 /* ---------- היכרות ראשונה: סימון ספרים מוכרים ---------- */
 const STARTER_RATINGS = [[5, 'אהבתי'], [3, 'בסדר'], [2, 'פחות']];
 const STARTER_KEY = (b) => b[0] + '|' + b[1];
-// חפיסה אחת שמערבבת ז'אנרים (ספר מכל ז'אנר בתורו), כדי שהסוויפים לא ייתקעו בז'אנר אחד
-const STARTER_DECK = (() => {
-  const out = [];
-  const max = Math.max(...STARTER.map(g => g.books.length));
-  for (let i = 0; i < max; i++) STARTER.forEach((g, gi) => { if (g.books[i]) out.push([g.books[i], gi]); });
-  return out;
-})();
+// חפיסה אחת לפי ז'אנרים; "ז'אנר הבא" קופץ לתחילת הז'אנר הבא
+const STARTER_DECK = STARTER.flatMap((g, gi) => g.books.map(b => [b, gi]));
+const GENRE_START = STARTER.map((_, gi) => STARTER_DECK.findIndex(x => x[1] === gi));
 
 /* ---------- כריכות לכרטיסי ההיכרות: חיפוש קל ב-Google ואז Open Library, נשמר במטמון מקומי ---------- */
 const COVER_CACHE_KEY = 'vrt-starter-covers';
@@ -1630,57 +1626,74 @@ function coverCacheGet() {
 function starterCover(b) {
   const k = STARTER_KEY(b);
   const cache = coverCacheGet();
-  if (k in cache) return Promise.resolve(cache[k]);
+  const hit = cache[k];
+  // כריכה שנמצאה נשמרת לתמיד; "אין כריכה" נבדק שוב אחרי שבוע
+  if (typeof hit === 'string' && hit) return Promise.resolve(hit);
+  if (hit && typeof hit === 'object' && Date.now() - hit.miss < 7 * 864e5) return Promise.resolve('');
   if (coverPending[k]) return coverPending[k];
   const [title, author, original] = b;
+  const surname = (author || '').split(' ').pop();
   coverPending[k] = (async () => {
-    let url = '';
-    try {
-      const data = await googleFetch(googleUrl('', { q: `intitle:${title} inauthor:${author.split(' ').pop()}`, maxResults: 5, printType: 'books' }));
-      const hit = (data.items || []).map(normGoogle).find(c => c.cover && matchScore(c, `${title} ${author}`) >= 0.5);
-      if (hit) url = hit.cover;
-    } catch (e) { /* ממשיכים ל-Open Library */ }
-    if (!url) {
+    let url = '', failed = false;
+    const google = async (q, want) => {
+      if (url) return;
       try {
-        const d = await fetchJSON(OL_BASE + '/search.json?' + new URLSearchParams({ title: original || title, author: author.split(' ').pop(), limit: '3', fields: 'cover_i' }));
+        const data = await googleFetch(googleUrl('', { q, maxResults: 8, printType: 'books' }));
+        const c = (data.items || []).map(normGoogle).find(x => x.cover && want.some(w => matchScore(x, w) >= 0.5));
+        if (c) url = c.cover;
+      } catch (e) { failed = true; }
+    };
+    const ol = async (t) => {
+      if (url || !t) return;
+      try {
+        const d = await fetchJSON(OL_BASE + '/search.json?' + new URLSearchParams({ title: t, author: surname, limit: '5', fields: 'cover_i' }));
         const doc = (d.docs || []).find(x => x.cover_i);
         if (doc) url = `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg`;
-      } catch (e) { /* בלי כריכה */ }
+      } catch (e) { failed = true; }
+    };
+    await google(`intitle:${title} inauthor:${surname}`, [`${title} ${author}`]);
+    await google(`${title} ${author}`, [`${title} ${author}`]);
+    if (original) await google(`intitle:${original} inauthor:${surname}`, [original, `${original} ${author}`]);
+    await ol(original || title);
+    if (original) await ol(title);
+    if (url || !failed) {
+      cache[k] = url || { miss: Date.now() };
+      try { localStorage.setItem(COVER_CACHE_KEY, JSON.stringify(cache)); } catch (e) { /* */ }
     }
-    cache[k] = url;
-    try { localStorage.setItem(COVER_CACHE_KEY, JSON.stringify(cache)); } catch (e) { /* */ }
     delete coverPending[k];
     return url;
   })();
   return coverPending[k];
 }
 function useStarterCover(b) {
-  const [url, setUrl] = useState(() => (b ? coverCacheGet()[STARTER_KEY(b)] || '' : ''));
+  const cached = (x) => { const v = x && coverCacheGet()[STARTER_KEY(x)]; return typeof v === 'string' ? v : ''; };
+  const [url, setUrl] = useState(() => cached(b));
+  const [done, setDone] = useState(() => !!cached(b));
   useEffect(() => {
     if (!b) return undefined;
     let alive = true;
-    setUrl(coverCacheGet()[STARTER_KEY(b)] || '');
-    starterCover(b).then(u => { if (alive) setUrl(u || ''); });
+    setUrl(cached(b)); setDone(!!cached(b));
+    starterCover(b).then(u => { if (alive) { setUrl(u || ''); setDone(true); } });
     return () => { alive = false; };
   }, [b && STARTER_KEY(b)]);
-  return url;
+  return [url, done];
 }
 function StarterCover({ b, className }) {
-  const url = useStarterCover(b);
+  const [url, done] = useStarterCover(b);
   const [bad, setBad] = useState(false);
   useEffect(() => setBad(false), [url]);
-  if (url && !bad) return <img src={url} alt="" className={`object-cover ${className}`} onError={() => setBad(true)} referrerPolicy="no-referrer" draggable="false" />;
+  if (url && !bad) return <img src={url} alt="" className={`object-contain ${className}`} onError={() => setBad(true)} referrerPolicy="no-referrer" draggable="false" />;
   return (
     <div className={`bg-accentSoft text-accent grid place-items-center text-center p-3 ${className}`} aria-hidden="true">
-      <span className="font-display font-medium text-[18px] leading-snug">{b[0]}</span>
+      {done ? <span className="font-display font-medium text-[18px] leading-snug">{b[0]}</span> : <Spinner />}
     </div>
   );
 }
 
 /* ---------- היכרות ראשונה: סוויפ ימינה "קראתי", שמאלה "לא קראתי", ואז דירוג אם רוצים ---------- */
 function loadStarterState() {
-  try { const s = JSON.parse(localStorage.getItem('vrt-starter-' + ACTIVE.id) || 'null'); if (s && typeof s.pos === 'number' && s.picks) return s; } catch (e) { /* */ }
-  return { pos: 0, picks: {}, trail: [], skipGenres: [] };
+  try { const s = JSON.parse(localStorage.getItem('vrt-starter2-' + ACTIVE.id) || 'null'); if (s && typeof s.pos === 'number' && s.picks) return s; } catch (e) { /* */ }
+  return { pos: 0, picks: {}, trail: [] };
 }
 function SwipeCard({ b, gi, onSwipe, top }) {
   const [dx, setDx] = useState(0);
@@ -1718,19 +1731,19 @@ function SwipeCard({ b, gi, onSwipe, top }) {
 }
 function Starter({ db, update, onClose, goQueue, onBegin }) {
   const [state, setState] = useState(loadStarterState);
-  const { pos, picks, trail, skipGenres } = state;
+  const { pos, picks, trail } = state;
   const [q, setQ] = useState('');
   const [rateKey, setRateKey] = useState('');
   const [phase, setPhase] = useState('pick');
   const [prog, setProg] = useState({ done: 0, total: 0, added: 0, queued: 0 });
   const save = (patch) => setState(s => {
     const n = { ...s, ...patch };
-    try { localStorage.setItem('vrt-starter-' + ACTIVE.id, JSON.stringify(n)); } catch (e) { /* */ }
+    try { localStorage.setItem('vrt-starter2-' + ACTIVE.id, JSON.stringify(n)); } catch (e) { /* */ }
     return n;
   });
   // ספרים שכבר בספרייה לא מוצגים שוב
   const owned = useMemo(() => new Set(db.books.map(x => normTitle(x.title)).concat(db.books.map(x => normTitle(x.subtitle || '')))), [db.books]);
-  const visible = ([b, gi]) => !skipGenres.includes(gi) && !owned.has(normTitle(b[0])) && !(b[2] && owned.has(normTitle(b[2])));
+  const visible = ([b]) => !owned.has(normTitle(b[0])) && !(b[2] && owned.has(normTitle(b[2])));
   let idx = pos;
   while (idx < STARTER_DECK.length && !visible(STARTER_DECK[idx])) idx++;
   let idx2 = idx + 1;
@@ -1762,7 +1775,8 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
     if (n[k] && n[k].rating === r) delete n[k]; else n[k] = { rating: r, gi, b, rated: true };
     save({ picks: n });
   };
-  const skipGenre = () => cur && save({ skipGenres: [...skipGenres, cur[1]] });
+  const nextGenre = () => { if (cur) { save({ pos: cur[1] + 1 < STARTER.length ? GENRE_START[cur[1] + 1] : STARTER_DECK.length, trail: [...trail, idx].slice(-50) }); setRateKey(''); } };
+  const inGenre = cur ? [idx - GENRE_START[cur[1]] + 1, STARTER[cur[1]].books.length] : [0, 0];
   useEffect(() => {
     if (phase !== 'pick' || nq) return undefined;
     const onKey = (e) => { if (e.target.closest && e.target.closest('input,textarea')) return; if (e.key === 'ArrowRight') swipe(true); else if (e.key === 'ArrowLeft') swipe(false); };
@@ -1826,10 +1840,11 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
   }
   const rated = rateKey && picks[rateKey];
   return (
-    <div className="fade-in pb-24">
+    <div className="fade-in pb-6">
       <header className="pt-4 pb-2">
         <h1 className="font-display font-medium text-[26px] leading-snug">אילו ספרים כבר קראת?</h1>
-        <p className="text-muted text-[15px]">החליקו ימינה אם קראתם, שמאלה אם לא. אחרי "קראתי" אפשר לדרג, או פשוט להמשיך.</p>
+        <p className="text-muted text-[15px]">ימינה: קראתי. שמאלה: לא קראתי. הדירוג אחרי "קראתי" לא חובה.</p>
+        <button type="button" onClick={skip} className="text-[13px] text-muted underline underline-offset-2 min-h-[32px]">{count ? 'אמשיך אחר כך' : 'דילוג על ההיכרות'}</button>
       </header>
       <div className="relative mb-3">
         <span className="absolute top-1/2 -translate-y-1/2 right-3 text-muted"><Icon name="Search" size={18} /></span>
@@ -1861,7 +1876,7 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
         </ul>
       ) : cur ? (
         <div className="grid gap-3">
-          <div className="relative mx-auto w-full max-w-[340px] h-[min(48vh,400px)]">
+          <div className="relative mx-auto w-full max-w-[340px] h-[min(44vh,380px)]">
             {next && <SwipeCard key={'n' + idx2} b={next[0]} gi={next[1]} top={false} onSwipe={() => {}} />}
             <SwipeCard key={'c' + idx} b={cur[0]} gi={cur[1]} top onSwipe={swipe} />
           </div>
@@ -1888,18 +1903,19 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
             </div>
           ) : (
             <div className="flex justify-between items-center text-[13px] text-muted px-1">
-              <span className="tabular">{idx + 1} מתוך {STARTER_DECK.length}</span>
-              <button type="button" onClick={skipGenre} className="underline underline-offset-2 min-h-[36px]">לא קורא {STARTER[cur[1]].genre}</button>
+              <span className="tabular">{STARTER[cur[1]].genre} · {inGenre[0]} מתוך {inGenre[1]}</span>
+              <span className="tabular">ז'אנר {cur[1] + 1} מתוך {STARTER.length}</span>
             </div>
           )}
         </div>
       ) : (
         <p className="text-center text-muted py-10">עברתם על כל הרשימה. {count ? 'אפשר להוסיף את מה שסימנתם.' : ''}</p>
       )}
-      <div className="fixed inset-x-0 z-20 px-4" style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 76px)' }}>
-        <div className="mx-auto max-w-xl flex gap-2 bg-surface border border-line rounded-xl p-2 shadow-md">
-          <Btn className="flex-1" disabled={!count} onClick={finish}><Icon name="Check" size={18} />{count ? `הוספת ${count} ספרים` : 'סמנו ספרים שקראתם'}</Btn>
-          <Btn variant="ghost" onClick={skip}>{count ? 'אחר כך' : 'דילוג'}</Btn>
+      <p className="text-center text-[12.5px] text-muted mt-5 px-2 font-reading">הסווייפ לבחירת הספרים בכניסה הראשונה מתוך רשימה הוא רעיון של יעל שטסמן סעדון האגדית</p>
+      <div className="mt-3">
+        <div className="flex gap-2">
+          <Btn className="flex-1" disabled={!count} onClick={finish}><Icon name="Check" size={18} />{count ? `הוספת ${count} ספרים` : 'עוד לא סומנו ספרים'}</Btn>
+          {cur && !nq ? <Btn variant="ghost" onClick={nextGenre}>ז'אנר הבא<Icon name="ChevronLeft" size={18} /></Btn> : <Btn variant="ghost" onClick={skip}>{count ? 'אחר כך' : 'יציאה'}</Btn>}
         </div>
       </div>
     </div>

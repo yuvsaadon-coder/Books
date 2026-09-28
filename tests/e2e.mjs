@@ -18,6 +18,7 @@ const WORKER = 'https://books.yuvsaadon.workers.dev';
 const D = 'תקציר רשמי ארוך מספיק כדי לעבור את בדיקת האורך של המערכת, עם עוד כמה מילים.';
 const LONGEN = 'Toru Watanabe looks back on his days as a college student in Tokyo, when he fell in love with two very different women. '.repeat(3);
 const vol = (id, title, authors, isbn, extra = {}) => ({ id, volumeInfo: { title, authors, language: 'iw', pageCount: 250, publishedDate: '1999', description: D, industryIdentifiers: [{ type: 'ISBN_13', identifier: isbn }], ...extra } });
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 const BOOKS = [
   vol('m1', 'מיכאל שלי', ['עמוס עוז'], '9789650000011'), vol('y1', 'יש ואין', ['ארנסט המינגוויי'], '9789650000028'),
   vol('k1', 'קפקא על החוף', ['הרוקי מורקמי'], '9789650000035'), vol('s1', 'סיפור פשוט', ['עגנון'], '9789650000042'),
@@ -81,6 +82,7 @@ async function phone(browser, name) {
       if (u.pathname.startsWith('/gbooks')) { viaProxy++; return googleMock(route, new URL(u.searchParams.get('u') || 'https://x/')); }
     }
     if (u.host === 'www.googleapis.com') { direct++; return googleMock(route, u); }
+    if (u.host === 'books.google.com') return route.fulfill({ body: PNG, contentType: 'image/png', headers: cors });
     if (u.host.includes('wikidata')) return route.fulfill({ json: { search: [] }, headers: cors });
     if (u.host === 'openlibrary.org') return route.fulfill({ json: { docs: [] }, headers: cors });
     return route.fulfill({ status: 404, body: '' });
@@ -94,6 +96,9 @@ function googleMock(route, u) {
     const b = BOOKS.find(x => x.id === m[1]);
     return route.fulfill({ headers: cors, json: { ...b, volumeInfo: { ...b.volumeInfo, description: b.id === 'en1' ? LONGEN + 'FULL-TEXT-ENDING.' : b.volumeInfo.description } } });
   }
+  // חיפוש כריכה לכרטיסי ההיכרות
+  const cq = (u.searchParams.get('q') || '').match(/^intitle:(.+) inauthor:(\S+)$/);
+  if (u.searchParams.get('maxResults') === '8' && cq) return route.fulfill({ headers: cors, json: { items: [vol('c1', cq[1], [cq[2]], '9789650000099', { imageLinks: { thumbnail: 'http://books.google.com/cover-starter.png' } })] } });
   const q = (u.searchParams.get('q') || '').replace(/inauthor:\S+/g, '');
   const isbn = q.match(/isbn:(\d+)/);
   const items = isbn ? BOOKS.filter(b => b.volumeInfo.industryIdentifiers[0].identifier === isbn[1]) : BOOKS.filter(b => q.includes(b.volumeInfo.title) || b.volumeInfo.title.includes(q.trim()));
@@ -210,7 +215,9 @@ try {
     await C.fill('#new-profile', 'דנה'); await C.click('button:has-text("כניסה")');
     await C.waitForSelector('text=אילו ספרים כבר קראת?');
     // סוויפ ימינה = קראתי, ואז דירוג; "לא קראתי"; וחזרה אחורה
+    await C.waitForSelector('text=רעיון של יעל שטסמן סעדון האגדית');
     const card = C.locator('[role=group][aria-label*=","]').last();
+    await card.locator('img[src*="cover-starter"]').waitFor();
     const first = (await card.getAttribute('aria-label')).split(',')[0];
     const box = await card.boundingBox();
     await C.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await C.mouse.down();
@@ -224,6 +231,10 @@ try {
     await C.click('[aria-label="חזרה לספר הקודם"]');
     assert.equal((await C.locator('[role=group][aria-label*=","]').last().getAttribute('aria-label')).split(',')[0], second);
     await C.waitForSelector('button:has-text("הוספת 1 ספרים")');
+    const g1 = await C.locator('text=/ז\'אנר \\d+ מתוך/').textContent();
+    await C.click('button:has-text("ז\'אנר הבא")');
+    assert.notEqual(await C.locator('text=/ז\'אנר \\d+ מתוך/').textContent(), g1);
+    await C.click('[aria-label="חזרה לספר הקודם"]');
     const rate = async (title, label) => { await C.fill('#starter-q', title); await C.locator(`li:has-text("${title}")`).first().locator(`button:has-text("${label}")`).click(); };
     await rate('מיכאל שלי', 'אהבתי'); await rate('יער נורווגי', 'בסדר'); await rate('חסמבה', 'אהבתי');
     await C.fill('#starter-q', '');
