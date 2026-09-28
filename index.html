@@ -322,6 +322,53 @@
       b.forEach(x => { if (!seen.has(x.key) && !seenD.has(dedupeKey(x))) { out.push(x); seen.add(x.key); seenD.add(dedupeKey(x)); } });
       return out;
     }
+    function mergeByKey(a, b) {
+      const seen = new Set(a.map(x => x.key));
+      return a.concat(b.filter(x => !seen.has(x.key) && seen.add(x.key)));
+    }
+    // קיבוץ מהדורות/הדפסות של אותה יצירה (אותו שם ומחבר) לכרטיס אחד
+    function groupEditions(list) {
+      const groups = [];
+      const byKey = new Map();
+      list.forEach(c => {
+        const k = dedupeKey(c);
+        const g = byKey.get(k);
+        if (g) g.editions.push(c);
+        else { const ng = { key: k, main: c, editions: [c] }; byKey.set(k, ng); groups.push(ng); }
+      });
+      groups.forEach(g => {
+        // הרשומה הראשית: זו עם הכי הרבה מידע (תקציר, כריכה)
+        const info = (c) => (c.description ? 2 : 0) + (c.cover ? 1 : 0) + (c.pageCount ? 0.5 : 0);
+        g.main = g.editions.slice().sort((a, b) => info(b) - info(a))[0];
+      });
+      return groups.slice(0, 10);
+    }
+    function withWorkInfo(ed, main) {
+      return {
+        ...ed,
+        description: ed.description || main.description, descSource: ed.description ? ed.descSource : main.descSource,
+        categories: ed.categories && ed.categories.length ? ed.categories : main.categories,
+        authors: ed.authors && ed.authors.length ? ed.authors : main.authors,
+        cover: ed.cover || main.cover
+      };
+    }
+    async function olEditions(workKey, work) {
+      const data = await fetchJSON(OL_BASE + workKey + '/editions.json?limit=40');
+      return (data.entries || []).map(e => {
+        const lang = (((e.languages || [])[0] || {}).key || '').split('/').pop();
+        const yr = (e.publish_date || '').match(/\d{4}/);
+        return {
+          ...work, key: 'ol:' + workKey, editionKey: e.key, sourceId: workKey,
+          title: e.title || work.title, subtitle: e.subtitle || '',
+          publisher: (e.publishers || []).join(', '), year: yr ? yr[0] : '',
+          pageCount: e.number_of_pages || 0,
+          cover: e.covers && e.covers[0] > 0 ? `https://covers.openlibrary.org/b/id/${e.covers[0]}-M.jpg` : '',
+          isbns: [].concat(e.isbn_13 || [], e.isbn_10 || []), language: lang || '',
+          link: OL_BASE + e.key, verifiedVia: 'Open Library'
+        };
+      }).sort((a, b) => (b.cover ? 1 : 0) - (a.cover ? 1 : 0) || (b.year || '').localeCompare(a.year || ''));
+    }
+
     function rankByTitle(list, text) {
       const q = normTitle(text);
       const score = (b) => {
@@ -433,8 +480,8 @@
       if (googleAvailable()) {
         try {
           const q = author ? `${text} inauthor:${author}` : text;
-          if (hasHebrew(text) || hasHebrew(author)) results = await googleSearch(q, { lang: 'iw' });
-          if (results.length < 5) results = mergeUnique(results, await googleSearch(q, {}));
+          if (hasHebrew(text) || hasHebrew(author)) results = await googleSearch(q, { lang: 'iw', max: 30 });
+          if (results.length < 8) results = mergeByKey(results, await googleSearch(q, { max: 30 }));
           if (results.length) sources.add('Google Books');
         } catch (e) { notes.push((googleState.lastError || 'Google Books לא זמין') + ' — עוברים ל-Open Library.'); }
       } else {
@@ -445,7 +492,7 @@
           const ol = await olSearch({ q: text, author: author || undefined, limit: 10 });
           await olEnrich(ol, 6);
           const before = results.length;
-          results = mergeUnique(results, ol);
+          results = mergeByKey(results, ol);
           if (results.length > before) sources.add('Open Library');
         } catch (e) { notes.push('Open Library לא הגיב.'); }
       }
@@ -453,17 +500,17 @@
         try {
           const wd = await bridgeFromWikidata(text, author);
           const before = results.length;
-          results = mergeUnique(wd, results);
+          results = mergeByKey(wd, results);
           if (results.length > before) sources.add('Wikidata');
         } catch (e) { notes.push('Wikidata לא הגיב.'); }
       }
-      return { candidates: rankByTitle(results, text).slice(0, 10), notes, sources: Array.from(sources) };
+      return { candidates: rankByTitle(results, text).slice(0, 40), notes, sources: Array.from(sources) };
     }
     async function lookupISBN(isbn) {
       const notes = [];
       if (googleAvailable()) {
         try {
-          const r = await googleSearch('isbn:' + isbn, { max: 5 });
+          const r = await googleSearch('isbn:' + isbn, { max: 10 });
           if (r.length) return { candidates: r, notes, sources: ['Google Books'] };
         } catch (e) { notes.push((googleState.lastError || 'Google Books לא זמין') + ' — עוברים ל-Open Library.'); }
       }
@@ -1109,7 +1156,7 @@
                   <Cover book={b} className="w-14 h-20" />
                   <div className="min-w-0 flex-1">
                     <div className="font-display font-bold text-[17px] leading-snug clamp-2">{b.title}</div>
-                    <div className="text-muted text-[14px] truncate">{b.authors.join(', ')}{b.year ? ` · ${b.year}` : ''}</div>
+                    <div className="text-muted text-[14px] truncate">{[b.authors.join(', '), b.publisher, b.year].filter(Boolean).join(' · ')}</div>
                     <div className="mt-1"><Stars value={b.rating} size={15} /></div>
                     {b.tags.length > 0 && <div className="flex flex-wrap gap-1 mt-1.5">{b.tags.slice(0, 4).map(t => <span key={t} className="text-[12px] px-2 py-0.5 rounded-full bg-surface2 text-muted font-semibold">{t}</span>)}{b.tags.length > 4 && <span className="text-[12px] text-muted">+{b.tags.length - 4}</span>}</div>}
                   </div>
@@ -1127,7 +1174,7 @@
                   <div className="font-display font-bold text-[20px] leading-tight">{current.title}</div>
                   {current.subtitle && <div className="text-[14px] text-muted">{current.subtitle}</div>}
                   <div className="text-[15px] mt-1">{current.authors.join(', ')}</div>
-                  <div className="text-muted text-[13px] tabular mt-0.5">{[current.year, current.pageCount ? current.pageCount + ' עמ\'' : '', langLabel(current.language)].filter(Boolean).join(' · ')}</div>
+                  <div className="text-muted text-[13px] tabular mt-0.5">{metaLine(current)}</div>
                   <div className="mt-2"><Stars value={current.rating} size={18} /></div>
                 </div>
               </div>
@@ -1151,8 +1198,44 @@
     /* ============================================================
        לשונית: הוספת ספר
        ============================================================ */
-    function CandidateCard({ c, inLib, onPick }) {
+    function metaLine(c) {
+      return [c.publisher, c.year, c.pageCount ? c.pageCount + ' עמ\'' : '', langLabel(c.language)].filter(Boolean).join(' · ');
+    }
+
+    function EditionRow({ ed, main, onPick, disabled }) {
+      return (
+        <li className="flex gap-2.5 items-center py-2 border-b border-line last:border-0">
+          <Cover book={ed} className="w-10 h-14" />
+          <div className="min-w-0 flex-1 text-[13px] leading-snug">
+            {normTitle(ed.title) !== normTitle(main.title) && <div className="font-bold text-[14px] truncate">{ed.title}</div>}
+            <div className="tabular">{metaLine(ed) || 'פרטי הדפסה לא צוינו'}</div>
+            {ed.isbns && ed.isbns[0] && <div className="text-muted tabular" dir="ltr" style={{ textAlign: 'right' }}>ISBN {ed.isbns[0]}</div>}
+          </div>
+          <button type="button" disabled={disabled} onClick={() => onPick(withWorkInfo(ed, main))}
+            className="shrink-0 min-h-[44px] px-3 rounded-xl border border-accent text-accent font-bold text-[14px] disabled:opacity-40">בחירה</button>
+        </li>
+      );
+    }
+
+    function CandidateGroup({ group, inLib, onPick }) {
+      const c = group.main;
       const [more, setMore] = useState(false);
+      const [showEd, setShowEd] = useState(false);
+      const [olEd, setOlEd] = useState({ loading: false, list: null, error: '' });
+      const googleEds = group.editions.filter(e => e !== c);
+      const canLoadOL = c.source === 'openlibrary' && c.sourceId && c.sourceId.startsWith('/works/');
+      const editions = googleEds.concat(olEd.list || []);
+
+      const toggleEditions = async () => {
+        const next = !showEd;
+        setShowEd(next);
+        if (next && canLoadOL && !olEd.list && !olEd.loading) {
+          setOlEd({ loading: true, list: null, error: '' });
+          try { setOlEd({ loading: false, list: await olEditions(c.sourceId, c), error: '' }); }
+          catch (e) { setOlEd({ loading: false, list: [], error: 'טעינת המהדורות נכשלה. נסו שוב.' }); }
+        }
+      };
+
       return (
         <li className="fade-in bg-surface border border-line rounded-2xl p-3">
           <div className="flex gap-3">
@@ -1161,7 +1244,8 @@
               <div className="font-display font-bold text-[18px] leading-snug">{c.title}</div>
               {c.subtitle && <div className="text-muted text-[13px] clamp-2">{c.subtitle}</div>}
               <div className="text-[15px] mt-0.5">{c.authors.length ? c.authors.join(', ') : <span className="text-warn">מחבר לא צוין במקור</span>}</div>
-              <div className="text-muted text-[13px] tabular">{[c.year, c.pageCount ? c.pageCount + ' עמ\'' : '', langLabel(c.language), c.publisher].filter(Boolean).join(' · ')}</div>
+              <div className="text-muted text-[13px] tabular">{metaLine(c)}</div>
+              {c.isbns && c.isbns[0] && <div className="text-muted text-[12px] tabular">ISBN <span dir="ltr">{c.isbns[0]}</span></div>}
               <div className="mt-1.5"><SourceBadge book={c} /></div>
             </div>
           </div>
@@ -1180,11 +1264,54 @@
               : <Btn className="flex-1" onClick={() => onPick(c)}><Icon name="Check" size={20} />זה הספר שלי</Btn>}
             {c.link && <a href={c.link} target="_blank" rel="noopener noreferrer" aria-label="פתיחת הרשומה במקור" className="min-h-[48px] w-12 grid place-items-center rounded-xl border border-line text-muted"><Icon name="ExternalLink" size={18} /></a>}
           </div>
+          {(googleEds.length > 0 || canLoadOL) && (
+            <div className="mt-2 border-t border-line pt-1">
+              <button type="button" onClick={toggleEditions} aria-expanded={showEd}
+                className="w-full min-h-[44px] flex items-center justify-between text-accent font-bold text-[15px]">
+                <span>{googleEds.length ? `מהדורות והדפסות נוספות (${googleEds.length})` : 'מהדורות והדפסות אחרות'}</span>
+                <span style={{ transform: showEd ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}><Icon name="ChevronDown" size={20} /></span>
+              </button>
+              {showEd && (
+                <div className="fade-in">
+                  <p className="text-[13px] text-muted mb-1">בחרו את ההוצאה שקראתם: כריכה, הוצאה, שנה ומספר עמודים.</p>
+                  {olEd.loading && <div className="text-muted text-[14px] py-2 inline-flex items-center gap-2"><Spinner size={16} />טוען מהדורות מ-Open Library…</div>}
+                  {olEd.error && <Notice tone="error">{olEd.error}</Notice>}
+                  {!olEd.loading && !editions.length && <p className="text-muted text-[14px] py-2">לא נמצאו מהדורות נוספות במקור.</p>}
+                  <ul>{editions.map((ed, i) => <EditionRow key={(ed.editionKey || ed.key) + i} ed={ed} main={c} onPick={onPick} disabled={!!inLib} />)}</ul>
+                </div>
+              )}
+            </div>
+          )}
         </li>
       );
     }
 
-    function AddTab({ db, onPick, goSettings }) {
+    function SearchResults({ res, db, onPick, goSettings }) {
+      const groups = useMemo(() => groupEditions(res.candidates), [res]);
+      const edCount = res.candidates.length;
+      return (
+        <div className="grid gap-3">
+          {res.notes.map((n, i) => <Notice key={i} tone="warn">{n}</Notice>)}
+          {!googleAvailable() && !db.settings.apiKey && (
+            <Notice tone="info">
+              Google Books חוסם חיפושים בלי מפתח (המכסה המשותפת לכל המשתמשים נגמרת כל יום). מפתח אישי הוא בחינם ומחזיר את הכיסוי המלא לספרים בעברית.
+              <button type="button" onClick={goSettings} className="block mt-1 text-accent font-bold min-h-[40px]">להוספת מפתח חינמי ←</button>
+            </Notice>
+          )}
+          {groups.length > 0 && (
+            <p className="text-[14px] text-muted">{groups.length} ספרים{edCount > groups.length ? ` (${edCount} מהדורות)` : ''} מ-{res.sources.join(' + ')}. בחרו את הספר, או פתחו את רשימת המהדורות כדי לבחור את ההדפסה המדויקת:</p>
+          )}
+          {groups.length === 0 && (
+            <Notice tone="error">לא נמצא ספר תואם באף מאגר. נסו את השם המלא או איות אחר, את השם בשפת המקור (למשל Norwegian Wood), או הדביקו ISBN מהכריכה האחורית.</Notice>
+          )}
+          <ul className="grid gap-3">
+            {groups.map(g => <CandidateGroup key={g.key + g.main.key} group={g} inLib={findInLibrary(g.main, db.books)} onPick={onPick} />)}
+          </ul>
+        </div>
+      );
+    }
+
+    function SingleSearch({ db, onPick, goSettings }) {
       const [text, setText] = useState('');
       const [author, setAuthor] = useState('');
       const [showAuthor, setShowAuthor] = useState(false);
@@ -1206,11 +1333,7 @@
       };
 
       return (
-        <div className="fade-in">
-          <header className="pt-4 pb-3">
-            <h1 className="font-display font-black text-[30px] leading-tight">הוספת ספר</h1>
-            <p className="text-muted text-[15px]">שם ספר בעברית או באנגלית, ISBN או קישור. רק תוצאות שחזרו מהמאגרים יוצגו.</p>
-          </header>
+        <>
           <form onSubmit={run} className="grid gap-2 mb-4">
             <label htmlFor="book-q" className="sr-only">שם הספר, ISBN או קישור</label>
             <div className="relative">
@@ -1227,31 +1350,238 @@
               : <button type="button" className="text-accent font-bold text-[14px] text-right min-h-[36px]" onClick={() => setShowAuthor(true)}>+ צמצום לפי מחבר</button>)}
             <Btn type="submit" disabled={!text.trim() || state.loading}>{state.loading ? <><Spinner />מחפש ומאמת…</> : <><Icon name="Search" size={20} />חיפוש</>}</Btn>
           </form>
-
           {state.error && <Notice tone="error">{state.error}</Notice>}
-          {state.res && (
-            <div className="grid gap-3">
-              {state.res.notes.map((n, i) => <Notice key={i} tone="warn">{n}</Notice>)}
-              {!googleAvailable() && !db.settings.apiKey && (
-                <Notice tone="info">
-                  Google Books חוסם חיפושים בלי מפתח (המכסה המשותפת לכל המשתמשים נגמרת כל יום). מפתח אישי הוא בחינם ומחזיר את הכיסוי המלא לספרים בעברית.
-                  <button type="button" onClick={goSettings} className="block mt-1 text-accent font-bold min-h-[40px]">להוספת מפתח חינמי ←</button>
-                </Notice>
-              )}
-              {state.res.candidates.length > 0 && (
-                <p className="text-[14px] text-muted">{state.res.candidates.length} מועמדים מ-{state.res.sources.join(' + ')}. בחרו את הספר שקראתם:</p>
-              )}
-              {state.res.candidates.length === 0 && (
-                <Notice tone="error">לא נמצא ספר תואם באף מאגר. נסו את השם המלא או איות אחר, את השם בשפת המקור (למשל Norwegian Wood), או הדביקו ISBN מהכריכה האחורית.</Notice>
-              )}
-              <ul className="grid gap-3">
-                {state.res.candidates.map(c => <CandidateCard key={c.key} c={c} inLib={findInLibrary(c, db.books)} onPick={onPick} />)}
-              </ul>
-              {state.res.candidates.length > 0 && (
-                <Notice tone="info">הספר לא ברשימה? חדדו את החיפוש עם שם המחבר, נסו את שם הספר בשפת המקור, או הדביקו ISBN או קישור ישיר.</Notice>
-              )}
+          {state.res && <SearchResults res={state.res} db={db} onPick={(b) => onPick(b)} goSettings={goSettings} />}
+        </>
+      );
+    }
+
+    /* ---------- הוספת רשימה ברצף ---------- */
+    const QUEUE_KEY = 'verified_reading_tracker_queue_v1';
+    function parseBookList(text) {
+      let lines = (text || '').split(/\r?\n/);
+      if (lines.filter(l => l.trim()).length === 1 && /[,;،]/.test(lines[0])) lines = lines[0].split(/[,;،]/);
+      return lines
+        .map(l => l.replace(/^\s*(?:\d{1,3}\s*[.)\-:]|[-*•·▪►✓✔])\s*/, '').trim())
+        .filter(l => l.length > 1)
+        .slice(0, 60)
+        .map(l => {
+          if (tryURL(l) || isPureISBN(l)) return { raw: l, title: l, author: '' };
+          const parts = l.split(/\s+[-–—]\s+|\s+\/\s+|\s+מאת\s+|\s+by\s+/i);
+          return { raw: l, title: parts[0].trim(), author: (parts[1] || '').trim() };
+        });
+    }
+    function loadQueue() {
+      try {
+        const q = JSON.parse(localStorage.getItem(QUEUE_KEY) || 'null');
+        if (!q || !Array.isArray(q.items)) return null;
+        // תוצאות החיפוש לא נשמרות; פריטים שלא טופלו מחפשים מחדש (מהיר, יש מטמון)
+        q.items = q.items.map(it => ({ ...it, status: isDone(it.status) ? it.status : 'pending' }));
+        return q;
+      } catch (e) { return null; }
+    }
+    function saveQueue(q) {
+      try { if (q) localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); else localStorage.removeItem(QUEUE_KEY); } catch (e) { /* */ }
+    }
+    const Q_STATUS = {
+      pending: { label: 'ממתין', cls: 'bg-surface2 text-muted' },
+      searching: { label: 'מחפש', cls: 'bg-surface2 text-muted' },
+      ready: { label: 'לבחירה', cls: 'bg-accentSoft text-accent' },
+      notfound: { label: 'לא נמצא', cls: 'bg-surface2 text-warn' },
+      error: { label: 'שגיאה', cls: 'bg-surface2 text-danger' },
+      saved: { label: 'נוסף', cls: 'bg-accent text-accentInk' },
+      exists: { label: 'כבר קיים', cls: 'bg-surface2 text-ok' },
+      skipped: { label: 'דולג', cls: 'bg-surface2 text-muted' }
+    };
+    const isDone = (st) => st === 'saved' || st === 'skipped' || st === 'exists';
+
+    function BulkImport({ db, onPick, goSettings }) {
+      const [queue, setQueue] = useState(() => loadQueue());
+      const [draft, setDraft] = useState('');
+      const [results, setResults] = useState({});
+      const [edit, setEdit] = useState(null);   // { title, author }
+      const busy = useRef(false);
+      const topRef = useRef(null);
+      const parsed = useMemo(() => parseBookList(draft), [draft]);
+
+      useEffect(() => { saveQueue(queue); }, [queue]);
+
+      const setItem = (id, patch) => setQueue(q => q && ({ ...q, items: q.items.map(it => it.id === id ? { ...it, ...patch } : it) }));
+
+      // חיפוש ברקע, פריט אחד בכל פעם; הפריט הנוכחי קודם
+      useEffect(() => {
+        if (!queue || busy.current) return;
+        const cur = queue.items.find(it => it.id === queue.current);
+        const next = (cur && cur.status === 'pending') ? cur : queue.items.find(it => it.status === 'pending');
+        if (!next) return;
+        busy.current = true;
+        setItem(next.id, { status: 'searching' });
+        searchBooks(next.title, next.author)
+          .then(res => {
+            setResults(r => ({ ...r, [next.id]: res }));
+            setItem(next.id, { status: res.candidates.length ? 'ready' : 'notfound' });
+          })
+          .catch(() => setItem(next.id, { status: 'error' }))
+          .finally(() => { busy.current = false; setQueue(q => q && { ...q }); });
+      }, [queue]);
+
+      const start = () => {
+        if (!parsed.length) return;
+        const items = parsed.map(p => ({ id: uid(), ...p, status: 'pending', savedTitle: '' }));
+        setResults({});
+        setQueue({ items, current: items[0].id, createdAt: Date.now() });
+        setDraft('');
+      };
+      const goNext = (fromId) => {
+        setQueue(q => {
+          if (!q) return q;
+          const idx = q.items.findIndex(it => it.id === fromId);
+          const order = q.items.slice(idx + 1).concat(q.items.slice(0, idx + 1));
+          const nx = order.find(it => !isDone(it.status) && it.id !== fromId);
+          return { ...q, current: nx ? nx.id : null };
+        });
+        setEdit(null);
+        setTimeout(() => topRef.current && topRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+      };
+      const research = (id) => {
+        if (!edit || !edit.title.trim()) return;
+        setResults(r => { const n = { ...r }; delete n[id]; return n; });
+        setItem(id, { title: edit.title.trim(), author: edit.author.trim(), status: 'pending' });
+        setEdit(null);
+      };
+
+      if (!queue) {
+        return (
+          <div className="grid gap-2">
+            <label htmlFor="bulk-list" className="text-[15px]">הדביקו או הקלידו רשימה, <b>ספר בכל שורה</b>. אפשר להוסיף מחבר אחרי מקף, ואפשר גם ISBN או קישור.</label>
+            <textarea id="bulk-list" value={draft} onChange={e => setDraft(e.target.value)} rows={8}
+              placeholder={'יער נורווגי - מורקמי\nסיפור על אהבה וחושך\nProject Hail Mary - Andy Weir\n9789650731234'}
+              className="w-full rounded-2xl border border-line bg-surface p-3 text-[16px] leading-relaxed" />
+            {parsed.length > 0 && (
+              <div className="text-[14px] text-muted">
+                זוהו <b className="tabular text-ink">{parsed.length}</b> ספרים{parsed.some(p => p.author) ? `, ${parsed.filter(p => p.author).length} עם מחבר` : ''}.
+                {parsed.length >= 60 && ' (מקסימום 60 בכל רשימה)'}
+              </div>
+            )}
+            <Btn disabled={!parsed.length} onClick={start}><Icon name="ListChecks" size={20} />התחלה: {parsed.length || ''} ספרים לבחירה</Btn>
+            <p className="text-[13px] text-muted">כל ספר נבדק מול המאגרים. אחר כך עוברים ספר-ספר, בוחרים את ההדפסה הנכונה ומדרגים. ההתקדמות נשמרת גם אם סוגרים את הדף.</p>
+          </div>
+        );
+      }
+
+      const items = queue.items;
+      const doneCount = items.filter(it => isDone(it.status)).length;
+      const savedCount = items.filter(it => it.status === 'saved').length;
+      const cur = items.find(it => it.id === queue.current);
+      const curIdx = cur ? items.indexOf(cur) : -1;
+      const res = cur && results[cur.id];
+
+      return (
+        <div className="grid gap-3" ref={topRef}>
+          <div className="bg-surface border border-line rounded-2xl p-3">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <div className="font-bold text-[16px] tabular">{doneCount} מתוך {items.length} טופלו · {savedCount} נוספו</div>
+              <button type="button" className="text-muted text-[14px] font-bold min-h-[40px] px-2" onClick={() => { setQueue(null); setResults({}); }}>סגירת הרשימה</button>
+            </div>
+            <div className="h-2 rounded-full bg-surface2 overflow-hidden mb-2" aria-hidden="true">
+              <div className="h-full bg-accent transition-all" style={{ width: `${(doneCount / items.length) * 100}%` }} />
+            </div>
+            <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1" role="list" aria-label="הספרים ברשימה">
+              {items.map((it, i) => (
+                <button key={it.id} type="button" role="listitem" onClick={() => { setQueue(q => ({ ...q, current: it.id })); setEdit(null); }}
+                  className={`shrink-0 max-w-[170px] min-h-[40px] px-2.5 rounded-xl text-[13px] font-semibold border text-right ${it.id === queue.current ? 'border-accent ring-2 ring-accent' : 'border-line'} ${Q_STATUS[it.status].cls}`}>
+                  <span className="tabular">{i + 1}.</span> <span className="truncate inline-block max-w-[120px] align-bottom">{it.savedTitle || it.title}</span>
+                  <span className="block text-[11px] opacity-80">{it.status === 'searching' ? '…' : Q_STATUS[it.status].label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {!cur && (
+            <div className="bg-surface border border-line rounded-2xl p-4 text-center grid gap-3">
+              <div className="font-display font-bold text-[22px]">הרשימה הושלמה</div>
+              <p className="text-muted tabular">{savedCount} ספרים נוספו לספרייה · {items.filter(i => i.status === 'exists').length} כבר היו בה · {items.filter(i => i.status === 'skipped').length} דולגו</p>
+              <Btn onClick={() => { setQueue(null); setResults({}); }}>רשימה חדשה</Btn>
             </div>
           )}
+
+          {cur && (
+            <section className="grid gap-3" aria-live="polite">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[13px] font-bold text-muted tabular">ספר {curIdx + 1} מתוך {items.length}</div>
+                  <h2 className="font-display font-bold text-[22px] leading-tight">{cur.title}</h2>
+                  {cur.author && <div className="text-muted text-[15px]">{cur.author}</div>}
+                </div>
+                <span className={`shrink-0 text-[12px] font-bold px-2 py-1 rounded-full ${Q_STATUS[cur.status].cls}`}>{Q_STATUS[cur.status].label}</span>
+              </div>
+
+              {cur.status === 'saved' && <Notice tone="ok">נוסף לספרייה: {cur.savedTitle}</Notice>}
+
+              {edit ? (
+                <form className="grid gap-2 bg-surface border border-line rounded-2xl p-3" onSubmit={(e) => { e.preventDefault(); research(cur.id); }}>
+                  <label htmlFor="bulk-edit-title" className="text-[13px] font-bold text-muted">שם הספר</label>
+                  <input id="bulk-edit-title" value={edit.title} onChange={e => setEdit({ ...edit, title: e.target.value })} className="min-h-[48px] px-3 rounded-xl border border-line bg-bg text-[16px]" />
+                  <label htmlFor="bulk-edit-author" className="text-[13px] font-bold text-muted">מחבר (רשות)</label>
+                  <input id="bulk-edit-author" value={edit.author} onChange={e => setEdit({ ...edit, author: e.target.value })} className="min-h-[48px] px-3 rounded-xl border border-line bg-bg text-[16px]" />
+                  <div className="grid grid-cols-2 gap-2">
+                    <Btn type="submit" disabled={!edit.title.trim()}><Icon name="Search" size={18} />חיפוש מחדש</Btn>
+                    <Btn variant="ghost" onClick={() => setEdit(null)}>ביטול</Btn>
+                  </div>
+                </form>
+              ) : (
+                <div className="grid grid-cols-2 gap-2">
+                  <Btn variant="ghost" onClick={() => setEdit({ title: cur.title, author: cur.author || '' })}><Icon name="Pencil" size={18} />תיקון החיפוש</Btn>
+                  <Btn variant="ghost" onClick={() => { if (!isDone(cur.status)) setItem(cur.id, { status: 'skipped' }); goNext(cur.id); }}>
+                    {isDone(cur.status) ? 'לספר הבא' : 'דילוג'}<Icon name="ChevronLeft" size={18} />
+                  </Btn>
+                </div>
+              )}
+
+              {(cur.status === 'pending' || cur.status === 'searching') && (
+                <div className="bg-surface border border-line rounded-2xl p-4 text-muted inline-flex items-center gap-2"><Spinner />מחפש ומאמת מול המאגרים…</div>
+              )}
+              {cur.status === 'error' && <Notice tone="error">החיפוש נכשל (בעיית רשת). לחצו "תיקון החיפוש" ואז "חיפוש מחדש".</Notice>}
+              {res && !isDone(cur.status) && (() => {
+                const top = res.candidates[0];
+                const already = top && findInLibrary(top, db.books);
+                return (
+                  <>
+                    {already && (
+                      <Notice tone="ok">
+                        נראה שהספר "{already.title}" כבר בספרייה ({already.rating}★).
+                        <button type="button" className="block mt-1 text-accent font-bold min-h-[40px]" onClick={() => { setItem(cur.id, { status: 'exists', savedTitle: already.title }); goNext(cur.id); }}>סימון כקיים והמשך ←</button>
+                      </Notice>
+                    )}
+                    <SearchResults res={res} db={db} goSettings={goSettings}
+                      onPick={(b) => onPick(b, { onSaved: (saved) => { setItem(cur.id, { status: 'saved', savedTitle: saved.title }); goNext(cur.id); } })} />
+                  </>
+                );
+              })()}
+            </section>
+          )}
+        </div>
+      );
+    }
+
+    function AddTab({ db, onPick, goSettings }) {
+      const [mode, setMode] = useState(() => { try { return sessionStorage.getItem('vrt_add_mode') || (loadQueue() ? 'bulk' : 'single'); } catch (e) { return 'single'; } });
+      useEffect(() => { try { sessionStorage.setItem('vrt_add_mode', mode); } catch (e) { /* */ } }, [mode]);
+      return (
+        <div className="fade-in">
+          <header className="pt-4 pb-3">
+            <h1 className="font-display font-black text-[30px] leading-tight">הוספת ספר</h1>
+            <p className="text-muted text-[15px]">שם ספר בעברית או באנגלית, ISBN או קישור. רק תוצאות שחזרו מהמאגרים יוצגו.</p>
+          </header>
+          <div className="grid grid-cols-2 gap-1 p-1 rounded-2xl bg-surface2 mb-4" role="tablist" aria-label="אופן ההוספה">
+            {[['single', 'ספר אחד', 'Search'], ['bulk', 'רשימה של כמה ספרים', 'ListChecks']].map(([k, l, ic]) => (
+              <button key={k} type="button" role="tab" aria-selected={mode === k} onClick={() => setMode(k)}
+                className={`min-h-[44px] rounded-xl font-bold text-[15px] inline-flex items-center justify-center gap-1.5 transition-colors ${mode === k ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}>
+                <Icon name={ic} size={17} />{l}
+              </button>
+            ))}
+          </div>
+          {mode === 'single' ? <SingleSearch db={db} onPick={onPick} goSettings={goSettings} /> : <BulkImport db={db} onPick={onPick} goSettings={goSettings} />}
         </div>
       );
     }
@@ -1656,9 +1986,9 @@
         toastTimer.current = setTimeout(() => setToast(''), 2800);
       };
 
-      const pick = (book) => {
+      const pick = (book, opts) => {
         const existing = findInLibrary(book, db.books);
-        setPending({ book: existing || book, existing: existing || null });
+        setPending({ book: existing || book, existing: existing || null, onSaved: opts && opts.onSaved });
       };
       const save = ({ rating, tags }) => {
         const { book, existing } = pending;
@@ -1669,8 +1999,10 @@
           return { ...d, tagLibrary, books: [rec, ...d.books] };
         });
         notify(existing ? 'השינויים נשמרו' : `"${book.title}" נשמר בספרייה`);
+        const onSaved = pending.onSaved;
         setPending(null);
-        if (!existing && tab === 'add') setTab('library');
+        if (onSaved) onSaved(existing || book);
+        else if (!existing && tab === 'add') setTab('library');
       };
 
       return (
