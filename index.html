@@ -828,6 +828,20 @@
       return url ? { url: cloudBase(url), ai: true } : null;
     }
     const aiAvailable = () => !!loadCloud();
+    // איתור השרת: כתובת ה-Worker ב-Cloudflare היא books.<שם-החשבון>.workers.dev. האפליקציה מנסה את האפשרויות וזוכרת את זו שעונה.
+    const CLOUD_CANDIDATES = ['https://books.yuvsaadon.workers.dev', 'https://books.yuvsaadon-coder.workers.dev', 'https://books.yuvsaadon1.workers.dev', 'https://books.yuval-saadon.workers.dev', 'https://books.yuvalsaadon.workers.dev'];
+    async function discoverCloud() {
+      if (loadCloud()) return true;
+      for (const u of CLOUD_CANDIDATES) {
+        try {
+          const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 6000);
+          const r = await fetch(u + '/ping', { signal: ctrl.signal }); clearTimeout(t);
+          if (r.ok) { const j = await r.json(); if (j && j.ok) { localStorage.setItem('vrt_server_url', u); window.dispatchEvent(new Event('vrt-sync-status')); return true; } }
+        } catch (e) { /* ננסה את הבאה */ }
+      }
+      setSyncStatus({ status: 'error', error: 'השרת לא נמצא. שלחו ל-Claude Code את כתובת ה-Worker מ-Cloudflare.' });
+      return false;
+    }
     async function cloudFetch(path, opts = {}) {
       const c = loadCloud();
       if (!c) throw new Error('no_cloud');
@@ -1139,10 +1153,17 @@
       const list = books.slice().sort((a, b) => b.rating - a.rating || (b.addedAt || 0) - (a.addedAt || 0)).slice(0, 150);
       return list.map(b => `- "${b.title}"${b.subtitle ? ` / ${b.subtitle}` : ''} — ${(b.authors || []).join(', ') || '?'}${b.year ? ` (${b.year})` : ''} | ${b.rating}★${b.tags.length ? ' | tags: ' + b.tags.join(', ') : ''}${b.note ? ' | reader notes: ' + b.note.replace(/\s+/g, ' ').slice(0, 400) : ''}`).join('\n');
     }
-    async function aiRecommend({ books, request, answers, lang, exclude, dismissed, want = 5, onProgress }) {
+    function historyForPrompt(history, books) {
+      return (history || []).slice(0, 6).map(h => {
+        const req = h.answers && h.answers.request ? `"${h.answers.request}"` : answersSummary(h.answers || {}).join('; ') || '(questionnaire)';
+        const recs = (h.recs || []).map(r => `${r.title}${findInLibrary(r, books) ? ' [later added to library]' : ''}`).join('; ');
+        return `- ${new Date(h.at).toISOString().slice(0, 10)}: asked ${req} → recommended: ${recs || 'nothing'}`;
+      }).join('\n');
+    }
+    async function aiRecommend({ books, request, answers, lang, exclude, dismissed, history, want = 5, onProgress }) {
       const langText = { he: 'Hebrew only (books available in a Hebrew edition)', en: 'English only', both: 'Hebrew or English editions', any: 'any language', auto: 'Hebrew or English' }[lang] || 'Hebrew or English';
       const prefs = answersSummary(answers || {}).join('; ');
-      const excludeTitles = uniq([...books.map(b => b.title), ...exclude]).slice(0, 300);
+      const excludeTitles = uniq([...books.map(b => b.title), ...exclude, ...(history || []).flatMap(h => (h.recs || []).map(r => r.title))]).slice(0, 300);
       onProgress && onProgress(`שולח ל-Claude את הספרייה שלך (${books.length} ספרים) ואת הבקשה. חיפוש וקריאה של ביקורות לוקחים בדרך כלל 1–3 דקות.`);
       const { input, cost } = await aiRun({
         effort: 'high', onProgress,
@@ -1154,7 +1175,7 @@
           '`why` must connect the book to specific books and notes from the reader\'s library and to what reviewers said, in 2–4 sentences. List the pages you relied on in `sources`.',
           `Language: ${langText}. ` + HEBREW_OUT
         ].join('\n'),
-        prompt: `READER'S LIBRARY (title — author | rating | tags | notes):\n${libraryForPrompt(books) || '(empty)'}\n\nALREADY SEEN OR NOT WANTED (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 300).join('; ') || 'none'}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs ? `\nQUICK PREFERENCES: ${prefs}` : ''}\n\nRecommend ${want + 2} books.`,
+        prompt: `READER'S LIBRARY (title — author | rating | tags | notes):\n${libraryForPrompt(books) || '(empty)'}\n\nALREADY SEEN OR NOT WANTED (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 300).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history, books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs ? `\nQUICK PREFERENCES: ${prefs}` : ''}\n\nRecommend ${want + 2} books.`,
         submitTool: {
           name: 'submit_recommendations', description: 'Return the final recommendations.',
           input_schema: { type: 'object', additionalProperties: false, required: ['interpretation', 'recommendations'], properties: {
@@ -2546,18 +2567,20 @@
     }
 
     function DiscoverTab({ db, update, onPick, notify }) {
-      const [step, setStep] = useState(0);
-      const [answers, setAnswers] = useState({ avoid: [] });
-      const [log, setLog] = useState([]);
+      // ממשיכים את השיחה האחרונה (משלושת הימים האחרונים) גם אחרי מעבר לשונית או פתיחה מחדש
+      const [resume] = useState(() => { const h = (db.history || [])[0]; return h && Date.now() - h.at < 3 * 86400000 ? h : null; });
+      const [step, setStep] = useState(resume ? QUESTIONS.length : 0);
+      const [answers, setAnswers] = useState(resume ? resume.answers || {} : { avoid: [] });
+      const [log, setLog] = useState(resume ? resume.log || [] : []);
       const [running, setRunning] = useState(false);
-      const [recs, setRecs] = useState([]);
-      const [shown, setShown] = useState(() => new Set());
+      const [recs, setRecs] = useState(resume ? resume.recs || [] : []);
+      const [shown, setShown] = useState(() => new Set(resume ? (resume.recs || []).flatMap(r => [r.key, r.title]) : []));
       const [multi, setMulti] = useState([]);
       const [view, setView] = useState('chat');   // 'chat' | 'history' | מזהה שיחה
       const [aiText, setAiText] = useState('');
       const hasAi = aiAvailable();
-      const session = useRef({ id: null, at: 0 });
-      const logRef = useRef([]);
+      const session = useRef(resume ? { id: resume.id, at: resume.at } : { id: null, at: 0 });
+      const logRef = useRef(resume ? resume.log || [] : []);
       const endRef = useRef(null);
       const prof = useMemo(() => buildProfile(db.books), [db.books]);
       const autoLang = 'he';   // עדיפות לעברית; אפשר לבחור ידנית עברית ואנגלית / כל שפה
@@ -2615,7 +2638,7 @@
         try {
           const { recs: r, interpretation } = await aiRecommend({
             books: db.books, request, answers: {}, lang, exclude: [...recs.map(x => x.title), ...[...shown].filter(k => !k.includes(':') && !k.includes('|'))],
-            dismissed: db.dismissed, want: 5, onProgress: progress
+            dismissed: db.dismissed, history: db.history, want: 5, onProgress: progress
           });
           if (interpretation) pushLog({ from: 'bot', text: interpretation });
           if (!r.length) progress('לא נשארו המלצות שעברו את האימות. נסו לנסח את הבקשה אחרת.');
@@ -2649,7 +2672,7 @@
           {view !== 'chat' && <HistoryView db={db} update={update} onPick={onPick} notify={notify} openId={view === 'history' ? null : view} setOpenId={(id) => setView(id || 'history')} />}
           {view === 'chat' && <>
           {!db.settings.apiKey && !hasAi && (
-            <div className="mb-3"><Notice tone="info">בלי מפתח Google Books ההמלצות מגיעות בעיקר מ-Open Library, ויש שם מעט ספרים בעברית. אפשר להוסיף מפתח חינמי בלשונית "גיבוי נתונים".</Notice></div>
+            <div className="mb-3"><Notice tone="info">בלי מפתח Google Books ההמלצות מגיעות בעיקר מ-Open Library, ויש שם מעט ספרים בעברית. אפשר להוסיף מפתח חינמי בלשונית "הגדרות".</Notice></div>
           )}
 
           <div className="bg-surface border border-line rounded-2xl p-3 mb-4 grid gap-2">
@@ -2765,7 +2788,7 @@
 
     function SyncPanel() {
       const sync = useSyncStatus();
-      if (!sync.cloud) return <p className="text-[14px] text-muted">הסנכרון עוד לא הוגדר באפליקציה.</p>;
+      if (!sync.cloud) return <p className="text-[14px] text-danger">{sync.error || 'מחפש את השרת…'}</p>;
       const label = { syncing: 'מסנכרן…', ok: 'מסונכרן', error: 'לא מחובר', off: '' }[sync.status] || '';
       return (
         <div className="grid gap-2">
@@ -2858,8 +2881,7 @@
       return (
         <div className="fade-in grid gap-4">
           <header className="pt-4">
-            <h1 className="font-display font-black text-[30px] leading-tight">גיבוי נתונים</h1>
-            <p className="text-muted text-[15px]">הנתונים נשמרים אוטומטית במכשיר הזה. גיבוי לקובץ שומר עליהם גם אם הדפדפן מנקה נתונים.</p>
+            <h1 className="font-display font-black text-[30px] leading-tight">הגדרות</h1>
           </header>
 
           <section className="bg-surface border border-line rounded-2xl p-3">
@@ -2867,49 +2889,17 @@
             <SyncPanel />
           </section>
 
-          <section className="bg-surface border border-line rounded-2xl p-3">
-            <h2 className="font-bold text-[17px] mb-1">מצב אחסון</h2>
-            <StatusRow ok={status.local} label="localStorage" />
-            <StatusRow ok={status.idb} label="IndexedDB (עותק שני)" />
-            <StatusRow ok={status.persisted} label="אחסון קבוע (מוגן מניקוי)" detail={status.persisted === true ? 'אושר' : status.persisted === false ? 'לא אושר' : 'לא ידוע'} />
-            <p className="text-[13px] text-muted mt-2 tabular">{db.books.length} ספרים · נשמר לאחרונה {status.savedAt ? fmtDateTime(status.savedAt) : '—'} · משתמש: {profile.name}</p>
-          </section>
-
-          {daysSince !== null && daysSince < 7
-            ? <Notice tone="ok">גיבוי אחרון לקובץ: {fmtDate(db.lastBackupAt)}.</Notice>
-            : db.books.length > 0 && <Notice tone="warn">{daysSince === null ? 'עוד לא שמרת גיבוי לקובץ.' : `הגיבוי האחרון לקובץ היה לפני ${daysSince} ימים.`} מומלץ לגבות עכשיו.</Notice>}
-
           <section className="bg-surface border border-line rounded-2xl p-3 grid gap-2">
-            <h2 className="font-bold text-[17px]">ייצוא</h2>
-            <Btn onClick={() => { downloadFile(`reading-backup-${profile.name}-${stamp}.json`, json(), 'application/json'); markBackup(); notify('קובץ הגיבוי נוצר'); }} disabled={!db.books.length}>
-              <Icon name="Download" size={20} />הורדת גיבוי מלא (JSON)
+            <h2 className="font-bold text-[17px]">המשתמש שלך</h2>
+            <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (nameDraft.trim()) { onRenameProfile(nameDraft.trim()); notify('השם עודכן'); } }}>
+              <label htmlFor="profile-name" className="sr-only">שם המשתמש</label>
+              <input id="profile-name" value={nameDraft} onChange={e => setNameDraft(e.target.value)} maxLength={24}
+                className="flex-1 min-w-0 min-h-[48px] px-3 rounded-xl border border-line bg-bg text-[16px]" />
+              <Btn variant="soft" type="submit" disabled={!nameDraft.trim() || nameDraft.trim() === profile.name}>שינוי שם</Btn>
+            </form>
+            <Btn variant="danger" onClick={() => { if (!confirmProfileDel) { setConfirmProfileDel(true); return; } onDeleteProfile(); }}>
+              {confirmProfileDel ? `לחצו שוב: מחיקת "${profile.name}" וכל הספרים שלו` : 'מחיקת המשתמש מהמכשיר'}
             </Btn>
-            <div className="grid grid-cols-2 gap-2">
-              <Btn variant="soft" disabled={!db.books.length} onClick={async () => { const ok = await copyText(json(), taRef.current); if (ok) { markBackup(); notify('הגיבוי הועתק. אפשר להדביק בהערות או במייל.'); } else notify('ההעתקה נחסמה. הטקסט מסומן בתיבה למטה, העתיקו ידנית.'); }}>
-                <Icon name="Copy" size={18} />העתקת JSON
-              </Btn>
-              <Btn variant="soft" disabled={!db.books.length} onClick={() => { downloadFile(`my-books-${profile.name}-${stamp}.txt`, toText(db), 'text/plain;charset=utf-8'); notify('רשימת הטקסט נוצרה'); }}>
-                <Icon name="FileText" size={18} />רשימה כטקסט
-              </Btn>
-            </div>
-          </section>
-
-          <section className="bg-surface border border-line rounded-2xl p-3 grid gap-2">
-            <h2 className="font-bold text-[17px]">ייבוא ושחזור</h2>
-            <input ref={fileRef} id="import-file" type="file" accept="application/json,.json,text/plain" className="hidden" onChange={onFile} />
-            <Btn variant="ghost" onClick={() => fileRef.current && fileRef.current.click()}><Icon name="Upload" size={20} />בחירת קובץ גיבוי</Btn>
-            <label htmlFor="import-paste" className="text-[14px] text-muted">או הדביקו כאן את תוכן הגיבוי:</label>
-            <textarea id="import-paste" ref={taRef} value={paste} onChange={e => setPaste(e.target.value)} rows={3} dir="ltr"
-              className="w-full rounded-xl border border-line bg-bg p-2 text-[13px] font-mono" placeholder='{"version":1,"books":[...]}' />
-            <Btn variant="soft" disabled={!paste.trim()} onClick={() => parse(paste)}>בדיקת הטקסט</Btn>
-            {err && <Notice tone="error">{err}</Notice>}
-            {preview && (
-              <div className="fade-in grid gap-2 border border-accent rounded-xl p-3">
-                <p className="text-[15px]">בגיבוי יש <b className="tabular">{preview.data.books.length}</b> ספרים, מתוכם <b className="tabular">{preview.fresh}</b> שלא קיימים כאן.</p>
-                <Btn onClick={merge} disabled={!preview.fresh}>מיזוג: הוספת {preview.fresh} ספרים חדשים</Btn>
-                <Btn variant="danger" onClick={doReplace}>{confirmReplace ? `לחצו שוב: להחליף את כל ${db.books.length} הספרים הנוכחיים` : 'החלפה מלאה של הספרייה'}</Btn>
-              </div>
-            )}
           </section>
 
           <section className="bg-surface border border-line rounded-2xl p-3 grid gap-3">
@@ -2957,19 +2947,48 @@
             )}
           </section>
 
-          <section className="bg-surface border border-line rounded-2xl p-3 grid gap-2">
-            <h2 className="font-bold text-[17px]">המשתמש שלך</h2>
-            <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (nameDraft.trim()) { onRenameProfile(nameDraft.trim()); notify('השם עודכן'); } }}>
-              <label htmlFor="profile-name" className="sr-only">שם המשתמש</label>
-              <input id="profile-name" value={nameDraft} onChange={e => setNameDraft(e.target.value)} maxLength={24}
-                className="flex-1 min-w-0 min-h-[48px] px-3 rounded-xl border border-line bg-bg text-[16px]" />
-              <Btn variant="soft" type="submit" disabled={!nameDraft.trim() || nameDraft.trim() === profile.name}>שינוי שם</Btn>
-            </form>
-            <Btn variant="danger" onClick={() => { if (!confirmProfileDel) { setConfirmProfileDel(true); return; } onDeleteProfile(); }}>
-              {confirmProfileDel ? `לחצו שוב: מחיקת "${profile.name}" וכל הספרים שלו` : 'מחיקת המשתמש מהמכשיר'}
-            </Btn>
+          <details className="bg-surface border border-line rounded-2xl p-3">
+            <summary className="font-bold text-[17px] cursor-pointer min-h-[36px] flex items-center">גיבוי ידני לקובץ (לא חובה)</summary>
+            <p className="text-[14px] text-muted mt-1 mb-3">הכול מסתנכרן ונשמר אוטומטית. כאן אפשר בנוסף לשמור עותק לקובץ או לייבא ממנו.</p>
+            <div className="grid gap-4">
+          <section className="bg-surface border border-line rounded-2xl p-3">
+            <h2 className="font-bold text-[17px] mb-1">מצב אחסון</h2>
+            <StatusRow ok={status.local} label="localStorage" />
+            <StatusRow ok={status.idb} label="IndexedDB (עותק שני)" />
+            <StatusRow ok={status.persisted} label="אחסון קבוע (מוגן מניקוי)" detail={status.persisted === true ? 'אושר' : status.persisted === false ? 'לא אושר' : 'לא ידוע'} />
+            <p className="text-[13px] text-muted mt-2 tabular">{db.books.length} ספרים · נשמר לאחרונה {status.savedAt ? fmtDateTime(status.savedAt) : '—'} · משתמש: {profile.name}</p>
           </section>
-
+          <section className="bg-surface border border-line rounded-2xl p-3 grid gap-2">
+            <h2 className="font-bold text-[17px]">ייצוא</h2>
+            <Btn onClick={() => { downloadFile(`reading-backup-${profile.name}-${stamp}.json`, json(), 'application/json'); markBackup(); notify('קובץ הגיבוי נוצר'); }} disabled={!db.books.length}>
+              <Icon name="Download" size={20} />הורדת גיבוי מלא (JSON)
+            </Btn>
+            <div className="grid grid-cols-2 gap-2">
+              <Btn variant="soft" disabled={!db.books.length} onClick={async () => { const ok = await copyText(json(), taRef.current); if (ok) { markBackup(); notify('הגיבוי הועתק. אפשר להדביק בהערות או במייל.'); } else notify('ההעתקה נחסמה. הטקסט מסומן בתיבה למטה, העתיקו ידנית.'); }}>
+                <Icon name="Copy" size={18} />העתקת JSON
+              </Btn>
+              <Btn variant="soft" disabled={!db.books.length} onClick={() => { downloadFile(`my-books-${profile.name}-${stamp}.txt`, toText(db), 'text/plain;charset=utf-8'); notify('רשימת הטקסט נוצרה'); }}>
+                <Icon name="FileText" size={18} />רשימה כטקסט
+              </Btn>
+            </div>
+          </section>
+          <section className="bg-surface border border-line rounded-2xl p-3 grid gap-2">
+            <h2 className="font-bold text-[17px]">ייבוא ושחזור</h2>
+            <input ref={fileRef} id="import-file" type="file" accept="application/json,.json,text/plain" className="hidden" onChange={onFile} />
+            <Btn variant="ghost" onClick={() => fileRef.current && fileRef.current.click()}><Icon name="Upload" size={20} />בחירת קובץ גיבוי</Btn>
+            <label htmlFor="import-paste" className="text-[14px] text-muted">או הדביקו כאן את תוכן הגיבוי:</label>
+            <textarea id="import-paste" ref={taRef} value={paste} onChange={e => setPaste(e.target.value)} rows={3} dir="ltr"
+              className="w-full rounded-xl border border-line bg-bg p-2 text-[13px] font-mono" placeholder='{"version":1,"books":[...]}' />
+            <Btn variant="soft" disabled={!paste.trim()} onClick={() => parse(paste)}>בדיקת הטקסט</Btn>
+            {err && <Notice tone="error">{err}</Notice>}
+            {preview && (
+              <div className="fade-in grid gap-2 border border-accent rounded-xl p-3">
+                <p className="text-[15px]">בגיבוי יש <b className="tabular">{preview.data.books.length}</b> ספרים, מתוכם <b className="tabular">{preview.fresh}</b> שלא קיימים כאן.</p>
+                <Btn onClick={merge} disabled={!preview.fresh}>מיזוג: הוספת {preview.fresh} ספרים חדשים</Btn>
+                <Btn variant="danger" onClick={doReplace}>{confirmReplace ? `לחצו שוב: להחליף את כל ${db.books.length} הספרים הנוכחיים` : 'החלפה מלאה של הספרייה'}</Btn>
+              </div>
+            )}
+          </section>
           <section className="border border-danger rounded-2xl p-3 grid gap-2">
             <h2 className="font-bold text-[17px] text-danger">מחיקת כל הנתונים</h2>
             <p className="text-[14px] text-muted">מוחק את כל הספרים, הדירוגים והתגיות מהמכשיר. אי אפשר לבטל, אלא אם שמרת גיבוי.</p>
@@ -2980,7 +2999,9 @@
               replace({ ...emptyDB(), settings: db.settings, tombstones: { books: tb, history: th } }); setConfirmWipe(false); notify('כל הספרים נמחקו');
             }}>{confirmWipe ? 'לחצו שוב למחיקה סופית' : 'מחיקת הכל'}</Btn>
           </section>
-          <p className="text-center text-[12px] text-muted pb-2">נתוני ספרים: Google Books API · Open Library. שום מידע לא נשלח לשרת של האפליקציה.</p>
+            </div>
+          </details>
+          <p className="text-center text-[12px] text-muted pb-2">נתוני ספרים: Google Books · Open Library · Wikidata.</p>
         </div>
       );
     }
@@ -3045,7 +3066,7 @@
       { id: 'library', label: 'ספרים שלי', icon: 'Library' },
       { id: 'add', label: 'הוספת ספר', icon: 'BookPlus' },
       { id: 'discover', label: 'גלה ספר חדש', icon: 'Sparkles' },
-      { id: 'backup', label: 'גיבוי נתונים', icon: 'DatabaseBackup' }
+      { id: 'backup', label: 'הגדרות', icon: 'Settings' }
     ];
 
     function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
@@ -3205,6 +3226,7 @@
 
     function Root() {
       const [state, setState] = useState(loadProfiles);
+      useSyncStatus();   // רינדור מחדש כשהשרת נמצא או כשמצב הסנכרון משתנה
       const change = (fn) => setState(prev => { const next = fn(prev); saveProfiles(next); scheduleSync(800); return next; });
       const active = state.profiles.find(p => p.id === state.active);
       useEffect(() => {
@@ -3214,7 +3236,7 @@
         window.addEventListener('storage', onStorage);
         window.addEventListener('vrt-profiles-changed', onProfiles);
         document.addEventListener('visibilitychange', onVisible);
-        ensureJoined().catch(() => {}).finally(() => syncNow());
+        discoverCloud().then(ok => ok && ensureJoined()).catch(() => {}).finally(() => syncNow());
         const iv = setInterval(() => { if (document.visibilityState === 'visible') syncNow(); }, 45000);
         return () => {
           window.removeEventListener('storage', onStorage); window.removeEventListener('vrt-profiles-changed', onProfiles);
