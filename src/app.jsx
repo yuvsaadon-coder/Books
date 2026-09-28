@@ -948,7 +948,10 @@ async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', 
     } catch (e) {
       if (e instanceof Anthropic.AuthenticationError) throw new Error('השרת לא הצליח להתחבר ל-Claude. בדקו את ANTHROPIC_API_KEY ב-Cloudflare.');
       if (e instanceof Anthropic.RateLimitError) throw new Error('הגעתם למגבלת השימוש היומית ב-AI, או שהשירות עמוס. נסו שוב מאוחר יותר.');
-      if (e instanceof Anthropic.APIError) throw new Error('שגיאה מהשרת (' + (e.status || '') + '): ' + (e.message || '').slice(0, 160));
+      if (e instanceof Anthropic.APIError) {
+        const detail = (e.error && e.error.error && e.error.error.message) || e.message || '';
+        throw new Error('השירות החזיר שגיאה (' + (e.status || '') + '). ' + detail.slice(0, 140));
+      }
       throw new Error('אין חיבור לשרת המשפחתי. בדקו אינטרנט ונסו שוב.');
     }
     cost += costOf(msg.usage);
@@ -2321,7 +2324,7 @@ function Bubble({ from, children }) {
   const bot = from === 'bot';
   return (
     <div className={`fade-in flex ${bot ? 'justify-start' : 'justify-end'}`}>
-      <div className={`max-w-[85%] px-3.5 py-2.5 text-[15px] leading-relaxed ${bot ? 'bg-surface border border-line rounded-2xl rounded-tr-md' : 'bg-accent text-accentInk rounded-2xl rounded-tl-md font-semibold'}`}>{children}</div>
+      <div className={`max-w-[85%] min-w-0 break-words [overflow-wrap:anywhere] px-3.5 py-2.5 text-[15px] leading-relaxed ${bot ? 'bg-surface border border-line rounded-2xl rounded-tr-md' : 'bg-accent text-accentInk rounded-2xl rounded-tl-md font-semibold'}`}>{children}</div>
     </div>
   );
 }

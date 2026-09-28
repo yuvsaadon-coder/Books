@@ -40,12 +40,12 @@ function corsHeaders(req) {
 }
 const json = (data, status, cors) => new Response(JSON.stringify(data), { status, headers: { ...cors, 'content-type': 'application/json; charset=utf-8' } });
 
-function sanitizeTools(tools) {
+export function sanitizeTools(tools) {
   const out = [];
   for (const t of Array.isArray(tools) ? tools : []) {
     if (t && t.name === 'web_search' && /^web_search_/.test(t.type || '')) {
-      out.push({ type: t.type, name: 'web_search', allowed_domains: TRUSTED_DOMAINS, max_uses: 12,
-        user_location: { type: 'approximate', country: 'IL', timezone: 'Asia/Jerusalem' } });
+      // בלי user_location: חיפוש הרשת של Anthropic לא תומך בקוד מדינה IL (מחזיר 400)
+      out.push({ type: t.type, name: 'web_search', allowed_domains: TRUSTED_DOMAINS, max_uses: 12 });
     } else if (t && t.name === 'web_fetch' && /^web_fetch_/.test(t.type || '')) {
       out.push({ type: t.type, name: 'web_fetch', allowed_domains: TRUSTED_DOMAINS, max_uses: 15, max_content_tokens: 20000 });
     } else if (t && !t.type && t.name && t.input_schema) {

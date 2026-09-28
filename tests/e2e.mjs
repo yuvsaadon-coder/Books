@@ -71,6 +71,7 @@ async function phone(browser, name) {
         aiCalls.push(JSON.parse(req.postData()));
         const step = aiScript.shift();
         assert.ok(step, 'unexpected AI call');
+        if (step.error) return route.fulfill({ status: step.error, headers: cors, json: { type: 'error', error: { type: 'invalid_request_error', message: 'tools.0.web_search_20260209: something_very_long_without_spaces_'.repeat(4) } } });
         return route.fulfill({ headers: { ...cors, 'content-type': 'text/event-stream' }, body: sse(step.blocks, step.stop) });
       }
       if (u.pathname.startsWith('/gbooks')) { viaProxy++; return googleMock(route, new URL(u.searchParams.get('u') || 'https://x/')); }
@@ -168,6 +169,13 @@ try {
     assert.deepEqual(aiCalls.at(-1).messages.map(m => m.role), ['user', 'assistant']);
     await A.click('nav >> text=ספרים שלי'); await A.click('nav >> text=גלה ספר חדש');
     assert.deepEqual(await texts(A.locator('section li .font-display.text-\\[18px\\]')), ['יש ואין']);
+  });
+  await step('service error is shown briefly and stays on screen', async () => {
+    aiScript.push({ error: 400 });
+    await A.click('button:has-text("שאלון חדש")'); await A.fill('#ai-request', 'בדיקה'); await A.click('button:has-text("המלצה חכמה")');
+    await A.waitForSelector('text=השירות החזיר שגיאה (400)');
+    const [sw, w] = await A.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
+    assert.ok(sw <= w, `error overflow ${sw} > ${w}`);
   });
   await step('no horizontal overflow on a 360px phone', async () => {
     for (const tab of ['ספרים שלי', 'הוספת ספר', 'גלה ספר חדש', 'הגדרות']) {
