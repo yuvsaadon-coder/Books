@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '12';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '13';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -965,9 +965,16 @@ function costOf(usage) {
     (st.web_search_requests || 0) * PRICE.search;
 }
 // הרצה עם כלי "הגשה" במבנה קבוע: המודל מסיים בקריאה לכלי, ואנחנו קוראים את הקלט שלו
+// web: false | true | { sites, searches, fetches } — תקציב חיפושים כולל לכל הריצה (לא לכל פנייה)
 async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', onProgress }) {
   const { client, Anthropic } = await aiClient();
-  const tools = [...(web ? WEB_TOOLS : []), { ...submitTool, strict: true }];
+  const cfg = web === true ? { searches: 6, fetches: 4 } : web || null;
+  let searchesLeft = cfg ? cfg.searches : 0, fetchesLeft = cfg ? cfg.fetches || 0 : 0;
+  const toolsNow = () => [
+    ...(cfg ? [{ ...WEB_TOOLS[0], max_uses: Math.max(1, searchesLeft), ...(cfg.sites ? { allowed_domains: cfg.sites } : {}) }] : []),
+    ...(cfg && cfg.fetches ? [{ ...WEB_TOOLS[1], max_uses: Math.max(1, fetchesLeft), ...(cfg.sites ? { allowed_domains: cfg.sites } : {}) }] : []),
+    { ...submitTool, strict: true }
+  ];
   let messages = [{ role: 'user', content: prompt }];
   let cost = 0;
   const hits = [];   // תוצאות חיפוש אמיתיות מהמנוע (כתובת + כותרת), לא טקסט שהמודל כתב
@@ -977,7 +984,7 @@ async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', 
       const stream = client.messages.stream({
         model: AI_MODEL, max_tokens: 32000,
         thinking: { type: 'adaptive', display: 'summarized' }, output_config: { effort },
-        system, tools, messages
+        system, tools: toolsNow(), messages
       });
       if (onProgress) stream.on('contentBlock', (b) => { const d = describeBlock(b); if (d) onProgress(d); });
       msg = await stream.finalMessage();
@@ -994,6 +1001,8 @@ async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', 
     }
     cost += costOf(msg.usage);
     msg.content.forEach(b => {
+      if (b.type === 'server_tool_use' && b.name === 'web_search') searchesLeft--;
+      if (b.type === 'server_tool_use' && b.name === 'web_fetch') fetchesLeft--;
       if (b.type === 'web_search_tool_result' && Array.isArray(b.content)) b.content.forEach(x => x && x.url && hits.push({ url: x.url, title: x.title || '' }));
     });
     if (msg.stop_reason === 'refusal') throw new Error('המודל סירב לבקשה הזו. נסו לנסח אחרת.');
@@ -1027,7 +1036,7 @@ async function aiExtractBooks(paragraph) {
 // 2. זיהוי חכם של ספר שהחיפוש הרגיל לא מצא
 async function aiResolveBook(text, author, onProgress) {
   const { input, cost, hits } = await aiRun({
-    effort: 'medium', onProgress,
+    effort: 'medium', web: { sites: BOOK_SITES, searches: 4, fetches: 2 }, onProgress,
     system: 'A reader typed a book name that a catalogue search could not match: it may be misspelled, abbreviated, a Hebrew translation title, or mixed with the author name. Identify the most likely real books. Use web search on the allowed sites to confirm the exact published titles (Hebrew edition title when relevant), author and ISBN. New Hebrew books often exist only on Israeli store and publisher sites (e-vrit, Steimatzky, Tzomet/booknet, the publisher): search there and return the book page URL in page_url. Only return books you confirmed exist. ' + HEBREW_OUT,
     prompt: `Typed: "${text}"${author ? `\nAuthor typed: "${author}"` : ''}`,
     submitTool: {
@@ -1055,7 +1064,9 @@ async function aiResolveBook(text, author, onProgress) {
 // בדיקה מול המאגרים: מחזיר רשומות אמיתיות שתואמות את השם/המחבר או את ה-ISBN
 // אתרי חנויות והוצאות בישראל: דף ספר שם הוא הוכחה שהספר קיים
 const BOOK_SITES = ['e-vrit.co.il', 'steimatzky.co.il', 'booknet.co.il', 'simania.co.il', 'mendele.co.il', 'indiebook.co.il', 'nli.org.il',
-  'am-oved.co.il', 'kibutz-poalim.co.il', 'ybook.co.il', 'kinbooks.co.il', 'keter-books.co.il', 'modan.co.il', 'abayit-books.com', '9livespress.com'];
+  'am-oved.co.il', 'kibutz-poalim.co.il', 'ybook.co.il', 'kinbooks.co.il', 'keter-books.co.il', 'modan.co.il', 'abayit-books.com', '9livespress.com', 'pardes.co.il', 'resling.co.il'];
+// להמלצות: חיפוש רק ברשתות הגדולות ובהוצאות קטנות מובילות, כדי לאשר מהדורה עברית בלי לסרוק את כל הרשת
+const REC_SITES = ['e-vrit.co.il', 'steimatzky.co.il', 'booknet.co.il', '9livespress.com', 'abayit-books.com', 'pardes.co.il', 'resling.co.il'];
 const siteOf = (url) => { try { const h = new URL(url).hostname.replace(/^www\./, ''); return BOOK_SITES.find(d => h === d || h.endsWith('.' + d)) || ''; } catch (e) { return ''; } };
 // כותרת תוצאת החיפוש מכילה את שם הספר כמילים שלמות
 function hitMatches(hit, title) {
@@ -1165,12 +1176,13 @@ async function aiRecommend({ books, request, answers, lang, exclude, dismissed, 
   const excludeTitles = uniq([...books.map(b => b.title), ...exclude, ...(history || []).flatMap(h => (h.recs || []).map(r => r.title))]).slice(0, 300);
   onProgress && onProgress(`שולח ל-Claude את הספרייה שלך (${books.length} ספרים) ואת הבקשה. זה לוקח בדרך כלל פחות מדקה.`);
   const { input, cost, hits } = await aiRun({
-    effort: 'medium', web: false, onProgress,
+    effort: 'medium', web: { sites: REC_SITES, searches: 4 }, onProgress,
     system: [
       'You are a literary advisor with deep knowledge of world and Israeli literature. Recommend books this specific reader will love.',
       'Think about the reader: what their highly rated books and notes have in common (themes, voice, structure, emotional register, pace, setting), and what they rated low.',
-      'Use your own knowledge of the books, their critical reception and literary analyses; you have no web access here, and every book you name is checked against Google Books and Open Library afterwards. Prefer well-regarded books over merely popular ones when the reader\'s taste is literary. Decide quickly.',
-      'Recommend only real, published books you know well. Give the exact Hebrew edition title when you know one exists (otherwise empty title_he), the ISBN only if you are sure, and leave page_url and sources empty. For formats use "unknown" unless you are sure. Never recommend a book the reader already has.',
+      'Choose candidates from your own knowledge of the books, their critical reception and literary analyses. Prefer well-regarded books over merely popular ones when the reader\'s taste is literary. Decide quickly.',
+      'Then confirm the Hebrew editions with web search. The search is limited to Israeli book stores and publishers (e-vrit, Steimatzky, Tzomet Sfarim, small publishers), so it also finds new Hebrew books missing from international catalogues. You have at most 4 searches in total: put several titles in one query (e.g. "title1" OR "title2"). Do not fetch pages; the search results are enough.',
+      'Recommend only real, published books. title_he must be the exact title of a Hebrew edition you saw in the search results or know for certain (otherwise empty; never translate a title yourself). In page_url put the book page URL from the search results when there is one. Give the ISBN only if you are sure. For formats use "unknown" unless a result says so. Never recommend a book the reader already has.',
       '`why` must connect the book to specific books and notes from the reader\'s library and to how critics describe it, in 2–4 sentences.',
       `Language: ${langText}. ` + HEBREW_OUT
     ].join('\n'),

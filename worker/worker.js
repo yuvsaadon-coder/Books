@@ -20,7 +20,7 @@ const TRUSTED_DOMAINS = [
   'e-vrit.co.il', 'steimatzky.co.il', 'booknet.co.il', 'simania.co.il', 'mendele.co.il', 'indiebook.co.il', 'nli.org.il',
   // הוצאות לאור
   'am-oved.co.il', 'kibutz-poalim.co.il', 'ybook.co.il', 'kinbooks.co.il', 'keter-books.co.il', 'modan.co.il',
-  'abayit-books.com', '9livespress.com',
+  'abayit-books.com', '9livespress.com', 'pardes.co.il', 'resling.co.il',
   // ביקורת וספרות
   // (newyorker.com, nytimes.com, theguardian.com נחסמים ע"י Anthropic ולכן לא ברשימה)
   'haaretz.co.il', 'ynet.co.il', 'wikipedia.org', 'goodreads.com', 'kirkusreviews.com', 'publishersweekly.com', 'lrb.co.uk', 'nybooks.com', 'bookbrowse.com',
@@ -41,14 +41,20 @@ function corsHeaders(req) {
 const json = (data, status, cors) => new Response(JSON.stringify(data), { status, headers: { ...cors, 'content-type': 'application/json; charset=utf-8' } });
 
 export function sanitizeTools(tools, blocked = []) {
-  const allowed = TRUSTED_DOMAINS.filter(d => !blocked.includes(d));
+  const base = TRUSTED_DOMAINS.filter(d => !blocked.includes(d));
+  // האפליקציה יכולה לצמצם (לא להרחיב) את רשימת האתרים ואת מספר השימושים
+  const narrow = (t) => {
+    const want = Array.isArray(t.allowed_domains) ? base.filter(d => t.allowed_domains.includes(d)) : [];
+    return want.length ? want : base;
+  };
+  const uses = (t, max) => Math.max(1, Math.min(max, Number(t.max_uses) || max));
   const out = [];
   for (const t of Array.isArray(tools) ? tools : []) {
     if (t && t.name === 'web_search' && /^web_search_/.test(t.type || '')) {
       // בלי user_location: חיפוש הרשת של Anthropic לא תומך בקוד מדינה IL (מחזיר 400)
-      out.push({ type: t.type, name: 'web_search', allowed_domains: allowed, max_uses: 5 });
+      out.push({ type: t.type, name: 'web_search', allowed_domains: narrow(t), max_uses: uses(t, 5) });
     } else if (t && t.name === 'web_fetch' && /^web_fetch_/.test(t.type || '')) {
-      out.push({ type: t.type, name: 'web_fetch', allowed_domains: allowed, max_uses: 4, max_content_tokens: 6000 });
+      out.push({ type: t.type, name: 'web_fetch', allowed_domains: narrow(t), max_uses: uses(t, 4), max_content_tokens: 6000 });
     } else if (t && !t.type && t.name && t.input_schema) {
       out.push(t);   // כלים של האפליקציה עצמה (למשל החזרת תוצאה במבנה קבוע)
     }

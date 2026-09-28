@@ -10,6 +10,12 @@ const ws = tools[0];
 assert.ok(Array.isArray(ws.allowed_domains) && ws.allowed_domains.includes('e-vrit.co.il'));
 assert.equal(ws.user_location, undefined, 'user_location must not be sent (IL is rejected by the API)');
 assert.ok(tools[1].allowed_domains.length > 0);
+// האפליקציה יכולה לצמצם את האתרים ואת מספר החיפושים, אבל לא להרחיב
+const narrow = sanitizeTools([{ type: 'web_search_20260209', name: 'web_search', allowed_domains: ['e-vrit.co.il', 'evil.example'], max_uses: 99 }])[0];
+assert.deepEqual(narrow.allowed_domains, ['e-vrit.co.il']);
+assert.equal(narrow.max_uses, 5);
+assert.equal(sanitizeTools([{ type: 'web_search_20260209', name: 'web_search', max_uses: 2 }])[0].max_uses, 2);
+assert.ok(sanitizeTools([{ type: 'web_search_20260209', name: 'web_search', allowed_domains: ['evil.example'] }])[0].allowed_domains.length > 5, 'unknown-only list falls back to the full trusted list');
 console.log('worker: ok');
 import { blockedDomainsFrom } from '../worker/worker.js';
 assert.deepEqual(blockedDomainsFrom(`{"type":"error","error":{"type":"invalid_request_error","message":"The following domains are not accessible to our user agent: ['newyorker.com', 'nytimes.com', 'theguardian.com']. Read more: https://support"}}`), ['newyorker.com', 'nytimes.com', 'theguardian.com']);
