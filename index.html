@@ -245,7 +245,9 @@
         categories: splitCats(v.categories), cover, pageCount: v.pageCount || 0, language: v.language || '',
         isbns: (v.industryIdentifiers || []).filter(x => /ISBN/.test(x.type)).map(x => x.identifier),
         link: v.canonicalVolumeLink || v.infoLink || ('https://books.google.com/books?id=' + item.id),
-        avgRating: v.averageRating || 0, ratingsCount: v.ratingsCount || 0, publisher: v.publisher || ''
+        avgRating: v.averageRating || 0, ratingsCount: v.ratingsCount || 0, publisher: v.publisher || '',
+        ebook: !!(item.saleInfo && item.saleInfo.isEbook),
+        ebookLink: (item.saleInfo && item.saleInfo.buyLink) || (item.accessInfo && item.accessInfo.webReaderLink) || ''
       };
     }
     async function googleSearch(q, { lang, max = 12 } = {}) {
@@ -265,10 +267,11 @@
         categories: (doc.subject || []).slice(0, 8), cover: doc.cover_i ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg` : '',
         pageCount: doc.number_of_pages_median || 0, language: (doc.language || [])[0] || '',
         isbns: (doc.isbn || []).slice(0, 8), link: OL_BASE + doc.key,
-        avgRating: doc.ratings_average ? Math.round(doc.ratings_average * 10) / 10 : 0, ratingsCount: doc.ratings_count || 0, publisher: ''
+        avgRating: doc.ratings_average ? Math.round(doc.ratings_average * 10) / 10 : 0, ratingsCount: doc.ratings_count || 0, publisher: '',
+        olEbook: doc.ebook_access === 'borrowable' || doc.ebook_access === 'public'
       };
     }
-    const OL_FIELDS = 'key,title,subtitle,author_name,first_publish_year,cover_i,isbn,subject,number_of_pages_median,language,ratings_average,ratings_count';
+    const OL_FIELDS = 'key,title,subtitle,author_name,first_publish_year,cover_i,isbn,subject,number_of_pages_median,language,ratings_average,ratings_count,ebook_access';
     async function olSearch({ q, title, author, subject, lang, limit = 12 }) {
       const u = new URL(OL_BASE + '/search.json');
       let query = q || '';
@@ -378,14 +381,84 @@
       }).sort((a, b) => (b.cover ? 1 : 0) - (a.cover ? 1 : 0) || (b.year || '').localeCompare(a.year || ''));
     }
 
+    /* ---------- התאמה גמישה ----------
+       משווים "שלד" של מילים: בלי ניקוד, אותיות סופיות מנורמלות, בלי ו/י באמצע מילה (כתיב מלא/חסר),
+       בלי אותיות כפולות. מילים נחשבות תואמות גם בהתחלה משותפת או בהבדל של אות-שתיים. */
+    const FINALS = { 'ך': 'כ', 'ם': 'מ', 'ן': 'נ', 'ף': 'פ', 'ץ': 'צ' };
+    const STOPWORDS = new Set(['של', 'את', 'על', 'the', 'a', 'an', 'of', 'and', 'by', 'מאת']);
+    function skel(str) {
+      return norm(str).normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[ךםןףץ]/g, c => FINALS[c])
+        .split(' ').filter(Boolean)
+        .map(w => (hasHebrew(w) && w.length > 2 ? w[0] + w.slice(1).replace(/[וי]/g, '') : w).replace(/(.)\1+/g, '$1'))
+        .filter(w => w && !STOPWORDS.has(w));
+    }
+    function lev(a, b) {
+      if (Math.abs(a.length - b.length) > 2) return 9;
+      let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+      for (let i = 1; i <= a.length; i++) {
+        const cur = [i];
+        for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+        prev = cur;
+      }
+      return prev[b.length];
+    }
+    function tokMatch(a, b) {
+      if (a === b) return 1;
+      if (a.length >= 3 && b.length >= 3 && (a.startsWith(b) || b.startsWith(a))) return 0.85;
+      // תחיליות עבריות: ה/ו/ב/ל/מ/ש/כ לפני מילה
+      if (hasHebrew(a) && a.length > 3 && 'הובלמשכ'.includes(a[0]) && a.slice(1) === b) return 0.9;
+      if (hasHebrew(b) && b.length > 3 && 'הובלמשכ'.includes(b[0]) && b.slice(1) === a) return 0.9;
+      const L = Math.max(a.length, b.length);
+      if (L >= 4 && lev(a, b) <= (L >= 7 ? 2 : 1)) return 0.75;
+      return 0;
+    }
+    function coverage(src, dst) {
+      if (!src.length) return 0;
+      return src.reduce((acc, t) => acc + Math.max(0, ...dst.map(d => tokMatch(t, d))), 0) / src.length;
+    }
+    // ציון 0–1: כמה משם הספר מופיע בחיפוש, וכמה מהחיפוש מוסבר ע"י שם הספר + המחבר
+    function matchScore(c, query) {
+      const q = skel(query);
+      if (!q.length) return 0;
+      const title = skel(c.title);
+      const full = title.concat(skel(c.subtitle || ''), skel((c.authors || []).join(' ')));
+      return 0.55 * coverage(title, q) + 0.45 * coverage(q, full);
+    }
+    // וריאציות חיפוש: פיצול שם+מחבר שנכתבו יחד, שם משפחה בלבד, וכתיב עברי חלופי
+    function queryVariants(text, author) {
+      const out = [];
+      const add = (q, label) => { q = q.replace(/\s+/g, ' ').trim(); if (q && q !== text && !out.some(o => o.q === q)) out.push({ q, label }); };
+      const clean = text.replace(/["'׳״`]/g, '').replace(/[-–—,]/g, ' ').replace(/\s+/g, ' ').trim();
+      const words = clean.split(' ').filter(Boolean);
+      const withAuthor = (t) => author ? `${t} inauthor:${author.split(/\s+/).pop()}` : t;
+      if (author) {
+        add(`${clean} inauthor:${author.split(/\s+/).pop()}`, `מחבר לפי שם משפחה: ${author.split(/\s+/).pop()}`);
+        add(clean, 'בלי שם המחבר');
+      } else if (words.length >= 2) {
+        for (const k of [1, 2]) {
+          if (words.length - k < 1) continue;
+          const tEnd = words.slice(0, -k).join(' '), aEnd = words.slice(-k).join(' ');
+          const tStart = words.slice(k).join(' '), aStart = words.slice(0, k).join(' ');
+          add(`${tEnd} inauthor:${aEnd}`, `"${tEnd}" מאת ${aEnd}`);
+          add(`${tStart} inauthor:${aStart}`, `"${tStart}" מאת ${aStart}`);
+        }
+      }
+      if (hasHebrew(clean)) {
+        const swaps = [
+          [/וו/g, 'ו'], [/(?<=[\u05D0-\u05EA])ו(?=[\u05D0-\u05EA])/g, 'וו'], [/יי/g, 'י'],
+          [/(?<=[\u05D0-\u05EA])וו(?=[\u05D0-\u05EA])/g, 'ב'], [/(?<=[\u05D0-\u05EA])ב(?=[\u05D0-\u05EA])/g, 'וו'],
+          [/(?<=[\u05D0-\u05EA])י(?=[\u05D0-\u05EA]{2})/g, '']
+        ];
+        swaps.forEach(([re, rep]) => { const v = clean.replace(re, rep); if (v !== clean) add(withAuthor(v), `כתיב: ${v}`); });
+      }
+      if (clean !== text) add(withAuthor(clean), 'בלי סימני פיסוק');
+      return out.slice(0, 8);
+    }
+
     function rankByTitle(list, text) {
-      const q = normTitle(text);
       const score = (b) => {
-        const t = normTitle(b.title);
-        let s = 0;
-        if (t === q) s += 3; else if (t.startsWith(q) || q.startsWith(t)) s += 2; else if (t.includes(q) || q.includes(t)) s += 1;
-        if (b.cover) s += 0.5; if (b.description) s += 0.5; if (b.authors.length) s += 0.3;
-        return s;
+        b.match = matchScore(b, text);
+        return b.match * 10 + (b.cover ? 0.3 : 0) + (b.description ? 0.3 : 0) + (b.authors.length ? 0.2 : 0);
       };
       return list.map((b, i) => ({ b, i, s: score(b) })).sort((x, y) => y.s - x.s || x.i - y.i).map(x => x.b);
     }
@@ -485,35 +558,60 @@
       if (url) return resolveLink(url);
       if (isPureISBN(text)) return lookupISBN(extractISBN(text));
 
+      const full = author ? `${text} ${author}` : text;
+      const best = (list) => list.reduce((m, c) => Math.max(m, matchScore(c, full)), 0);
+      const tried = [];
       let results = [];
       if (googleAvailable()) {
         try {
           const q = author ? `${text} inauthor:${author}` : text;
-          if (hasHebrew(text) || hasHebrew(author)) results = await googleSearch(q, { lang: 'iw', max: 30 });
+          const heb = hasHebrew(text) || hasHebrew(author);
+          if (heb) results = await googleSearch(q, { lang: 'iw', max: 30 });
           if (results.length < 8) results = mergeByKey(results, await googleSearch(q, { max: 30 }));
+          // לא נמצאה התאמה טובה? מנסים וריאציות: פיצול שם/מחבר, שם משפחה, כתיב חלופי
+          if (best(results) < 0.8) {
+            const vars = queryVariants(text, author);
+            const got = await Promise.all(vars.map(v => googleSearch(v.q, { lang: heb ? 'iw' : undefined, max: 20 }).catch(() => [])));
+            got.forEach((list, i) => {
+              if (list.length && best(list) > best(results) - 0.05) tried.push(vars[i].label);
+              results = mergeByKey(results, list);
+            });
+          }
           if (results.length) sources.add('Google Books');
         } catch (e) { notes.push((googleState.lastError || 'Google Books לא זמין') + ' — עוברים ל-Open Library.'); }
       } else {
         notes.push((googleState.lastError || 'Google Books לא זמין כרגע') + ' — משתמשים ב-Open Library.');
       }
-      if (results.length < 3) {
+      if (results.length < 3 || best(results) < 0.6) {
         try {
-          const ol = await olSearch({ q: text, author: author || undefined, limit: 10 });
+          const ol = await olSearch({ q: full, limit: 10 });
+          if (!ol.length && author) ol.push(...await olSearch({ q: text, limit: 10 }));
           await olEnrich(ol, 6);
           const before = results.length;
           results = mergeByKey(results, ol);
           if (results.length > before) sources.add('Open Library');
         } catch (e) { notes.push('Open Library לא הגיב.'); }
       }
-      if (results.length < 3 || (hasHebrew(text) && !sources.has('Google Books'))) {
+      if (best(results) < 0.6 || (hasHebrew(text) && !sources.has('Google Books'))) {
+        // Wikidata מחפש לפי תחילת השם, לכן מנסים גם בלי המילים האחרונות (שאולי הן שם המחבר)
+        const words = text.split(/\s+/).filter(Boolean);
+        const titles = [text, words.slice(0, -1).join(' '), words.slice(0, -2).join(' ')].filter((t, i, arr) => t && arr.indexOf(t) === i);
         try {
-          const wd = await bridgeFromWikidata(text, author);
-          const before = results.length;
-          results = mergeByKey(wd, results);
-          if (results.length > before) sources.add('Wikidata');
+          for (const t of titles) {
+            const wd = await bridgeFromWikidata(t, author || (t !== text ? text.slice(t.length).trim() : ''));
+            if (wd.length) {
+              const before = results.length;
+              results = mergeByKey(wd, results);
+              if (results.length > before) sources.add('Wikidata');
+              if (t !== text) tried.push(`"${t}" מאת ${text.slice(t.length).trim()} (Wikidata)`);
+              break;
+            }
+          }
         } catch (e) { notes.push('Wikidata לא הגיב.'); }
       }
-      return { candidates: rankByTitle(results, text).slice(0, 40), notes, sources: Array.from(sources) };
+      let ranked = rankByTitle(results, full);
+      if (ranked.length && ranked[0].match >= 0.6) ranked = ranked.filter(c => c.match >= 0.25);
+      return { candidates: ranked.slice(0, 40), notes, sources: Array.from(sources), tried };
     }
     async function lookupISBN(isbn) {
       const notes = [];
@@ -565,7 +663,7 @@
     /* ============================================================
        שכבת אחסון: localStorage + IndexedDB
        ============================================================ */
-    const emptyDB = () => ({ version: SCHEMA_VERSION, books: [], tagLibrary: DEFAULT_TAGS.slice(), dismissed: [], settings: { theme: 'system', apiKey: '', recLang: 'auto' }, updatedAt: 0, lastBackupAt: 0 });
+    const emptyDB = () => ({ version: SCHEMA_VERSION, books: [], tagLibrary: DEFAULT_TAGS.slice(), dismissed: [], settings: { theme: 'system', apiKey: '', recLang: 'auto' }, history: [], updatedAt: 0, lastBackupAt: 0 });
 
     function sanitizeBook(b) {
       if (!b || typeof b !== 'object' || !b.title || !b.key) return null;
@@ -578,7 +676,8 @@
         pageCount: Number(b.pageCount) || 0, language: str(b.language), isbns: arr(b.isbns), link: str(b.link),
         publisher: str(b.publisher), rating: Math.min(5, Math.max(1, Number(b.rating) || 1)), tags: arr(b.tags),
         addedAt: Number(b.addedAt) || Date.now(), verifiedAt: Number(b.verifiedAt) || 0,
-        verifiedVia: str(b.verifiedVia), descSource: str(b.descSource)
+        verifiedVia: str(b.verifiedVia), descSource: str(b.descSource),
+        ebook: !!b.ebook, ebookLink: str(b.ebookLink), olEbook: !!b.olEbook
       };
     }
     function sanitizeDB(raw) {
@@ -588,6 +687,7 @@
       return {
         ...base,
         books,
+        history: Array.isArray(raw.history) ? raw.history.filter(h => h && h.id && Array.isArray(h.recs)).slice(0, 40) : [],
         tagLibrary: Array.isArray(raw.tagLibrary) ? Array.from(new Set(raw.tagLibrary.filter(t => typeof t === 'string' && t.trim()))) : base.tagLibrary,
         dismissed: Array.isArray(raw.dismissed) ? raw.dismissed.filter(x => typeof x === 'string') : [],
         settings: { ...base.settings, ...(raw.settings && typeof raw.settings === 'object' ? raw.settings : {}) },
@@ -723,7 +823,7 @@
       const mood = MOODS[answers.mood];
       if (mood && mood.en) {
         push({ kind: 'mood', sig: mood, g: `subject:"${mood.en}"`, ol: { subject: mood.en } });
-        if (lang === 'he' && mood.he) push({ kind: 'mood', sig: mood, g: mood.he, ol: { q: mood.he } });
+        if ((lang === 'he' || lang === 'both') && mood.he) push({ kind: 'mood', sig: mood, g: mood.he, ol: { q: mood.he } });
       }
       if (answers.pacing === 'fast' && !(mood && mood.en === 'thriller')) push({ kind: 'pacing', sig: PACING.fast, g: 'subject:"adventure"', ol: { subject: 'adventure' } });
       if (plans.length < 3) {
@@ -734,6 +834,11 @@
     }
 
     async function runPlan(plan, lang) {
+      if (lang === 'both') {
+        // עברית ואנגלית: שתי שאילתות, אחת לכל שפה
+        const [a, b] = await Promise.all([runPlan(plan, 'he'), runPlan(plan, 'en')]);
+        return { list: mergeByKey(a.list, b.list), source: a.source || b.source };
+      }
       const glang = lang === 'he' ? 'iw' : lang === 'en' ? 'en' : undefined;
       if (googleAvailable()) {
         try {
@@ -753,8 +858,11 @@
       if (!c.language || lang === 'any') return true;
       if (lang === 'he') return ['iw', 'he', 'heb'].includes(c.language);
       if (lang === 'en') return ['en', 'eng'].includes(c.language);
+      if (lang === 'both') return ['iw', 'he', 'heb', 'en', 'eng'].includes(c.language);
       return true;
     };
+    const REC_LANGS = [['he', 'עברית'], ['both', 'עברית ואנגלית'], ['en', 'אנגלית'], ['any', 'כל שפה'], ['auto', 'אוטומטי']];
+    const recLangLabel = (k) => (REC_LANGS.find(x => x[0] === k) || ['', k])[1];
     function passesAvoid(c, answers) {
       const t = textOf(c);
       return !(answers.avoid || []).some(k => AVOID[k] && matchesAny(t, AVOID[k].kw));
@@ -1200,6 +1308,7 @@
               {current.descSource && current.description && <div className="text-[12px] font-bold text-muted mb-0.5">תקציר מ{current.descSource}</div>}
               {current.description ? <p className="text-[15px] leading-relaxed whitespace-pre-line mb-3">{current.description}</p> : <p className="text-muted text-[14px] mb-3">לא נמצא תקציר רשמי במקור.</p>}
               <p className="text-muted text-[13px] mb-3">נוסף ב-{fmtDate(current.addedAt)}{current.isbns[0] ? ` · ISBN ${current.isbns[0]}` : ''}</p>
+              <div className="mb-3"><FormatInfo book={current} /></div>
               {current.link && <a href={current.link} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent font-bold mb-4 min-h-[44px]"><Icon name="ExternalLink" size={16} />לרשומה במקור</a>}
               <div className="grid grid-cols-2 gap-2">
                 <Btn variant="soft" onClick={() => { onEdit(current); setOpen(null); }}><Icon name="Pencil" size={18} />עריכה</Btn>
@@ -1316,6 +1425,12 @@
               Google Books חוסם חיפושים בלי מפתח (המכסה המשותפת לכל המשתמשים נגמרת כל יום). מפתח אישי הוא בחינם ומחזיר את הכיסוי המלא לספרים בעברית.
               <button type="button" onClick={goSettings} className="block mt-1 text-accent font-bold min-h-[40px]">להוספת מפתח חינמי ←</button>
             </Notice>
+          )}
+          {res.tried && res.tried.length > 0 && groups.length > 0 && (
+            <p className="text-[13px] text-muted">חיפשנו גם בדרכים נוספות: {res.tried.slice(0, 3).join(' · ')}</p>
+          )}
+          {groups.length > 0 && groups[0].main.match !== undefined && groups[0].main.match < 0.5 && (
+            <Notice tone="warn">לא נמצאה התאמה מלאה. בדקו שהספר נכון, או דייקו את השם והמחבר.</Notice>
           )}
           {groups.length > 0 && (
             <p className="text-[14px] text-muted">{groups.length} ספרים{edCount > groups.length ? ` (${edCount} מהדורות)` : ''} מ-{res.sources.join(' + ')}. בחרו את הספר, או פתחו את רשימת המהדורות כדי לבחור את ההדפסה המדויקת:</p>
@@ -1668,7 +1783,46 @@
       );
     }
 
-    function RecCard({ r, onRead, onDismiss }) {
+    /* זמינות בפורמטים: מציגים כעובדה רק מה שה-API אישר; לחנויות הישראליות יש קישורי חיפוש (לא טענה) */
+    const STORES = [
+      { name: 'e-vrit', site: 'e-vrit.co.il', kind: 'דיגיטלי וקולי' },
+      { name: 'Storytel', site: 'storytel.com', kind: 'קולי' },
+      { name: 'עברית', site: 'ivrit.co.il', kind: 'דיגיטלי' },
+      { name: 'סטימצקי', site: 'steimatzky.co.il', kind: 'מודפס ודיגיטלי' },
+      { name: 'צומת ספרים', site: 'booknet.co.il', kind: 'מודפס' },
+      { name: 'Audible', site: 'audible.com', kind: 'קולי, אנגלית' }
+    ];
+    function FormatInfo({ book }) {
+      const q = `"${book.title}" ${(book.authors || [])[0] || ''}`.trim();
+      const facts = [];
+      if (book.ebook) facts.push({ text: 'ספר דיגיטלי זמין ב-Google Play Books', link: book.ebookLink });
+      if (book.olEbook) facts.push({ text: 'עותק דיגיטלי להשאלה ב-Open Library', link: book.link });
+      if (book.pageCount && book.isbns && book.isbns.length) facts.push({ text: `מהדורה מודפסת רשומה (ISBN ${book.isbns[0]}, ${book.pageCount} עמ')` });
+      return (
+        <div className="mt-2.5 border border-line rounded-xl p-2.5 grid gap-1.5">
+          <div className="text-[13px] font-bold text-muted flex items-center gap-1"><Icon name="BookCopy" size={14} />זמינות: מודפס, דיגיטלי, קולי</div>
+          {facts.length
+            ? <ul className="grid gap-0.5 text-[14px]">{facts.map((f, i) => (
+                <li key={i} className="flex items-start gap-1.5"><span className="text-ok mt-0.5"><Icon name="CircleCheck" size={15} /></span>
+                  {f.link ? <a href={f.link} target="_blank" rel="noopener noreferrer" className="underline">{f.text}</a> : <span>{f.text}</span>}</li>))}</ul>
+            : <p className="text-[13px] text-muted">המאגרים לא מציינים פורמטים לספר הזה.</p>}
+          <details>
+          <summary className="text-[13px] font-bold text-accent cursor-pointer min-h-[32px] flex items-center">בדיקה בחנויות: e-vrit, Storytel, סטימצקי ועוד</summary>
+          <div className="text-[12px] text-muted mb-1">כל קישור פותח חיפוש באתר עצמו. זו בדיקה ידנית, לא אימות.</div>
+          <div className="flex flex-wrap gap-1.5">
+            {STORES.map(st => (
+              <a key={st.site} href={`https://www.google.com/search?q=${encodeURIComponent(`site:${st.site} ${q}`)}`} target="_blank" rel="noopener noreferrer"
+                className="min-h-[36px] px-2.5 rounded-full border border-line text-[13px] font-semibold inline-flex items-center gap-1">
+                {st.name}<span className="text-muted font-normal">· {st.kind}</span>
+              </a>
+            ))}
+          </div>
+          </details>
+        </div>
+      );
+    }
+
+    function RecCard({ r, onRead, onDismiss, inLib }) {
       const [more, setMore] = useState(false);
       return (
         <li className="fade-in bg-surface border border-line rounded-2xl p-3">
@@ -1686,13 +1840,83 @@
             <ul className="text-[14px] grid gap-0.5 list-disc pr-5">{r.reasons.map((x, i) => <li key={i}>{x}</li>)}</ul>
           </div>
           <p className={`text-[15px] leading-relaxed whitespace-pre-line mt-2.5 ${more ? '' : 'clamp-3'}`}>{r.description}</p>
+          <FormatInfo book={r} />
           {r.description.length > 180 && <button type="button" className="text-accent font-bold text-[14px] min-h-[36px]" onClick={() => setMore(!more)}>{more ? 'פחות' : 'לתקציר המלא'}</button>}
           <div className="grid grid-cols-[1fr_auto_auto] gap-2 mt-2">
-            <Btn variant="soft" onClick={() => onRead(r)}><Icon name="BookPlus" size={18} />קראתי, להוספה</Btn>
+            {inLib
+              ? <div className="min-h-[48px] rounded-xl bg-surface2 text-ok font-bold grid place-items-center text-[14px]">בספרייה ({inLib.rating}★)</div>
+              : <Btn variant="soft" onClick={() => onRead(r)}><Icon name="BookPlus" size={18} />קראתי, להוספה</Btn>}
             <button type="button" onClick={() => onDismiss(r)} aria-label="לא מעניין אותי" className="min-h-[48px] w-12 grid place-items-center rounded-xl border border-line text-muted"><Icon name="ThumbsDown" size={18} /></button>
             <a href={r.link} target="_blank" rel="noopener noreferrer" aria-label="לרשומה במקור" className="min-h-[48px] w-12 grid place-items-center rounded-xl border border-line text-muted"><Icon name="ExternalLink" size={18} /></a>
           </div>
         </li>
+      );
+    }
+
+    const answersSummary = (a) => [
+      MOODS[a.mood] && MOODS[a.mood].label, PACING[a.pacing] && a.pacing !== 'any' && 'קצב ' + PACING[a.pacing].label.split(',')[0],
+      LENGTHS[a.length] && a.length !== 'any' && LENGTHS[a.length].label.split(' (')[0],
+      (a.avoid || []).length ? 'בלי ' + a.avoid.map(k => AVOID[k] && AVOID[k].label).filter(Boolean).join(', ') : ''
+    ].filter(Boolean);
+
+    function HistoryView({ db, update, onPick, notify, openId, setOpenId }) {
+      const [confirmClear, setConfirmClear] = useState(false);
+      const hist = db.history || [];
+      const open = openId && hist.find(h => h.id === openId);
+      if (open) {
+        return (
+          <div className="fade-in grid gap-3">
+            <button type="button" onClick={() => setOpenId(null)} className="justify-self-start min-h-[40px] text-accent font-bold inline-flex items-center gap-1"><Icon name="ChevronRight" size={18} />לכל ההיסטוריה</button>
+            <div className="bg-surface border border-line rounded-2xl p-3">
+              <div className="font-bold text-[16px]">{fmtDateTime(open.at)}</div>
+              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                {answersSummary(open.answers).map((t, i) => <span key={i} className="text-[12px] font-semibold px-2 py-0.5 rounded-full bg-surface2">{t}</span>)}
+                <span className="text-[12px] font-semibold px-2 py-0.5 rounded-full bg-surface2">שפה: {recLangLabel(open.lang)}</span>
+              </div>
+            </div>
+            <details className="bg-surface border border-line rounded-2xl p-3">
+              <summary className="font-bold text-[15px] cursor-pointer min-h-[32px]">השיחה המלאה ({open.log.length} הודעות)</summary>
+              <div className="grid gap-2 mt-2">
+                {open.log.map((m, i) => <Bubble key={i} from={m.from}>{m.progress ? <span className="text-muted text-[14px]">{m.text}</span> : m.text}</Bubble>)}
+              </div>
+            </details>
+            <h2 className="font-display font-bold text-[20px]">{open.recs.length} המלצות</h2>
+            <ul className="grid gap-3">
+              {open.recs.map(r => (
+                <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)} onRead={(b) => onPick(b)}
+                  onDismiss={(b) => { update(d => ({ ...d, dismissed: Array.from(new Set([...d.dismissed, b.key, dedupeKey(b)])) })); notify('סומן "לא מעניין". לא נמליץ עליו שוב.'); }} />
+              ))}
+            </ul>
+            <Btn variant="danger" onClick={() => { update(d => ({ ...d, history: d.history.filter(h => h.id !== open.id) })); setOpenId(null); notify('השיחה נמחקה'); }}>
+              <Icon name="Trash2" size={18} />מחיקת השיחה מההיסטוריה
+            </Btn>
+          </div>
+        );
+      }
+      if (!hist.length) return <p className="text-muted text-center py-8">עוד אין היסטוריה. כל שיחת המלצות נשמרת כאן אוטומטית.</p>;
+      return (
+        <div className="fade-in grid gap-2">
+          <ul className="grid gap-2">
+            {hist.map(h => {
+              const added = h.recs.filter(r => findInLibrary(r, db.books)).length;
+              return (
+                <li key={h.id}>
+                  <button type="button" onClick={() => setOpenId(h.id)} className="w-full text-right bg-surface border border-line rounded-2xl p-3 active:bg-surface2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-[15px] tabular">{fmtDateTime(h.at)}</span>
+                      <span className="text-[13px] text-muted tabular">{h.recs.length} המלצות{added ? ` · ${added} בספרייה` : ''}</span>
+                    </div>
+                    <div className="text-[13px] text-muted mt-0.5 truncate">{answersSummary(h.answers).join(' · ')}</div>
+                    {h.recs.length > 0 && <div className="text-[14px] mt-1 clamp-2">{h.recs.slice(0, 4).map(r => r.title).join(' · ')}</div>}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          <Btn variant="ghost" onClick={() => { if (!confirmClear) { setConfirmClear(true); return; } update(d => ({ ...d, history: [] })); setConfirmClear(false); notify('ההיסטוריה נוקתה'); }}>
+            {confirmClear ? 'לחצו שוב לניקוי כל ההיסטוריה' : 'ניקוי ההיסטוריה'}
+          </Btn>
+        </div>
       );
     }
 
@@ -1704,18 +1928,33 @@
       const [recs, setRecs] = useState([]);
       const [shown, setShown] = useState(() => new Set());
       const [multi, setMulti] = useState([]);
+      const [view, setView] = useState('chat');   // 'chat' | 'history' | מזהה שיחה
+      const session = useRef({ id: null, at: 0 });
+      const logRef = useRef([]);
       const endRef = useRef(null);
       const prof = useMemo(() => buildProfile(db.books), [db.books]);
-      const autoLang = prof.heShare >= 0.5 ? 'he' : 'any';
+      const autoLang = prof.heShare >= 0.5 ? 'he' : 'both';
       const lang = db.settings.recLang === 'auto' ? autoLang : db.settings.recLang;
 
       useEffect(() => { if (log.length || recs.length) endRef.current && endRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [log.length, step, recs.length]);
 
-      const reset = () => { setStep(0); setAnswers({ avoid: [] }); setLog([]); setRecs([]); setMulti([]); };
+      const pushLog = (...entries) => { logRef.current = [...logRef.current, ...entries]; setLog(logRef.current); };
+      const reset = () => { setStep(0); setAnswers({ avoid: [] }); logRef.current = []; setLog([]); setRecs([]); setMulti([]); session.current = { id: null, at: 0 }; setShown(new Set()); };
+      const slim = (r) => ({
+        key: r.key, source: r.source, sourceId: r.sourceId, title: r.title, subtitle: r.subtitle || '', authors: r.authors, year: r.year,
+        description: (r.description || '').slice(0, 1200), categories: (r.categories || []).slice(0, 6), cover: r.cover, pageCount: r.pageCount,
+        language: r.language, isbns: (r.isbns || []).slice(0, 3), link: r.link, publisher: r.publisher || '', reasons: r.reasons || [],
+        verifiedAt: r.verifiedAt, verifiedVia: r.verifiedVia || '', ebook: !!r.ebook, ebookLink: r.ebookLink || '', olEbook: !!r.olEbook
+      });
+      const saveSession = (ans, usedLang, allRecs) => {
+        if (!session.current.id) session.current = { id: uid(), at: Date.now() };
+        const entry = { id: session.current.id, at: session.current.at, answers: ans, lang: usedLang, log: logRef.current.slice(-60), recs: allRecs.map(slim) };
+        update(d => ({ ...d, history: [entry, ...(d.history || []).filter(h => h.id !== entry.id)].slice(0, 40) }));
+      };
       const answer = (q, value, label) => {
         const next = { ...answers, [q.id]: value };
         setAnswers(next);
-        setLog(l => [...l, { from: 'bot', text: q.text }, { from: 'me', text: label }]);
+        pushLog({ from: 'bot', text: q.text }, { from: 'me', text: label });
         setMulti([]);
         const ns = step + 1;
         setStep(ns);
@@ -1723,13 +1962,15 @@
       };
       const go = async (ans, exclude) => {
         setRunning(true);
-        const progress = (t) => setLog(l => [...l, { from: 'bot', text: t, progress: true }]);
+        const progress = (t) => pushLog({ from: 'bot', text: t, progress: true });
         try {
           if (!db.books.length) progress('הספרייה ריקה, אז ההמלצות יתבססו רק על התשובות שלך. דירוג ספרים שקראת ישפר מאוד את הדיוק.');
           const { recs: r } = await recommend({ books: db.books, answers: ans, lang, exclude, dismissed: db.dismissed, want: 5, onProgress: progress });
-          setRecs(prev => [...prev, ...r]);
-          setShown(s => { const n = new Set(s); r.forEach(x => { n.add(x.key); n.add(dedupeKey(x)); }); return n; });
           if (!r.length) progress('לא נמצאו ספרים שעברו את כל שלבי האימות. נסו לשנות תשובה (למשל אורך או שפה), או להוסיף עוד ספרים מדורגים.');
+          const all = [...recs, ...r];
+          setRecs(all);
+          setShown(s => { const n = new Set(s); r.forEach(x => { n.add(x.key); n.add(dedupeKey(x)); }); return n; });
+          saveSession(ans, lang, all);
         } catch (e) {
           progress('אירעה שגיאת רשת בזמן החיפוש. בדקו חיבור לאינטרנט ונסו שוב.');
         }
@@ -1744,6 +1985,19 @@
             <h1 className="font-display font-black text-[30px] leading-tight">גלה ספר חדש</h1>
             <p className="text-muted text-[15px]">4 שאלות קצרות. כל המלצה נבדקת מחדש מול המאגר לפני שהיא מוצגת.</p>
           </header>
+          <div className="grid grid-cols-2 gap-1 p-1 rounded-2xl bg-surface2 mb-4" role="tablist" aria-label="תצוגה">
+            {[['chat', 'שיחה', 'MessageCircle'], ['history', `היסטוריה (${(db.history || []).length})`, 'History']].map(([k, l, ic]) => {
+              const on = k === 'chat' ? view === 'chat' : view !== 'chat';
+              return (
+                <button key={k} type="button" role="tab" aria-selected={on} onClick={() => setView(k)}
+                  className={`min-h-[44px] rounded-xl font-bold text-[15px] inline-flex items-center justify-center gap-1.5 ${on ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}>
+                  <Icon name={ic} size={17} />{l}
+                </button>
+              );
+            })}
+          </div>
+          {view !== 'chat' && <HistoryView db={db} update={update} onPick={onPick} notify={notify} openId={view === 'history' ? null : view} setOpenId={(id) => setView(id || 'history')} />}
+          {view === 'chat' && <>
           {!db.settings.apiKey && (
             <div className="mb-3"><Notice tone="info">בלי מפתח Google Books ההמלצות מגיעות בעיקר מ-Open Library, ויש שם מעט ספרים בעברית. אפשר להוסיף מפתח חינמי בלשונית "גיבוי נתונים".</Notice></div>
           )}
@@ -1759,9 +2013,9 @@
                 </div>
               : <div className="text-[14px] text-muted">עדיין אין ספרים בספרייה. ההמלצות יתבססו על השאלון בלבד.</div>}
             <div className="flex items-center gap-2 flex-wrap pt-1">
-              <span className="text-[14px] text-muted">שפת ההמלצות:</span>
-              {[['auto', `אוטומטי (${autoLang === 'he' ? 'עברית' : 'כל שפה'})`], ['he', 'עברית'], ['en', 'אנגלית'], ['any', 'כל שפה']].map(([k, l]) => (
-                <Chip key={k} active={db.settings.recLang === k} onClick={() => update(d => ({ ...d, settings: { ...d.settings, recLang: k } }))}>{l}</Chip>
+              <span className="text-[14px] text-muted">שפת ההמלצות (נשמרת כברירת מחדל שלך):</span>
+              {REC_LANGS.map(([k, l]) => (
+                <Chip key={k} active={db.settings.recLang === k} onClick={() => update(d => ({ ...d, settings: { ...d.settings, recLang: k } }))}>{k === 'auto' ? `${l} (${recLangLabel(autoLang)})` : l}</Chip>
               ))}
             </div>
           </div>
@@ -1792,7 +2046,7 @@
               <h2 className="font-display font-bold text-[22px] mb-2">ההמלצות שלך</h2>
               <ul className="grid gap-3">
                 {recs.map(r => (
-                  <RecCard key={r.key} r={r}
+                  <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)}
                     onRead={(b) => onPick(b)}
                     onDismiss={(b) => {
                       update(d => ({ ...d, dismissed: Array.from(new Set([...d.dismissed, b.key, dedupeKey(b)])) }));
@@ -1810,6 +2064,7 @@
               <Btn variant="ghost" onClick={reset}><Icon name="MessageCircle" size={18} />שאלון חדש</Btn>
             </div>
           )}
+          </>}
           <div ref={endRef} />
         </div>
       );
@@ -1971,6 +2226,14 @@
 
           <section className="bg-surface border border-line rounded-2xl p-3 grid gap-3">
             <h2 className="font-bold text-[17px]">הגדרות</h2>
+            <div>
+              <div className="text-[14px] text-muted mb-1.5">שפת ברירת מחדל להמלצות ({profile.name})</div>
+              <div className="flex gap-2 flex-wrap">
+                {REC_LANGS.map(([k, l]) => (
+                  <Chip key={k} active={db.settings.recLang === k} onClick={() => update(d => ({ ...d, settings: { ...d.settings, recLang: k } }))}>{l}</Chip>
+                ))}
+              </div>
+            </div>
             <div>
               <div className="text-[14px] text-muted mb-1.5">ערכת צבעים</div>
               <div className="flex gap-2 flex-wrap">
