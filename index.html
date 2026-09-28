@@ -912,6 +912,17 @@
     let syncTimer = null;
     function scheduleSync(ms = 2500) { if (!loadCloud()) return; clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, ms); }
     // חיבור ראשון: אם גם במכשיר וגם בשרת יש משתמש 'default' שונה, מעבירים את המקומי למזהה חדש כדי שלא יתמזגו
+    // כתובת השרת המשפחתי (לא סוד). הקוד המשפחתי לא נשמר בקוד, כי המאגר ציבורי: הוא מגיע בקישור הצטרפות או מוקלד פעם אחת.
+    const DEFAULT_CLOUD_URL = '';
+    // קישור הצטרפות: הכתובת והקוד נמצאים אחרי ה-#, ולכן לא נשלחים לשום שרת (גם לא ל-GitHub)
+    function joinLink(c) {
+      return location.origin + location.pathname + '#join=' + encodeURIComponent(c.url) + '~' + encodeURIComponent(c.code);
+    }
+    function readJoinHash() {
+      const m = (location.hash || '').match(/^#join=([^~]+)~(.+)$/);
+      if (!m) return null;
+      try { return { url: decodeURIComponent(m[1]), code: decodeURIComponent(m[2]) }; } catch (e) { return null; }
+    }
     async function connectCloud(url, code) {
       const ping = await cloudPing(url, code);
       saveCloud({ url: cloudBase(url), code: code.trim(), ai: !!ping.ai, sync: !!ping.sync });
@@ -2685,7 +2696,8 @@
 
     function CloudPanel({ compact }) {
       const sync = useSyncStatus();
-      const [url, setUrl] = useState('');
+      const [url, setUrl] = useState(DEFAULT_CLOUD_URL);
+      const [shareMsg, setShareMsg] = useState('');
       const [code, setCode] = useState('');
       const [st, setSt] = useState({ busy: false, err: '' });
       const [confirmOff, setConfirmOff] = useState(false);
@@ -2708,6 +2720,18 @@
             {sync.error && <Notice tone="error">{sync.error}</Notice>}
             <p className="text-[13px] text-muted">המלצות וזיהוי חכם (Claude): {c.ai ? 'פעילים' : 'לא הוגדר מפתח בשרת'}</p>
             {!compact && (
+              <div className="grid gap-1.5">
+                <Btn onClick={async () => {
+                  const link = joinLink(c);
+                  try { if (navigator.share) { await navigator.share({ title: 'הצטרפות לספרייה המשפחתית', text: 'לחצו כדי לחבר את הטלפון לספרייה המשפחתית:', url: link }); setShareMsg('נשלח.'); return; } } catch (e) { if (e && e.name === 'AbortError') return; }
+                  try { await navigator.clipboard.writeText(link); setShareMsg('הקישור הועתק. שלחו אותו (למשל בוואטסאפ) ופתחו אותו בטלפון השני.'); }
+                  catch (e) { setShareMsg(link); }
+                }}><Icon name="Share2" size={18} />קישור הצטרפות לטלפון נוסף</Btn>
+                {shareMsg && <p className="text-[13px] text-muted break-all select-all">{shareMsg}</p>}
+                <p className="text-[12px] text-muted">מי שפותח את הקישור מתחבר לספרייה בלי להקליד כלום. הקישור מכיל את הקוד המשפחתי, אז שלחו אותו רק לבני המשפחה.</p>
+              </div>
+            )}
+            {!compact && (
               <div className="grid grid-cols-2 gap-2">
                 <Btn variant="soft" onClick={() => syncNow()} disabled={sync.status === 'syncing'}><Icon name="RefreshCw" size={18} />סנכרון עכשיו</Btn>
                 <Btn variant="ghost" onClick={() => { if (!confirmOff) { setConfirmOff(true); return; } saveCloud(null); setConfirmOff(false); }}>{confirmOff ? 'לחצו שוב לניתוק' : 'ניתוק המכשיר'}</Btn>
@@ -2718,10 +2742,10 @@
       }
       return (
         <form onSubmit={connect} className="grid gap-2">
-          <p className="text-[14px] text-muted">מחברים כל טלפון עם אותה כתובת ואותו קוד, והספרייה (כל המשתמשים) מסתנכרנת. החיבור מפעיל גם המלצות חכמות עם Claude. ההקמה מתוארת בקובץ worker/README.md במאגר.</p>
-          <label htmlFor="cloud-url" className="text-[13px] font-bold text-muted">כתובת השרת המשפחתי</label>
-          <input id="cloud-url" value={url} onChange={e => setUrl(e.target.value)} dir="ltr" autoComplete="off" placeholder="https://books-family.NAME.workers.dev"
-            className="w-full min-h-[48px] px-3 rounded-xl border border-line bg-bg text-[15px]" />
+          <p className="text-[14px] text-muted">{DEFAULT_CLOUD_URL ? 'מקלידים פעם אחת את הקוד המשפחתי, או פותחים קישור הצטרפות שנשלח מטלפון שכבר מחובר.' : 'מחברים כל טלפון עם אותה כתובת ואותו קוד, או פותחים קישור הצטרפות מטלפון מחובר. החיבור מפעיל גם המלצות חכמות עם Claude.'}</p>
+          {!DEFAULT_CLOUD_URL && <label htmlFor="cloud-url" className="text-[13px] font-bold text-muted">כתובת השרת המשפחתי</label>}
+          {!DEFAULT_CLOUD_URL && <input id="cloud-url" value={url} onChange={e => setUrl(e.target.value)} dir="ltr" autoComplete="off" placeholder="https://books-family.NAME.workers.dev"
+            className="w-full min-h-[48px] px-3 rounded-xl border border-line bg-bg text-[15px]" />}
           <label htmlFor="cloud-code" className="text-[13px] font-bold text-muted">קוד הספרייה המשפחתית</label>
           <input id="cloud-code" value={code} onChange={e => setCode(e.target.value)} autoComplete="off" placeholder="הקוד שהגדרתם בשרת"
             className="w-full min-h-[48px] px-3 rounded-xl border border-line bg-bg text-[15px]" />
@@ -3107,6 +3131,7 @@
 
     function Root() {
       const [state, setState] = useState(loadProfiles);
+      const [joinMsg, setJoinMsg] = useState(null);
       const change = (fn) => setState(prev => { const next = fn(prev); saveProfiles(next); scheduleSync(800); return next; });
       const active = state.profiles.find(p => p.id === state.active);
       useEffect(() => {
@@ -3116,7 +3141,15 @@
         window.addEventListener('storage', onStorage);
         window.addEventListener('vrt-profiles-changed', onProfiles);
         document.addEventListener('visibilitychange', onVisible);
-        syncNow();
+        const join = readJoinHash();
+        if (join) {
+          try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* */ }
+          setJoinMsg({ tone: 'info', text: 'מחבר את הטלפון לספרייה המשפחתית…' });
+          connectCloud(join.url, join.code)
+            .then(() => setJoinMsg({ tone: 'ok', text: 'הטלפון חובר לספרייה המשפחתית. הכול מסתנכרן אוטומטית.' }))
+            .catch((e) => setJoinMsg({ tone: 'error', text: e.message === 'bad_code' ? 'קישור ההצטרפות לא תקין (הקוד השתנה?). בקשו קישור חדש.' : 'לא הצלחנו להתחבר לשרת המשפחתי. נסו לפתוח את הקישור שוב.' }))
+            .finally(() => setTimeout(() => setJoinMsg(null), 6000));
+        } else syncNow();
         const iv = setInterval(() => { if (document.visibilityState === 'visible') syncNow(); }, 45000);
         return () => {
           window.removeEventListener('storage', onStorage); window.removeEventListener('vrt-profiles-changed', onProfiles);
@@ -3124,29 +3157,34 @@
         };
       }, []);
 
+      const banner = joinMsg && (
+        <div className="fixed top-0 inset-x-0 z-50 px-4 flex justify-center" style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 8px)' }}>
+          <div className="max-w-md w-full shadow-lg rounded-xl"><Notice tone={joinMsg.tone}>{joinMsg.text}</Notice></div>
+        </div>
+      );
       if (!active) {
-        return <WhoAreYou profiles={state.profiles}
+        return <>{banner}<WhoAreYou profiles={state.profiles}
           onPick={(id) => change(s => ({ ...s, active: id }))}
           onCreate={(name) => change(s => {
             const id = s.profiles.some(p => p.id === 'default') || loadCloud() ? uid() : 'default';
             const used = new Set(s.profiles.map(p => p.color));
             const color = [...AVATAR_COLORS.keys()].find(i => !used.has(i)) ?? s.profiles.length;
             return { ...s, profiles: [...s.profiles, { id, name, color, createdAt: Date.now(), updatedAt: Date.now() }], active: id };
-          })} />;
+          })} /></>;
       }
 
       ACTIVE.id = active.id;
       ACTIVE.name = active.name;
       ACTIVE.dbKey = dbKeyFor(active.id);
       ACTIVE.queueKey = queueKeyFor(active.id);
-      return <App key={active.id} profile={active}
+      return <>{banner}<App key={active.id} profile={active}
         onSwitch={() => { try { sessionStorage.removeItem('vrt_tab'); } catch (e) { /* */ } change(s => ({ ...s, active: null })); }}
         onRenameProfile={(name) => change(s => ({ ...s, profiles: s.profiles.map(p => p.id === active.id ? { ...p, name, updatedAt: Date.now() } : p) }))}
         onDeleteProfile={() => {
           try { localStorage.removeItem(dbKeyFor(active.id)); localStorage.removeItem(queueKeyFor(active.id)); } catch (e) { /* */ }
           idbDelete(dbKeyFor(active.id)).catch(() => {});
           change(s => ({ ...s, profiles: s.profiles.filter(p => p.id !== active.id), deleted: { ...(s.deleted || {}), [active.id]: Date.now() }, active: null }));
-        }} />;
+        }} /></>;
     }
 
     ReactDOM.createRoot(document.getElementById('root')).render(<Root />);
