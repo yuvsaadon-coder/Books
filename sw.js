@@ -2,7 +2,7 @@
 // דף האפליקציה: קודם מהרשת (כדי לקבל עדכונים), ואם אין רשת – מהמטמון.
 // ספריות מ-CDN, אייקונים ו-manifest: מהמטמון, עם רענון ברקע.
 // קריאות ל-API (Google Books, Open Library, Wikidata, השרת המשפחתי) לא נשמרות במטמון.
-const CACHE = 'books-app-v25';
+const CACHE = 'books-app-v26';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/favicon.svg', './icons/icon-192.png', './icons/icon-512.png',
   './fonts/frank-ruhl-libre-hebrew-400-normal.woff2', './fonts/assistant-hebrew-400-normal.woff2', './fonts/assistant-hebrew-600-normal.woff2'];
 const STATIC_HOSTS = ['cdn.jsdelivr.net'];
@@ -37,4 +37,21 @@ self.addEventListener('fetch', (e) => {
       return cached || net;
     }));
   }
+});
+
+// ההצעות הדו-שבועיות: השרת שולח התראה בלי תוכן, וכאן מציגים אותה
+self.addEventListener('push', (e) => {
+  e.waitUntil(self.registration.showNotification('מה שנקרא', {
+    body: '10 ספרים חדשים שאולי יעניינו אותך', icon: 'icons/icon-192.png', badge: 'icons/favicon-32.png',
+    tag: 'digest', lang: 'he', dir: 'rtl', data: { url: './?view=digest' }
+  }));
+});
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const url = new URL((e.notification.data && e.notification.data.url) || './', self.registration.scope).href;
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    const w = list.find(c => c.url.startsWith(self.registration.scope));
+    if (w) { w.navigate(url); return w.focus(); }
+    return self.clients.openWindow(url);
+  }));
 });

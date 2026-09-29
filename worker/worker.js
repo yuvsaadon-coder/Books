@@ -600,6 +600,145 @@ async function handleBookInfo(req, env, cors, ctx) {
   return json(info, 200, cors);
 }
 
+// ---------- ההצעות הדו-שבועיות: 10 ספרים חדשים לכל משתמש, עם התראה לטלפון ----------
+// Cron כל שעה בודק למי הגיע הזמן: משתמשים שהיו כבר כשהתכונה עלתה – מיד; משתמש חדש – יום אחרי הכניסה הראשונה; ואז כל 14 יום.
+// Claude מציע 14 ספרים (בלי מה שהמשתמש קרא, רוצה לקרוא, שלל, או שכבר הוצע לו), כל אחד נבדק במאגרים ובחנויות, ונשמרים 10.
+const DIGEST_EVERY = 14 * 86400000, DIGEST_FIRST_DELAY = 86400000, DIGEST_PER_RUN = 3, DIGEST_SIZE = 10;
+const b64u = (buf) => { const bytes = typeof buf === 'string' ? new TextEncoder().encode(buf) : new Uint8Array(buf); let s = ''; bytes.forEach(b => { s += String.fromCharCode(b); }); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
+async function vapidKeys(env) {
+  let v = await env.LIBRARY.get('vapid', 'json');
+  if (!v) {
+    const kp = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    v = { pub: b64u(await crypto.subtle.exportKey('raw', kp.publicKey)), jwk: await crypto.subtle.exportKey('jwk', kp.privateKey) };
+    await env.LIBRARY.put('vapid', JSON.stringify(v));
+  }
+  return v;
+}
+// Web Push בלי תוכן (לא צריך הצפנת תוכן): רק כותרת VAPID חתומה. ה-Service Worker מציג את ההודעה
+export async function vapidAuth(env, endpoint) {
+  const v = await vapidKeys(env);
+  const head = b64u(JSON.stringify({ typ: 'JWT', alg: 'ES256' }));
+  const body = b64u(JSON.stringify({ aud: new URL(endpoint).origin, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: 'https://yuvsaadon-coder.github.io/Books/' }));
+  const key = await crypto.subtle.importKey('jwk', v.jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, new TextEncoder().encode(`${head}.${body}`));
+  return `vapid t=${head}.${body}.${b64u(sig)}, k=${v.pub}`;
+}
+async function pushTo(env, pid) {
+  const subs = (await env.LIBRARY.get('push:' + pid, 'json')) || [];
+  const keep = [];
+  for (const sub of subs) {
+    try {
+      const r = await fetch(sub.endpoint, { method: 'POST', headers: { Authorization: await vapidAuth(env, sub.endpoint), TTL: '86400', Urgency: 'normal', 'Content-Length': '0' } });
+      if (r.status !== 404 && r.status !== 410) keep.push(sub);
+    } catch (e) { keep.push(sub); }
+  }
+  if (keep.length !== subs.length) await env.LIBRARY.put('push:' + pid, JSON.stringify(keep));
+  return subs.length;
+}
+const DIGEST_TOOL = {
+  name: 'submit_digest', description: 'Return the suggested books.', strict: true,
+  input_schema: { type: 'object', additionalProperties: false, required: ['intro', 'books'], properties: {
+    intro: { type: 'string', description: 'one warm sentence in Hebrew introducing this batch' },
+    books: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['title_he', 'title_original', 'author', 'isbn', 'why'], properties: {
+      title_he: { type: 'string' }, title_original: { type: 'string' }, author: { type: 'string' }, isbn: { type: 'string' }, why: { type: 'string' } } } } } }
+};
+const ADDRESS_RULE = { f: ' Address the reader in the Hebrew feminine singular.', m: ' Address the reader in the Hebrew masculine singular.', n: ' Address the reader in gender-neutral Hebrew.' };
+function digestPrompt(db, prior) {
+  const read = (db.books || []).filter(b => b.status !== 'want').sort((a, b) => b.rating - a.rating).slice(0, 60);
+  const lib = read.map(b => `- ${b.title}${b.year ? ` (${b.year})` : ''} — ${(b.authors || [])[0] || '?'} | ${b.rating}${b.note ? ' | ' + String(b.note).slice(0, 120) : ''}`).join('\n');
+  const p = db.litProfile;
+  const exclude = [...new Set([...(db.books || []).map(b => b.title), ...(db.history || []).flatMap(h => (h.recs || []).map(r => r.title)),
+    ...prior.flatMap(d => d.books.map(b => b.title)), ...(db.rejections || []).map(r => r.title)])].slice(0, 700);
+  return `${p && p.text ? `READER PROFILE:\n${p.brief || p.text}` : `READER'S LIBRARY (title — author | rating | notes):\n${lib || '(empty)'}`}${db.profileNote ? `\nREADER'S NOTE: ${db.profileNote}` : ''}
+WISHLIST (current interests; do not suggest these): ${(db.books || []).filter(b => b.status === 'want').slice(0, 40).map(b => b.title).join('; ') || 'none'}
+DO NOT SUGGEST (already read, owned, suggested before, or rejected): ${exclude.join('; ') || 'none'}
+
+Suggest 14 books this reader has not read that would interest them now — a varied mix (not all by the same author), including some recent books. Prefer books with a Hebrew edition.`;
+}
+export async function generateDigest(env, ctx, pid, db) {
+  const prior = (await env.LIBRARY.get('digest:' + pid, 'json')) || [];
+  const lang = (db.settings && db.settings.recLang) || 'auto';
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      model: ALLOWED_MODELS[0], max_tokens: 8000, thinking: { type: 'adaptive' }, output_config: { effort: 'low' },
+      system: 'You are a literary advisor with deep knowledge of world and Israeli literature. Every book you name is checked against real catalogues; name only real, published books. title_he must be the exact title of a Hebrew edition you know exists (otherwise empty; never translate a title yourself). `why` is one or two sentences in Hebrew that connect the book to this reader.' +
+        (lang === 'he' ? ' Only books with a Hebrew edition.' : '') + (ADDRESS_RULE[(db.settings && db.settings.address) || 'n'] || ''),
+      tools: [DIGEST_TOOL], messages: [{ role: 'user', content: digestPrompt(db, prior) }]
+    })
+  });
+  if (!r.ok) throw new Error('anthropic ' + r.status);
+  const msg = await r.json();
+  const sub = (msg.content || []).find(b => b.type === 'tool_use' && b.name === 'submit_digest');
+  if (!sub) throw new Error('no digest');
+  const have = new Set([...(db.books || []).map(b => heNorm(b.title)), ...prior.flatMap(d => d.books.map(b => heNorm(b.title)))]);
+  const cands = (sub.input.books || []).filter(b => b && (b.title_he || b.title_original) && !have.has(heNorm(b.title_he)) && !have.has(heNorm(b.title_original)));
+  const out = [];
+  // אימות במקביל (בקבוצות קטנות): רק ספר שנמצא במאגר או בחנות נכנס לרשימה
+  for (let i = 0; i < cands.length && out.length < DIGEST_SIZE; i += 5) {
+    const infos = await Promise.all(cands.slice(i, i + 5).map(b => bookInfo(env, ctx, { isbn: digits(b.isbn).length >= 10 ? digits(b.isbn) : '', title: b.title_he || b.title_original, author: b.author }).catch(() => null)));
+    infos.forEach((info, j) => {
+      const b = cands[i + j];
+      if (!info || !info.found || out.length >= DIGEST_SIZE) return;
+      out.push({ title: b.title_he || b.title_original, original: b.title_he && b.title_original !== b.title_he ? b.title_original : '', author: b.author, why: b.why,
+        isbn: info.isbn, cover: info.cover, synopsis: info.synopsis, synopsisSource: info.synopsisSource, urls: info.urls, available: info.available });
+    });
+  }
+  const digest = { id: crypto.randomUUID(), at: Date.now(), intro: sub.input.intro || '', books: out };
+  await env.LIBRARY.put('digest:' + pid, JSON.stringify([digest, ...prior].slice(0, 6)));
+  return digest;
+}
+export async function runDigests(env, ctx, now = Date.now()) {
+  if (!env.LIBRARY || !env.ANTHROPIC_API_KEY) return { ran: 0 };
+  const state = await env.LIBRARY.get('state', 'json');
+  const data = state && state.data;
+  if (!data || !Array.isArray(data.profiles)) return { ran: 0 };
+  let init = parseInt((await env.LIBRARY.get('digest-init')) || '0', 10);
+  if (!init) { init = now; await env.LIBRARY.put('digest-init', String(now)); }
+  let ran = 0;
+  for (const p of data.profiles) {
+    if ((data.deleted || {})[p.id]) continue;
+    let meta = await env.LIBRARY.get('digest-meta:' + p.id, 'json');
+    if (!meta) {
+      // מי שכבר היה כשהתכונה עלתה – עכשיו; משתמש חדש – יום אחרי שנוצר
+      meta = { next: (p.createdAt || now) <= init ? now : (p.createdAt || now) + DIGEST_FIRST_DELAY };
+      await env.LIBRARY.put('digest-meta:' + p.id, JSON.stringify(meta));
+    }
+    if (now < meta.next || ran >= DIGEST_PER_RUN) continue;
+    const db = (data.dbs || {})[p.id];
+    const readCount = db ? (db.books || []).filter(b => b.status !== 'want').length : 0;
+    if (readCount < 1) { await env.LIBRARY.put('digest-meta:' + p.id, JSON.stringify({ next: now + DIGEST_FIRST_DELAY })); continue; }
+    ran++;
+    try {
+      const d = await generateDigest(env, ctx, p.id, db);
+      await env.LIBRARY.put('digest-meta:' + p.id, JSON.stringify({ next: now + DIGEST_EVERY, last: d.id }));
+      if (d.books.length) await pushTo(env, p.id);
+    } catch (e) {
+      await env.LIBRARY.put('digest-meta:' + p.id, JSON.stringify({ next: now + 6 * 3600000, error: String(e.message || e) }));   // ננסה שוב בעוד כמה שעות
+    }
+  }
+  return { ran };
+}
+async function handleDigest(req, env, cors, path) {
+  const u = new URL(req.url);
+  if (path === '/push/key') return json({ key: (await vapidKeys(env)).pub }, 200, cors);
+  if (path === '/push/subscribe' && req.method === 'POST') {
+    let b; try { b = await req.json(); } catch (e) { return json({ error: 'bad_json' }, 400, cors); }
+    const pid = String(b.pid || '').slice(0, 64), sub = b.sub;
+    if (!pid || !sub || typeof sub.endpoint !== 'string' || !/^https:\/\//.test(sub.endpoint)) return json({ error: 'bad_request' }, 400, cors);
+    const list = ((await env.LIBRARY.get('push:' + pid, 'json')) || []).filter(x => x.endpoint !== sub.endpoint);
+    await env.LIBRARY.put('push:' + pid, JSON.stringify([{ endpoint: sub.endpoint }, ...list].slice(0, 5)));
+    return json({ ok: true }, 200, cors);
+  }
+  if (path === '/digest') {
+    const pid = (u.searchParams.get('pid') || '').slice(0, 64);
+    const list = pid ? ((await env.LIBRARY.get('digest:' + pid, 'json')) || []) : [];
+    const meta = pid ? await env.LIBRARY.get('digest-meta:' + pid, 'json') : null;
+    return json({ digests: list, next: meta ? meta.next : 0 }, 200, cors);
+  }
+  return json({ error: 'not_found' }, 404, cors);
+}
+
 async function handleSync(req, env, cors) {
   if (req.method === 'GET') {
     const cur = await env.LIBRARY.get('state', 'json');
@@ -622,6 +761,8 @@ async function handleSync(req, env, cors) {
 }
 
 export default {
+  // Cron (wrangler.jsonc → triggers): בודק כל שעה למי הגיע הזמן לקבל את ההצעות הדו-שבועיות
+  async scheduled(event, env, ctx) { ctx.waitUntil(runDigests(env, ctx)); },
   async fetch(req, env, ctx) {
     const cors = corsHeaders(req);
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
@@ -630,6 +771,7 @@ export default {
     try {
       if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY, gbooks: !!env.GOOGLE_BOOKS_KEY, nli: !!env.NLI_API_KEY, jobs: !!env.JOBS }, 200, cors);
       if (path === '/gbooks' && req.method === 'GET') return await handleGoogleBooks(req, env, cors, ctx);
+      if (path === '/digest' || path.startsWith('/push/')) return await handleDigest(req, env, cors, path);
       if (path === '/jobs' || path.startsWith('/jobs/')) return await handleJobs(req, env, cors, path);
       if (path === '/bookinfo' && req.method === 'GET') return await handleBookInfo(req, env, cors, ctx);
       if (path === '/stores' && req.method === 'GET') return await handleStores(req, env, cors, ctx);

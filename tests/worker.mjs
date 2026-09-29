@@ -141,3 +141,52 @@ console.log('worker page verification: ok');
   assert.equal(calls.length, n); assert.ok(res2.cached); assert.equal(res2.isbn, res1.isbn);
   console.log('worker book info: ok');
 }
+// ההצעות הדו-שבועיות: משתמש קיים מקבל מיד, משתמש חדש יום אחרי, רק ספרים שאומתו ולא הוצעו/נקראו, והתראה נשלחת
+{
+  const { runDigests, vapidAuth } = await import('../worker/worker.js');
+  const kv = new Map();
+  const envD = { ANTHROPIC_API_KEY: 'k', LIBRARY: { get: async (k, t) => kv.has(k) ? (t === 'json' ? JSON.parse(kv.get(k)) : kv.get(k)) : null, put: async (k, v) => { kv.set(k, v); } } };
+  const now = Date.now();
+  kv.set('state', JSON.stringify({ rev: 3, data: { profiles: [{ id: 'old', name: 'יובל', createdAt: now - 99 * 86400000 }], deleted: {}, dbs: {
+    old: { books: [{ title: 'מיכאל שלי', authors: ['עמוס עוז'], rating: 5, status: 'read' }], history: [{ recs: [{ title: 'סומכי' }] }], rejections: [], settings: { address: 'm' } } } } }));
+  kv.set('push:old', JSON.stringify([{ endpoint: 'https://fcm.googleapis.com/fcm/send/abc' }]));
+  const sent = [];
+  globalThis.caches = { default: { match: async () => undefined, put: async () => {} } };
+  globalThis.fetch = async (url, init) => {
+    url = String(url);
+    if (url.startsWith('https://api.anthropic.com/')) {
+      const body = JSON.parse(init.body);
+      if (!(body.tools || []).some(t => t.name === 'submit_digest')) return new Response(JSON.stringify({ content: [] }));   // חיפוש בחנויות: אין תוצאות
+      sent.push(body);
+      assert.ok(body.messages[0].content.includes('סומכי'), 'earlier suggestions are excluded');
+      assert.ok(body.system.includes('masculine'));
+      const books = [{ title_he: 'סיפור פשוט', title_original: '', author: 'עגנון', isbn: '', why: 'כי כן.' }, { title_he: 'ספר מומצא לגמרי', title_original: '', author: 'אף אחד', isbn: '', why: 'x' }, { title_he: 'מיכאל שלי', title_original: '', author: 'עמוס עוז', isbn: '', why: 'כבר קרא' }];
+      return new Response(JSON.stringify({ content: [{ type: 'tool_use', name: 'submit_digest', input: { intro: 'הנה כמה רעיונות.', books } }] }));
+    }
+    if (url.startsWith('https://www.googleapis.com/')) {
+      const q = new URL(url).searchParams.get('q');
+      return new Response(JSON.stringify({ items: q.includes('סיפור פשוט') ? [{ volumeInfo: { title: 'סיפור פשוט', authors: ['ש"י עגנון'], industryIdentifiers: [{ type: 'ISBN_13', identifier: '9789650000042' }] } }] : [] }));
+    }
+    if (url.startsWith('https://openlibrary.org/')) return new Response(JSON.stringify({ docs: [] }));
+    if (url.startsWith('https://fcm.googleapis.com/')) { sent.push({ push: init.headers }); return new Response('', { status: 201 }); }
+    return new Response('blocked', { status: 403 });
+  };
+  const ctx = { waitUntil: () => {} };
+  // משתמש חדש שנוסף אחרי שהתכונה עלתה: לא עכשיו
+  const r1 = await runDigests(envD, ctx, now);
+  assert.equal(r1.ran, 1);
+  const d = JSON.parse(kv.get('digest:old'));
+  assert.deepEqual(d[0].books.map(b => b.title), ['סיפור פשוט'], 'only verified, new books');
+  assert.equal(d[0].intro, 'הנה כמה רעיונות.');
+  const push = sent.find(x => x.push);
+  assert.ok(push && /^vapid t=[\w-]+\.[\w-]+\.[\w-]+, k=[\w-]{80,}$/.test(push.push.Authorization), 'VAPID push sent');
+  const meta = JSON.parse(kv.get('digest-meta:old'));
+  assert.ok(meta.next > now + 13 * 86400000, 'next in two weeks');
+  // משתמש חדש: יום אחרי שנוצר
+  const st = JSON.parse(kv.get('state')); st.data.profiles.push({ id: 'new', name: 'דנה', createdAt: now + 1000 }); st.data.dbs.new = { books: [{ title: 'x', rating: 4, status: 'read' }] };
+  kv.set('state', JSON.stringify(st));
+  const r2 = await runDigests(envD, ctx, now + 2000);
+  assert.equal(r2.ran, 0);
+  assert.ok(JSON.parse(kv.get('digest-meta:new')).next >= now + 1000 + 86400000 - 5);
+  console.log('worker biweekly digest: ok');
+}

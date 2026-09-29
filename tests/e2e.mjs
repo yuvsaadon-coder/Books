@@ -28,6 +28,7 @@ const BOOKS = [
 ];
 let store = { rev: 0, data: null };
 const aiCalls = [], aiScript = [], errors = [];
+const digestFor = new Map();
 const jobs = new Map(), jobBodies = [], jobHold = new Set(), profileCalls = [];
 let viaProxy = 0, direct = 0;
 
@@ -63,6 +64,9 @@ async function phone(browser, name) {
     if (u.origin === WORKER) {
       if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
       if (u.pathname === '/ping') return route.fulfill({ headers: cors, json: { ok: true, ai: true, sync: true, gbooks: true, nli: true, jobs: true } });
+      if (u.pathname === '/digest') {
+        return route.fulfill({ headers: cors, json: { next: 0, digests: u.searchParams.get('pid') && digestFor.has(u.searchParams.get('pid')) ? [digestFor.get(u.searchParams.get('pid'))] : [] } });
+      }
       if (u.pathname === '/bookinfo') {
         const t = u.searchParams.get('title') || '';
         return route.fulfill({ headers: cors, json: t === 'יש ואין'
@@ -338,9 +342,24 @@ try {
     await A.waitForSelector('[aria-label="סטטיסטיקות קריאה"]');
     await A.click('nav >> text=גלה ספר חדש');
   });
+  await step('biweekly suggestions: banner, list, add to wishlist, seen', async () => {
+    const pid = await A.evaluate(() => JSON.parse(localStorage.getItem('verified_reading_tracker_profiles_v1')).active);
+    digestFor.set(pid, { id: 'd1', at: Date.now(), intro: 'הנה כמה רעיונות בשבילך.', books: [
+      { title: 'הזקן והים', author: 'ארנסט המינגוויי', why: 'כי אהבת את "יש ואין".', isbn: '9789650000999', cover: '', synopsis: 'סנטיאגו, דייג זקן, יוצא לים.', synopsisSource: 'steimatzky.co.il', urls: [{ site: 'steimatzky.co.il', url: 'https://www.steimatzky.co.il/old-man', kinds: ['print'] }], available: { print: true } }] });
+    await A.reload();
+    await A.click('button:has-text("ספרים חדשים בשבילך")');
+    await A.waitForSelector('[role=dialog] >> text=סנטיאגו, דייג זקן');
+    await A.click('[role=dialog] button:has-text("רוצה לקרוא")');
+    await A.click('[role=dialog] button:has-text("הוספה לרשימת")');
+    await A.keyboard.press('Escape'); await A.waitForTimeout(300);
+    assert.equal(await A.locator('button:has-text("ספרים חדשים בשבילך")').count(), 0, 'banner hidden after it was opened');
+    await A.click('nav >> text=ספרים שלי'); await A.click('button[role=tab]:has-text("רוצה לקרוא")');
+    await A.waitForSelector('main li:has-text("הזקן והים")');
+    await A.click('nav >> text=גלה ספר חדש');
+  });
   await step('service error is shown briefly and stays on screen', async () => {
     aiScript.push({ error: 400 }); aiScript.push({ error: 400 });
-    await A.click('button:has-text("שאלון חדש")'); await A.fill('#ai-request', 'בדיקה'); await A.click('button:has-text("המלצה חכמה")');
+    await A.fill('#ai-request', 'בדיקה'); await A.click('button:has-text("המלצה חכמה")');
     await A.waitForSelector('text=השירות החזיר שגיאה (400)');
     const [sw, w] = await A.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
     assert.ok(sw <= w, `error overflow ${sw} > ${w}`);

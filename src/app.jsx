@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '25';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '26';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -3618,7 +3618,8 @@ function useRecStore(pid, db) {
   return st;
 }
 
-function DiscoverTab({ db, update, onPick, notify }) {
+function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
+  const digests = useDigest().digests.filter(d => d.books.length);
   // מצב השיחה נשמר מחוץ ללשונית (לכל משתמש): יציאה מהלשונית לא מאפסת את השיחה, והמלצה שרצה ממשיכה ברקע
   const st = useRecStore(ACTIVE.id, db);
   const { step, answers, log, running, recs, shown } = st;
@@ -3785,6 +3786,12 @@ function DiscoverTab({ db, update, onPick, notify }) {
       )}
 
       <LitProfileCard db={db} update={update} />
+      {digests.length > 0 && onOpenDigest && (
+        <div className="mb-4 flex flex-wrap gap-2 items-center">
+          <span className="text-[14px] text-muted">ההצעות הדו-שבועיות:</span>
+          {digests.slice(0, 3).map(d => <Chip key={d.id} onClick={() => onOpenDigest(d)}><Icon name="Sparkles" size={14} />{fmtDate(d.at)}</Chip>)}
+        </div>
+      )}
       <div className="bg-surface border border-line rounded-xl p-3 mb-4 grid gap-2">
         {!hasAi && <div className="text-[13px] font-semibold tracking-wide text-muted">הפרופיל שלך</div>}
         {hasAi ? null : db.books.length
@@ -4092,6 +4099,11 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
               <Chip key={k} active={(db.settings.address || 'n') === k} onClick={() => update(d => ({ ...d, settings: { ...d.settings, address: k } }))}>{l}</Chip>
             ))}
           </div>
+        </div>
+        <div>
+          <div className="text-[15px] font-semibold">הצעות כל שבועיים</div>
+          <div className="text-[13px] text-muted mb-1.5">כל שבועיים נבחרים בשבילך 10 ספרים חדשים לפי מה שקראת. אפשר לקבל על זה התראה לטלפון.</div>
+          <PushButton notify={notify} />
         </div>
         <EinkToggle />
         <div>
@@ -4514,6 +4526,106 @@ function RecommendToFriend({ book, notify }) {
   );
 }
 
+/* ---------- ההצעות הדו-שבועיות (נוצרות בשרת), התראות לטלפון ---------- */
+function useDigest() {
+  const [data, setData] = useState({ digests: [], next: 0 });
+  useEffect(() => {
+    let alive = true;
+    const load = () => { const c = loadCloud(); if (!c) return; fetchJSON(c.url + '/digest?pid=' + encodeURIComponent(ACTIVE.id) + '&t=' + Math.floor(Date.now() / 60000), 15000).then(d => { if (alive && d && Array.isArray(d.digests)) setData(d); }).catch(() => {}); };
+    load();
+    const onVis = () => { if (document.visibilityState === 'visible') load(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { alive = false; document.removeEventListener('visibilitychange', onVis); };
+  }, []);
+  return data;
+}
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && /^https:$/.test(location.protocol);
+const b64uToBytes = (s) => { const b = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)); return Uint8Array.from(b, c => c.charCodeAt(0)); };
+async function enablePush() {
+  const c = loadCloud();
+  if (!c || !pushSupported()) throw new Error(isIOS() && !isStandalone() ? 'באייפון: קודם מתקינים את האפליקציה במסך הבית, ופותחים אותה משם.' : 'הדפדפן הזה לא תומך בהתראות.');
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') throw new Error('ההתראות לא אושרו. אפשר לאשר בהגדרות הדפדפן.');
+  const reg = await navigator.serviceWorker.ready;
+  const { key } = await fetchJSON(c.url + '/push/key');
+  const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uToBytes(key) });
+  const r = await fetch(c.url + '/push/subscribe', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pid: ACTIVE.id, sub: sub.toJSON() }) });
+  if (!r.ok) throw new Error('השרת לא שמר את ההרשמה להתראות.');
+}
+function PushButton({ notify }) {
+  const [state, setState] = useState(() => { try { return typeof Notification !== 'undefined' && Notification.permission === 'granted' && localStorage.getItem('vrt-push-' + ACTIVE.id) ? 'on' : 'off'; } catch (e) { return 'off'; } });
+  const [err, setErr] = useState('');
+  if (state === 'on') return <p className="text-[13px] text-ok font-semibold inline-flex items-center gap-1"><Icon name="Check" size={14} />התראות פעילות במכשיר הזה</p>;
+  return (
+    <div className="grid gap-1">
+      <Btn variant="ghost" onClick={async () => { setErr(''); try { await enablePush(); try { localStorage.setItem('vrt-push-' + ACTIVE.id, '1'); } catch (e) { /* */ } setState('on'); notify && notify('נשלח לך התראה כשיהיו הצעות חדשות'); } catch (e) { setErr(e.message); } }}>
+        <Icon name="Sparkles" size={17} />התראה כשיש הצעות חדשות
+      </Btn>
+      {err && <p className="text-[13px] text-danger">{err}</p>}
+    </div>
+  );
+}
+const digestBook = (b, d) => ({
+  key: b.isbn ? 'isbn:' + b.isbn : 'digest:' + b.title + '|' + (b.author || ''), source: 'digest', sourceId: b.isbn || '', title: b.title, subtitle: b.original || '',
+  authors: b.author ? [b.author] : [], year: '', description: b.synopsis || '', descSource: STORE_NAMES[b.synopsisSource] || b.synopsisSource || '',
+  categories: [], cover: b.cover || '', pageCount: 0, language: hasHebrew(b.title) ? 'he' : '', isbns: b.isbn ? [b.isbn] : [],
+  link: (b.urls && b.urls[0] && b.urls[0].url) || '', publisher: '', verifiedVia: (b.urls && b.urls[0] && b.urls[0].site) || 'המאגרים', verifiedAt: d.at,
+  offers: b.urls || [], availability: b.available || null, reasons: b.why ? [b.why] : []
+});
+function DigestBanner({ db, update, onOpen }) {
+  const { digests } = useDigest();
+  const latest = digests[0];
+  if (!latest || !latest.books.length || (db.settings.digestSeen === latest.id)) return null;
+  return (
+    <button type="button" onClick={() => onOpen(latest)} className="fade-in mt-3 w-full text-right bg-surface border border-line rounded-2xl p-3 flex items-center gap-3 accent-top">
+      <span className="w-11 h-11 rounded-full grid place-items-center shrink-0" style={{ background: 'linear-gradient(135deg, var(--rose), var(--brass))', color: '#fff' }}><Icon name="Sparkles" size={22} /></span>
+      <span className="flex-1 min-w-0">
+        <span className="block font-semibold text-[16px]">{latest.books.length} ספרים חדשים בשבילך</span>
+        <span className="block text-[13px] text-muted truncate">{latest.intro || 'לפי הספרים שקראת וההעדפות שלך'}</span>
+      </span>
+      <Icon name="ChevronLeft" size={20} className="text-muted" />
+    </button>
+  );
+}
+function DigestSheet({ digest, db, update, onPick, notify, onClose }) {
+  const [rejecting, setRejecting] = useState(null);
+  useEffect(() => { if (db.settings.digestSeen !== digest.id) update(d => ({ ...d, settings: { ...d.settings, digestSeen: digest.id } })); }, [digest.id]);
+  const books = digest.books.map(b => digestBook(b, digest)).filter(b => !activeRejections(db).some(x => x.key === b.key || x.title === b.title));
+  return (
+    <Sheet open onClose={onClose} title={`ההצעות של ${fmtDate(digest.at)}`}>
+      {digest.intro && <p className="font-reading mb-3">{digest.intro}</p>}
+      <ul className="grid gap-3">
+        {books.map(b => {
+          const inLib = findInLibrary(b, db.books);
+          return (
+            <li key={b.key} className="border border-line rounded-2xl p-3">
+              <div className="flex gap-3">
+                <Cover book={b} className="w-16 h-24" />
+                <div className="min-w-0 flex-1">
+                  <div className="font-display font-medium text-[17px] leading-snug">{b.title}</div>
+                  <div className="text-[14px] text-muted">{b.authors.join(', ')}</div>
+                  {b.reasons[0] && <p className="text-[14px] mt-1">{b.reasons[0]}</p>}
+                </div>
+              </div>
+              {b.description && <p className="font-reading text-[15px] clamp-3 mt-2" dir="auto">{b.description}</p>}
+              {b.offers.length > 0 && <div className="text-[13px] mt-1.5 flex flex-wrap gap-x-3">{b.offers.slice(0, 3).map(o => <a key={o.url} href={o.url} target="_blank" rel="noopener noreferrer" className="underline">לדף הספר ב{STORE_NAMES[o.site] || o.site}</a>)}</div>}
+              {inLib ? <div className="text-[13px] text-muted mt-2">{inLib.status === 'want' ? 'ברשימת "רוצה לקרוא"' : 'כבר בספרייה'}</div> : (
+                <div className="flex gap-1.5 mt-2 flex-wrap">
+                  <Chip onClick={() => onPick(b, { status: 'want' })}><Icon name="Bookmark" size={14} />רוצה לקרוא</Chip>
+                  <Chip onClick={() => onPick(b)}><Icon name="BookCheck" size={14} />קראתי</Chip>
+                  <Chip onClick={() => setRejecting(b)}><Icon name="ThumbsDown" size={14} />לא בשבילי</Chip>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      <div className="mt-4"><PushButton notify={notify} /></div>
+      {rejecting && <RejectSheet book={rejecting} onClose={() => setRejecting(null)} onDone={(o) => { rejectBook(update, rejecting, o); notify(o.forever ? 'לא נציע אותו שוב.' : 'הוסתר לחודש הקרוב.'); setRejecting(null); }} />}
+    </Sheet>
+  );
+}
+
 const TABS = [
   { id: 'library', label: 'הספרים שלי', icon: 'Library' },
   { id: 'add', label: 'הוספת ספר', icon: 'BookPlus' },
@@ -4525,6 +4637,14 @@ const TABS = [
 function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
   const { db, update, replace, status } = usePersistentDB();
   const friendsBadge = useFriends().badge;
+  const [digestOpen, setDigestOpen] = useState(null);
+  // פתיחה מהתראה: ?view=digest
+  useEffect(() => {
+    if (!/[?&]view=digest/.test(location.search)) return;
+    const c = loadCloud(); if (!c) return;
+    fetchJSON(c.url + '/digest?pid=' + encodeURIComponent(ACTIVE.id)).then(d => { if (d.digests && d.digests[0]) setDigestOpen(d.digests[0]); }).catch(() => {});
+    try { history.replaceState(null, '', location.pathname); } catch (e) { /* */ }
+  }, []);
   const [tab, setTab] = useState(() => { try { return sessionStorage.getItem('vrt_tab') || 'library'; } catch (e) { return 'library'; } });
   const [starterOpen, setStarterOpen] = useState(false);
   const showStarter = tab === 'library' && (starterOpen || (!db.books.length && !db.settings.onboarded));
@@ -4606,12 +4726,13 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
           </button>
         </div>
         <InstallPrompt />
+        <DigestBanner db={db} update={update} onOpen={setDigestOpen} />
         {showStarter && <Starter db={db} update={update} onBegin={() => setStarterOpen(true)} onClose={() => setStarterOpen(false)}
           goQueue={() => { setStarterOpen(false); try { sessionStorage.setItem('vrt_add_mode', 'bulk'); } catch (e) { /* */ } setTab('add'); }} />}
         {tab === 'library' && !showStarter && <LibraryTab db={db} onEdit={(b) => setPending({ book: b, existing: b, status: b.status === 'want' ? 'read' : undefined })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id), tombstones: { ...d.tombstones, books: { ...d.tombstones.books, [id]: Date.now() } } })); notify('הספר נמחק'); }}
           onUpdateBook={(id, patch) => update(d => ({ ...d, books: d.books.map(b => b.id === id ? sanitizeBook({ ...b, ...patch, editedAt: Date.now() }) : b) }))} goAdd={() => setTab('add')} notify={notify} />}
         {tab === 'add' && <AddTab db={db} onPick={pick} goSettings={() => setTab('backup')} />}
-        {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} />}
+        {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} onOpenDigest={setDigestOpen} />}
         {tab === 'friends' && <FriendsTab db={db} update={update} onPick={pick} notify={notify} />}
         {tab === 'backup' && <BackupTab onOpenStarter={() => { setStarterOpen(true); setTab('library'); }} db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
       </main>
@@ -4631,6 +4752,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
         </ul>
       </nav>
 
+      {digestOpen && <DigestSheet digest={digestOpen} db={db} update={update} onPick={pick} notify={notify} onClose={() => setDigestOpen(null)} />}
       {pending && <RateSheet book={pending.book} existing={pending.existing} initialStatus={pending.status} tagLibrary={db.tagLibrary} onSave={save} onClose={() => setPending(null)} />}
       <Toast toast={toast} />
     </div>
