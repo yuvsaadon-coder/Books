@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '16';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '17';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -1166,6 +1166,36 @@ async function verifyAiBook(r, many, hits) {
   }
   return out;
 }
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+// אימות מהיר להמלצה: חיפוש ממוקד במקביל ב-Google Books ובספרייה הלאומית (מהדורה עברית קודם),
+// ורק אם שם עברי לא נמצא באף מאגר, בחנויות ובהוצאות
+async function verifyRec(r) {
+  const clean = (x) => (x || '').replace(/[^\dXx]/g, '');
+  const isbn = clean(r.isbn);
+  const author = r.author || '';
+  const surname = author.trim().split(/\s+/).pop() || '';
+  const he = r.title_he && hasHebrew(r.title_he) ? r.title_he.trim() : '';
+  const orig = r.title_original && r.title_original !== he ? r.title_original.trim() : '';
+  const match = (list, t) => (list || []).find(c => (isbn && (c.isbns || []).some(x => clean(x) === isbn)) || (t && matchScore(c, `${t} ${author}`) >= 0.6));
+  const g = (t, lang) => googleAvailable() ? googleSearch(surname ? `${t} inauthor:${surname}` : t, { lang, max: 10 }).catch(() => []) : Promise.resolve([]);
+  const [gHe, nHe, gOrig, byIsbn] = await Promise.all([
+    he ? g(he, 'iw') : [], he ? nliSearch({ title: he, author: hasHebrew(author) ? author : '' }).catch(() => []) : [],
+    orig ? g(orig) : [], isbn.length === 10 || isbn.length === 13 ? lookupISBN(isbn).then(x => x.candidates).catch(() => []) : []
+  ]);
+  const hit = match(gHe, he) || match(nHe, he) || match(byIsbn, he || orig) || match(gOrig, orig);
+  if (hit) return hit;
+  if (!orig && !he) return null;
+  if (orig) {
+    const ol = await olSearch({ q: `${orig} ${author}`, limit: 5 }).catch(() => []);
+    const o = match(ol, orig);
+    if (o) return o;
+  }
+  if (he) {
+    const st = await storeSearch(he, author).catch(() => []);
+    if (st.length) return { ...st[0], subtitle: orig || '', description: st[0].description || r.synopsis_he || '', categories: r.genres || [] };
+  }
+  return null;
+}
 async function verifyPage(url, title, author) {
   const c = loadCloud();
   const r = await fetch(c.url + '/page?' + new URLSearchParams({ url, title: title || '', author: author || '' }));
@@ -1248,19 +1278,21 @@ async function aiRecommend({ books, request, answers, lang, exclude, dismissed, 
     }
   });
   onProgress && onProgress(`Claude הציע ${input.recommendations.length} ספרים. בודק כל אחד מול הספרייה הלאומית, Google Books ו-Open Library…`);
+  // כל ההצעות נבדקות במקביל, כל אחת עם תקרת זמן, כדי שספר אחד איטי לא יתקע את כולן
+  const checked = await Promise.all(input.recommendations.map(r => withTimeout(verifyRec(r), 30000).catch(() => null)));
   const recs = [];
   let rejected = 0;
-  for (const r of input.recommendations) {
-    if (recs.length >= want) break;
-    const [c] = await verifyAiBook(r, false, hits);
-    if (!c || findInLibrary(c, books) || exclude.includes(c.key)) { rejected++; continue; }
+  input.recommendations.forEach((r, i) => {
+    const c = checked[i];
+    if (recs.length >= want) return;
+    if (!c || findInLibrary(c, books) || exclude.includes(c.key) || recs.some(x => x.key === c.key)) { rejected++; return; }
     recs.push({
       ...c, reasons: [r.why], genres: r.genres, sources: r.sources, aiFormats: r.formats,
       description: c.description || r.synopsis_he, descSource: c.description ? c.descSource : (r.synopsis_he ? 'מקורות ברשת' : ''),
       descriptionHe: c.description && !hasHebrew(c.description) && r.synopsis_he ? r.synopsis_he : '',
       verifiedAt: Date.now(), verifiedVia: c.verifiedVia || (c.source === 'google' ? 'Google Books' : 'Open Library')
     });
-  }
+  });
   onProgress && onProgress(`אומתו ${recs.length} ספרים${rejected ? `; ${rejected} נפסלו (לא נמצאו במאגרים, או כבר אצלך)` : ''}. עלות משוערת: $${cost.toFixed(2)}`);
   return { recs, interpretation: input.interpretation, cost };
 }
