@@ -10,6 +10,9 @@
   "keep_vars": true,
   // בזמן הבנייה: העברת ANTHROPIC_API_KEY מ-Build secrets לסודות של השרת
   "build": { "command": "sh worker/sync-secrets.sh" },
+  // עבודות רקע: המלצה ממשיכה לרוץ בשרת גם כשהטלפון כבוי (Durable Object עם אחסון SQLite, זמין גם בתוכנית החינמית)
+  "durable_objects": { "bindings": [{ "name": "JOBS", "class_name": "AiJob" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AiJob"] }],
   "kv_namespaces": [
     { "binding": "LIBRARY", "id": "b622c3fe36394ceaa0b02718aaf676b3" }
   ]

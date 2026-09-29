@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '17';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '18';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -817,14 +817,14 @@ const aiAvailable = () => !!loadCloud() && SYNC.ai !== false;
 const CLOUD_CANDIDATES = ['https://books.yuvsaadon.workers.dev', 'https://books.yuvsaadon-coder.workers.dev', 'https://books.yuvsaadon1.workers.dev', 'https://books.yuval-saadon.workers.dev', 'https://books.yuvalsaadon.workers.dev'];
 async function discoverCloud() {
   if (loadCloud()) {
-    try { const r = await fetch(loadCloud().url + '/ping'); const j = await r.json(); setSyncStatus({ ai: !!j.ai, gbooks: !!j.gbooks, nli: !!j.nli }); } catch (e) { /* */ }
+    try { const r = await fetch(loadCloud().url + '/ping'); const j = await r.json(); setSyncStatus({ ai: !!j.ai, gbooks: !!j.gbooks, nli: !!j.nli, jobs: !!j.jobs }); } catch (e) { /* */ }
     return true;
   }
   for (const u of CLOUD_CANDIDATES) {
     try {
       const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 6000);
       const r = await fetch(u + '/ping', { signal: ctrl.signal }); clearTimeout(t);
-      if (r.ok) { const j = await r.json(); if (j && j.ok) { localStorage.setItem('vrt_server_url', u); setSyncStatus({ ai: !!j.ai, gbooks: !!j.gbooks, nli: !!j.nli }); return true; } }
+      if (r.ok) { const j = await r.json(); if (j && j.ok) { localStorage.setItem('vrt_server_url', u); setSyncStatus({ ai: !!j.ai, gbooks: !!j.gbooks, nli: !!j.nli, jobs: !!j.jobs }); return true; } }
     } catch (e) { /* ננסה את הבאה */ }
   }
   setSyncStatus({ status: 'error', error: 'השרת לא נמצא. שלחו ל-Claude Code את כתובת ה-Worker מ-Cloudflare.' });
@@ -895,7 +895,7 @@ function applyLocal(state) {
   });
   window.dispatchEvent(new Event('vrt-profiles-changed'));
 }
-const SYNC = { running: false, again: false, status: 'off', lastAt: 0, error: '', ai: null, gbooks: null, nli: null };
+const SYNC = { running: false, again: false, status: 'off', lastAt: 0, error: '', ai: null, gbooks: null, nli: null, jobs: null };
 function setSyncStatus(patch) { Object.assign(SYNC, patch); window.dispatchEvent(new Event('vrt-sync-status')); }
 async function syncNow() {
   if (!loadCloud()) { setSyncStatus({ status: 'off' }); return; }
@@ -1247,37 +1247,126 @@ function historyForPrompt(history, books) {
     return `- ${new Date(h.at).toISOString().slice(0, 10)}: asked ${req} → recommended: ${recs || 'nothing'}`;
   }).join('\n');
 }
-async function aiRecommend({ books, request, answers, lang, exclude, dismissed, history, want = 5, onProgress }) {
-  const langText = { he: 'Hebrew only (books available in a Hebrew edition)', en: 'English only', both: 'Hebrew or English editions', any: 'any language', auto: 'Hebrew or English' }[lang] || 'Hebrew or English';
-  const prefs = answersSummary(answers || {}).join('; ');
-  const excludeTitles = uniq([...books.map(b => b.title), ...exclude, ...(history || []).flatMap(h => (h.recs || []).map(r => r.title))]).slice(0, 300);
-  onProgress && onProgress(`שולח ל-Claude את הספרייה שלך (${books.length} ספרים) ואת הבקשה. זה לוקח בדרך כלל פחות מדקה.`);
-  const { input, cost, hits } = await aiRun({
-    effort: 'medium', web: false, onProgress,
-    system: [
-      'You are a literary advisor with deep knowledge of world and Israeli literature. Recommend books this specific reader will love.',
-      'Think about the reader: what their highly rated books and notes have in common (themes, voice, structure, emotional register, pace, setting), and what they rated low.',
-      'Choose candidates from your own knowledge of the books, their critical reception and literary analyses. Prefer well-regarded books over merely popular ones when the reader\'s taste is literary. Decide quickly.',
-      'You have no web access. Every book you name is checked afterwards against the National Library of Israel catalogue (all Hebrew books published in Israel), Google Books and Open Library; books that are not found are dropped.',
-      'Recommend only real, published books. title_he must be the exact title of a Hebrew edition you know exists (otherwise empty; never translate a title yourself). Leave page_url and sources empty. Give the ISBN only if you are sure. For formats use "unknown" unless you are sure. Never recommend a book the reader already has.',
-      '`why` must connect the book to specific books and notes from the reader\'s library and to how critics describe it, in 2–4 sentences.',
-      `Language: ${langText}. ` + HEBREW_OUT
-    ].join('\n'),
-    prompt: `READER'S LIBRARY (title — author | rating 1-5 | tags | notes):\n${libraryForPrompt(books) || '(empty)'}\n\nALREADY SEEN OR NOT WANTED (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 300).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history, books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs ? `\nQUICK PREFERENCES: ${prefs}` : ''}\n\nRecommend ${want + 3} books.`,
+// ההעדפות מהשאלון המשולב, כטקסט למודל
+const FOCUS = {
+  mood: { label: 'מצב רוח', multi: true, options: Object.entries(MOODS).filter(([k]) => k !== 'surprise').map(([k, v]) => [k, v.label]) },
+  genre: { label: "ז'אנר", multi: true, options: STARTER.map(g => [g.tag, g.genre]) },
+  origin: { label: 'מקור', options: [['il', 'ספרות ישראלית'], ['tr', 'ספרות מתורגמת']] },
+  fame: { label: 'מוכר או פנינה', options: [['known', 'ספרים מוכרים ואהובים'], ['gems', 'פנינים פחות מוכרות']] },
+  pacing: { label: 'קצב', options: Object.entries(PACING).map(([k, v]) => [k, v.label]) },
+  length: { label: 'אורך', options: Object.entries(LENGTHS).map(([k, v]) => [k, v.label]) },
+  format: { label: 'פורמט', multi: true, options: [['print', 'מודפס'], ['ebook', 'דיגיטלי'], ['audio', 'קולי']] },
+  avoid: { label: 'בלי', multi: true, options: Object.entries(AVOID).map(([k, v]) => [k, v.label]) }
+};
+function focusSummary(focus) {
+  return Object.entries(FOCUS).map(([id, f]) => {
+    const v = focus && focus[id];
+    const keys = Array.isArray(v) ? v : v ? [v] : [];
+    const labels = keys.map(k => (f.options.find(o => o[0] === k) || [])[1]).filter(Boolean).filter(l => l !== 'לא משנה' && l !== 'לא משנה לי');
+    return labels.length ? `${f.label}: ${labels.join(', ')}` : '';
+  }).filter(Boolean);
+}
+
+// שאלות המשך קצרות לדיוק הבקשה (2–4), לפני ההמלצה
+async function aiClarify({ books, request, focus }) {
+  const { input } = await aiRun({
+    effort: 'low', web: false,
+    system: 'You help a reader find their next book. Before recommending, ask 2 to 4 short follow-up questions that would most change which books you pick, given their library and request. Do not ask what they already answered. Each question gets 2–5 short answer options. ' + HEBREW_OUT,
+    prompt: `READER'S LIBRARY (title — author | rating 1-5 | tags | notes):\n${libraryForPrompt(books).split('\n').slice(0, 40).join('\n') || '(empty)'}\n\nREQUEST: ${request || '(none)'}\nPREFERENCES: ${focusSummary(focus).join('; ') || '(none)'}`,
     submitTool: {
-      name: 'submit_recommendations', description: 'Return the final recommendations.',
-      input_schema: { type: 'object', additionalProperties: false, required: ['interpretation', 'recommendations'], properties: {
-        interpretation: { type: 'string', description: 'one or two sentences in Hebrew: how you understood the reader and the request' },
-        recommendations: { type: 'array', items: { type: 'object', additionalProperties: false,
-          required: ['title_he', 'title_original', 'author', 'isbn', 'page_url', 'why', 'synopsis_he', 'genres', 'formats', 'sources'], properties: {
-            title_he: { type: 'string', description: 'Hebrew edition title, empty if none' }, title_original: { type: 'string' },
-            author: { type: 'string' }, isbn: { type: 'string', description: 'empty if not found' },
-            page_url: { type: 'string', description: 'URL of the book page on a store or publisher site you read (e-vrit, Steimatzky, Tzomet/booknet, the publisher). Empty if none.' },
-            why: { type: 'string' }, synopsis_he: { type: 'string' }, genres: { type: 'array', items: { type: 'string' } },
-            formats: FORMAT_SCHEMA, sources: SOURCES_SCHEMA } } } } }
+      name: 'submit_questions', description: 'Return 2 to 4 follow-up questions.',
+      input_schema: { type: 'object', additionalProperties: false, required: ['questions'], properties: {
+        questions: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['question', 'options'], properties: {
+          question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } } } } } }
     }
   });
-  onProgress && onProgress(`Claude הציע ${input.recommendations.length} ספרים. בודק כל אחד מול הספרייה הלאומית, Google Books ו-Open Library…`);
+  return (input.questions || []).filter(q => q.question && (q.options || []).length).slice(0, 4).map(q => ({ question: q.question, options: q.options.slice(0, 5) }));
+}
+
+const REC_TOOL = {
+  name: 'submit_recommendations', description: 'Return the final recommendations.',
+  input_schema: { type: 'object', additionalProperties: false, required: ['interpretation', 'recommendations'], properties: {
+    interpretation: { type: 'string', description: 'one or two sentences in Hebrew: how you understood the reader and the request' },
+    recommendations: { type: 'array', items: { type: 'object', additionalProperties: false,
+      required: ['title_he', 'title_original', 'author', 'isbn', 'why', 'genres'], properties: {
+        title_he: { type: 'string', description: 'exact title of a Hebrew edition you know exists; empty if none. Never translate a title yourself.' },
+        title_original: { type: 'string' }, author: { type: 'string' }, isbn: { type: 'string', description: 'only if sure, else empty' },
+        why: { type: 'string' }, genres: { type: 'array', items: { type: 'string' } } } } } } }
+};
+function recRequest({ books, request, focus, qa, lang, exclude, dismissed, history, want }) {
+  const langText = { he: 'Hebrew only (books available in a Hebrew edition)', en: 'English only', both: 'Hebrew or English editions', any: 'any language', auto: 'Hebrew or English' }[lang] || 'Hebrew or English';
+  const excludeTitles = uniq([...books.map(b => b.title), ...exclude, ...(history || []).flatMap(h => (h.recs || []).map(r => r.title))]).slice(0, 300);
+  const prefs = focusSummary(focus);
+  return {
+    system: [
+      'You are a literary advisor with deep knowledge of world and Israeli literature. Recommend books this specific reader will love.',
+      'Think about the reader: what their highly rated books and notes have in common (themes, voice, structure, emotional register, pace, setting), and what they rated low. Follow their stated preferences and answers closely.',
+      'Choose from your own knowledge of the books, their critical reception and literary analyses. Prefer well-regarded books over merely popular ones when the reader\'s taste is literary, unless they asked for well-known books. Decide quickly.',
+      'You have no web access. Every book you name is checked afterwards against the National Library of Israel catalogue, Google Books, Open Library and the Israeli stores and publishers; books that are not found are dropped, so name only real, published books.',
+      'title_he must be the exact title of a Hebrew edition you know exists (otherwise empty; never translate a title yourself). Give the ISBN only if you are sure. Never recommend a book the reader already has.',
+      '`why` must connect the book to specific books and notes from the reader\'s library, to their answers, and to how critics describe it, in 2–4 sentences.',
+      `Language: ${langText}. ` + HEBREW_OUT
+    ].join('\n'),
+    prompt: `READER'S LIBRARY (title — author | rating 1-5 | tags | notes):\n${libraryForPrompt(books) || '(empty)'}\n\nALREADY SEEN OR NOT WANTED (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 300).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history, books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs.length ? `\nPREFERENCES: ${prefs.join('; ')}` : ''}${qa && qa.length ? `\nFOLLOW-UP ANSWERS:\n${qa.map(x => `- ${x.q} → ${x.a}`).join('\n')}` : ''}\n\nRecommend ${want + 3} books.`
+  };
+}
+
+/* עבודת רקע בשרת: ההמלצה ממשיכה גם כשהמסך כבוי או כשעוברים אפליקציה */
+const jobsAvailable = () => !!loadCloud() && SYNC.jobs === true;
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+async function startJob({ system, prompt, submitTool, effort }) {
+  const c = loadCloud();
+  const r = await fetch(c.url + '/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+    model: AI_MODEL, max_tokens: 16000, thinking: { type: 'adaptive' }, output_config: { effort }, system,
+    tools: [{ ...submitTool, strict: true }], messages: [{ role: 'user', content: prompt }], submit: submitTool.name
+  }) });
+  if (r.status === 429) throw new Error('הגעתם למגבלת השימוש היומית ב-AI. נסו שוב מחר.');
+  if (!r.ok) throw new Error('השרת לא הצליח להתחיל את ההמלצה (' + r.status + ').');
+  return (await r.json()).id;
+}
+async function pollJob(id, onProgress) {
+  const c = loadCloud();
+  const started = Date.now();
+  let said = 0;
+  for (;;) {
+    await sleep(2500);
+    let s = null;
+    try { s = await (await fetch(c.url + '/jobs/' + id, { cache: 'no-store' })).json(); } catch (e) { continue; }   // רשת נפלה לרגע: ממשיכים לחכות
+    if (s.status === 'done') return { input: s.input, cost: (s.usage || []).reduce((a, u) => a + costOf(u), 0), hits: s.hits || [] };
+    if (s.status === 'error') throw new Error(/daily|429/.test(s.error) ? 'הגעתם למגבלת השימוש היומית ב-AI.' : 'השירות החזיר שגיאה ' + String(s.error || '').slice(0, 140));
+    if (s.status === 'missing') throw new Error('ההמלצה כבר לא שמורה בשרת. נסו שוב.');
+    const sec = Math.round((Date.now() - started) / 1000);
+    if (onProgress && sec - said >= 30) { said = sec; onProgress(`Claude עדיין חושב (${sec} שניות). אפשר לצאת מהאפליקציה, ההמלצה תחכה כאן.`); }
+    if (Date.now() - started > 20 * 60000) throw new Error('ההמלצה לקחה יותר מדי זמן. נסו שוב.');
+  }
+}
+const PENDING_KEY = () => 'vrt-rec-job-' + ACTIVE.id;
+const loadPending = () => { try { return JSON.parse(localStorage.getItem(PENDING_KEY()) || 'null'); } catch (e) { return null; } };
+const savePending = (p) => { try { p ? localStorage.setItem(PENDING_KEY(), JSON.stringify(p)) : localStorage.removeItem(PENDING_KEY()); } catch (e) { /* */ } };
+
+// שלב 1: המודל מציע (בשרת אם אפשר). שלב 2: כל הצעה נבדקת במאגרים ובחנויות, ומקבלת זמינות, קישור ותקציר מהמקור
+async function aiRecommend(opts) {
+  const { books, onProgress } = opts;
+  const { system, prompt } = recRequest(opts);
+  onProgress && onProgress(`שולח ל-Claude את הספרייה שלך (${books.length} ספרים), הבקשה והתשובות. זה לוקח בדרך כלל דקה או שתיים.`);
+  let res;
+  if (jobsAvailable()) {
+    const id = await startJob({ system, prompt, submitTool: REC_TOOL, effort: 'medium' });
+    savePending({ id, at: Date.now(), ctx: opts.ctx || null });
+    res = await pollJob(id, onProgress);
+  } else {
+    res = await aiRun({ effort: 'medium', web: false, onProgress, system, prompt, submitTool: REC_TOOL });
+  }
+  savePending(null);
+  return finishRecs({ ...opts, ...res });
+}
+async function resumeRecommend(pending, opts) {
+  const res = await pollJob(pending.id, opts.onProgress);
+  savePending(null);
+  return finishRecs({ ...opts, ...res });
+}
+async function finishRecs({ input, cost, books, exclude, want = 5, onProgress }) {
+  onProgress && onProgress(`Claude הציע ${input.recommendations.length} ספרים. בודק כל אחד מול הספרייה הלאומית, Google Books והחנויות…`);
   // כל ההצעות נבדקות במקביל, כל אחת עם תקרת זמן, כדי שספר אחד איטי לא יתקע את כולן
   const checked = await Promise.all(input.recommendations.map(r => withTimeout(verifyRec(r), 30000).catch(() => null)));
   const recs = [];
@@ -1286,15 +1375,33 @@ async function aiRecommend({ books, request, answers, lang, exclude, dismissed, 
     const c = checked[i];
     if (recs.length >= want) return;
     if (!c || findInLibrary(c, books) || exclude.includes(c.key) || recs.some(x => x.key === c.key)) { rejected++; return; }
-    recs.push({
-      ...c, reasons: [r.why], genres: r.genres, sources: r.sources, aiFormats: r.formats,
-      description: c.description || r.synopsis_he, descSource: c.description ? c.descSource : (r.synopsis_he ? 'מקורות ברשת' : ''),
-      descriptionHe: c.description && !hasHebrew(c.description) && r.synopsis_he ? r.synopsis_he : '',
-      verifiedAt: Date.now(), verifiedVia: c.verifiedVia || (c.source === 'google' ? 'Google Books' : 'Open Library')
-    });
+    recs.push({ ...c, reasons: [r.why], genres: r.genres, verifiedAt: Date.now(), verifiedVia: c.verifiedVia || (c.source === 'google' ? 'Google Books' : 'Open Library') });
   });
-  onProgress && onProgress(`אומתו ${recs.length} ספרים${rejected ? `; ${rejected} נפסלו (לא נמצאו במאגרים, או כבר אצלך)` : ''}. עלות משוערת: $${cost.toFixed(2)}`);
-  return { recs, interpretation: input.interpretation, cost };
+  onProgress && onProgress(`אומתו ${recs.length} ספרים${rejected ? `; ${rejected} נפסלו (לא נמצאו במאגרים, או כבר אצלך)` : ''}. בודק זמינות בחנויות…`);
+  const rich = await Promise.all(recs.map(r => withTimeout(enrichRec(r), 30000).catch(() => r)));
+  onProgress && onProgress(`מוכן. עלות משוערת: $${cost.toFixed(2)}`);
+  return { recs: rich, interpretation: input.interpretation, cost };
+}
+// זמינות (מודפס/דיגיטלי/קולי) וקישורים מהחנויות, ותקציר בשפת הספר מהמקור (לא תרגום)
+function kindsOf(site, text) {
+  const t = text || '';
+  if (site === 'e-vrit.co.il') return /קולי|אודיו|audio|האזנה/i.test(t) ? ['audio'] : ['ebook'];
+  if (site === 'steimatzky.co.il') return /דיגיטלי|e-?book/i.test(t) ? ['ebook'] : /קולי|אודיו/.test(t) ? ['audio'] : ['print'];
+  return ['print'];
+}
+async function enrichRec(rec) {
+  const offers = [];
+  if (rec.source === 'web' && rec.link) offers.push({ site: rec.verifiedVia, url: rec.link, kinds: kindsOf(rec.verifiedVia, `${rec.title} ${rec.description}`) });
+  if (rec.ebook) offers.push({ site: 'Google Play', url: rec.ebookLink || rec.link, kinds: ['ebook'] });
+  let out = { ...rec };
+  if (hasHebrew(rec.title)) {
+    const st = await storeSearch(rec.title, (rec.authors || [])[0] || '').catch(() => []);
+    st.forEach(x => { if (!offers.some(o => o.url === x.link)) offers.push({ site: x.verifiedVia, url: x.link, kinds: kindsOf(x.verifiedVia, `${x.title} ${x.description}`) }); });
+    const src = st.find(x => x.description && hasHebrew(x.description) && x.description.length > 60);
+    if (src && (!out.description || !hasHebrew(out.description))) out = { ...out, description: src.description, descSource: STORE_NAMES[src.verifiedVia] || src.verifiedVia, descriptionHe: '' };
+    if (!out.cover) { const im = st.find(x => x.cover); if (im) out.cover = im.cover; }
+  }
+  return { ...out, offers };
 }
 
 /* ============================================================
@@ -2198,7 +2305,7 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd }) {
             </div>
           </div>
           <div className="flex flex-wrap gap-1.5 mb-3"><SourceBadge book={current} />{current.tags.map(t => <span key={t} className="text-[13px] px-2 py-0.5 rounded-full bg-surface2 font-semibold">{t}</span>)}</div>
-          <Synopsis key={current.id} book={current} className="mb-3" onChange={(patch) => onUpdateBook(current.id, patch)} />
+          <Synopsis key={current.id} book={current} className="mb-3" fetchSource onChange={(patch) => onUpdateBook(current.id, patch)} />
           {current.note && (
             <div className="mb-3 rounded-xl bg-surface2 p-2.5">
               <div className="text-[12px] font-semibold text-muted mb-0.5">מה חשבת</div>
@@ -2251,7 +2358,7 @@ async function fetchFullDescription(book) {
   try { const full = await googleById(book.sourceId); return full && full.description && full.description.length > (book.description || '').length ? full.description : ''; }
   catch (e) { return ''; }
 }
-function Synopsis({ book, onChange, className = '' }) {
+function Synopsis({ book, onChange, className = '', fetchSource = false }) {
   const [expanded, setExpanded] = useState(false);
   const [overflow, setOverflow] = useState(false);
   const [full, setFull] = useState('');
@@ -2261,11 +2368,25 @@ function Synopsis({ book, onChange, className = '' }) {
   const ref = useRef(null);
   const orig = full || book.description || '';
   const text = he && !showOrig ? he : orig;
+  // ספר עם שם עברי ותקציר בשפה אחרת (או בלי תקציר): מנסים להביא את התקציר העברי מדף הספר בחנות/בהוצאה, לפני תרגום
+  const [srcBusy, setSrcBusy] = useState(false);
+  useEffect(() => {
+    if (!fetchSource || !hasHebrew(book.title) || hasHebrew(book.description || '') || !loadCloud()) return;
+    const k = 'vrt-src-tried:' + book.key;
+    try { if (sessionStorage.getItem(k)) return; sessionStorage.setItem(k, '1'); } catch (e) { /* */ }
+    let alive = true;
+    setSrcBusy(true);
+    storeSearch(book.title, (book.authors || [])[0] || '').then(st => {
+      const src = st.find(x => x.description && hasHebrew(x.description) && x.description.length > 60);
+      if (alive && src && onChange) onChange({ description: src.description, descSource: STORE_NAMES[src.verifiedVia] || src.verifiedVia, descriptionHe: '' });
+    }).catch(() => {}).finally(() => alive && setSrcBusy(false));
+    return () => { alive = false; };
+  }, [book.key]);
   useEffect(() => {
     const el = ref.current;
     if (el && !expanded) setOverflow(el.scrollHeight > el.clientHeight + 2);
   }, [text, expanded]);
-  if (!orig && !he) return <p className={`text-muted text-[14px] ${className}`}>למקור אין תקציר רשמי לספר הזה.</p>;
+  if (!orig && !he) return <p className={`text-muted text-[14px] ${className}`}>{srcBusy ? 'מחפש תקציר בחנויות…' : 'למקור אין תקציר רשמי לספר הזה.'}</p>;
   const looksCut = /(\.\.\.|…)\s*$/.test(orig);
   const expand = async () => {
     if (expanded) { setExpanded(false); return; }
@@ -2977,6 +3098,39 @@ function FormatInfo({ book }) {
   );
 }
 
+function FocusGroup({ id, focus, onToggle }) {
+  const f = FOCUS[id], cur = focus[id];
+  const on = (k) => f.multi ? (cur || []).includes(k) : cur === k;
+  return (
+    <div role="group" aria-label={f.label}>
+      <div className="text-[13px] text-muted mb-1">{f.label}{f.multi ? ' (אפשר כמה)' : ''}</div>
+      <div className="flex flex-wrap gap-1.5">{f.options.map(([k, l]) => <Chip key={k} active={on(k)} onClick={() => onToggle(id, k)}>{l}</Chip>)}</div>
+    </div>
+  );
+}
+// זמינות מהחנויות: מה נמצא בפועל (מודפס/דיגיטלי/קולי) + קישור לדף הספר
+function RecAvailability({ r }) {
+  const offers = r.offers || [];
+  const KIND = { print: 'מודפס', ebook: 'דיגיטלי', audio: 'קולי' };
+  const has = (k) => offers.some(o => (o.kinds || []).includes(k));
+  const site = (s) => STORE_NAMES[s] || s;
+  return (
+    <div className="mt-2.5 border border-line rounded-xl p-2.5 grid gap-1.5">
+      <div className="text-[13px] font-semibold text-muted flex items-center gap-1"><Icon name="BookCopy" size={14} />זמינות</div>
+      <div className="flex flex-wrap gap-1.5 text-[13px]">
+        {Object.entries(KIND).map(([k, l]) => (
+          <span key={k} className={`px-2 py-0.5 rounded-full font-semibold ${has(k) ? 'bg-accentSoft text-ok' : 'bg-surface2 text-muted'}`}>{l}: {has(k) ? 'נמצא' : 'לא נמצא'}</span>
+        ))}
+      </div>
+      {offers.length > 0
+        ? <ul className="grid gap-0.5 text-[14px]">{offers.slice(0, 5).map(o => (
+            <li key={o.url} className="truncate"><a href={o.url} target="_blank" rel="noopener noreferrer" className="underline">לדף הספר ב{site(o.site)}</a>
+              <span className="text-muted"> · {(o.kinds || []).map(k => KIND[k]).join(', ')}</span></li>))}</ul>
+        : <p className="text-[13px] text-muted">לא נמצא דף מכירה בחנויות. "לא נמצא" לא אומר שאין.</p>}
+    </div>
+  );
+}
+
 function RecCard({ r, onRead, onDismiss, inLib }) {
   const [extra, setExtra] = useState({});
   return (
@@ -2995,13 +3149,13 @@ function RecCard({ r, onRead, onDismiss, inLib }) {
         <ul className="text-[14px] grid gap-0.5 list-disc pr-5">{r.reasons.map((x, i) => <li key={i}>{x}</li>)}</ul>
       </div>
       <Synopsis book={r} className="mt-2.5" onChange={(patch) => setExtra(x => ({ ...x, ...patch }))} />
-      <FormatInfo book={r} />
+      {r.offers ? <RecAvailability r={r} /> : <FormatInfo book={r} />}
       <div className="grid grid-cols-[1fr_auto_auto] gap-2 mt-2">
         {inLib
           ? <div className="min-h-[48px] rounded-xl bg-surface2 text-ok font-semibold grid place-items-center text-[14px]">בספרייה ({inLib.rating}★)</div>
           : <Btn variant="soft" onClick={() => onRead({ ...r, ...extra })}><Icon name="BookPlus" size={18} />קראתי, להוספה</Btn>}
         <button type="button" onClick={() => onDismiss(r)} aria-label="לא מעניין אותי" className="min-h-[48px] w-12 grid place-items-center rounded-xl border border-line text-muted"><Icon name="ThumbsDown" size={18} /></button>
-        <a href={r.link} target="_blank" rel="noopener noreferrer" aria-label="לרשומה במקור" className="min-h-[48px] w-12 grid place-items-center rounded-xl border border-line text-muted"><Icon name="ExternalLink" size={18} /></a>
+        <a href={(r.offers && r.offers[0] && r.offers[0].url) || r.link} target="_blank" rel="noopener noreferrer" aria-label="לדף הספר" className="min-h-[48px] w-12 grid place-items-center rounded-xl border border-line text-muted"><Icon name="ExternalLink" size={18} /></a>
       </div>
     </li>
   );
@@ -3084,7 +3238,8 @@ function getRecStore(pid, db) {
       step: resume ? QUESTIONS.length : 0, answers: resume ? resume.answers || {} : { avoid: [] },
       log: resume ? resume.log || [] : [], running: false, recs: resume ? resume.recs || [] : [],
       shown: new Set(resume ? (resume.recs || []).flatMap(r => [r.key, r.title]) : []),
-      session: resume ? { id: resume.id, at: resume.at } : { id: null, at: 0 }, listeners: new Set()
+      session: resume ? { id: resume.id, at: resume.at } : { id: null, at: 0 }, listeners: new Set(),
+      focus: {}, questions: [], qa: [], resuming: false
     };
   }
   return REC_STORES[pid];
@@ -3113,13 +3268,14 @@ function DiscoverTab({ db, update, onPick, notify }) {
   useEffect(() => { if (log.length || recs.length) endRef.current && endRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [log.length, step, recs.length]);
 
   const pushLog = (...entries) => recSet(st, { log: [...st.log, ...entries] });
-  const reset = () => { recSet(st, { step: 0, answers: { avoid: [] }, log: [], recs: [], session: { id: null, at: 0 }, shown: new Set() }); setMulti([]); };
+  const reset = () => { recSet(st, { step: 0, answers: { avoid: [] }, log: [], recs: [], session: { id: null, at: 0 }, shown: new Set(), focus: {}, questions: [], qa: [] }); setMulti([]); setAiText(''); setOther(''); };
   const slim = (r) => ({
     key: r.key, source: r.source, sourceId: r.sourceId, title: r.title, subtitle: r.subtitle || '', authors: r.authors, year: r.year,
     description: (r.description || '').slice(0, 1200), categories: (r.categories || []).slice(0, 6), cover: r.cover, pageCount: r.pageCount,
     language: r.language, isbns: (r.isbns || []).slice(0, 3), link: r.link, publisher: r.publisher || '', reasons: r.reasons || [],
     verifiedAt: r.verifiedAt, verifiedVia: r.verifiedVia || '', ebook: !!r.ebook, ebookLink: r.ebookLink || '', olEbook: !!r.olEbook,
-    sources: r.sources || [], aiFormats: r.aiFormats || null, genres: r.genres || [], descSource: r.descSource || '', descriptionHe: (r.descriptionHe || '').slice(0, 1500)
+    sources: r.sources || [], aiFormats: r.aiFormats || null, genres: r.genres || [], descSource: r.descSource || '', descriptionHe: (r.descriptionHe || '').slice(0, 1500),
+    offers: (r.offers || []).slice(0, 8)
   });
   const saveSession = (ans, usedLang, allRecs) => {
     if (!st.session.id) st.session = { id: uid(), at: Date.now() };
@@ -3150,26 +3306,67 @@ function DiscoverTab({ db, update, onPick, notify }) {
     }
     recSet(st, { running: false });
   };
-  const goAi = async () => {
-    const request = aiText.trim();
-    const ans = { mode: 'ai', request };
-    recSet(st, { answers: ans, step: QUESTIONS.length, running: true });
-    pushLog({ from: 'me', text: request || 'תמליץ לי על הספר הבא' });
-    const progress = (t) => pushLog({ from: 'bot', text: t, progress: true });
+  // המלצה חכמה: בקשה חופשית + מיקוד מהשאלון → 2–4 שאלות המשך של Claude → המלצה (בשרת, ממשיכה גם כשהמסך כבוי)
+  const [other, setOther] = useState('');
+  const progress = (t) => pushLog({ from: 'bot', text: t, progress: true });
+  const toggleFocus = (id, k) => {
+    const f = FOCUS[id], cur = st.focus[id];
+    const next = f.multi ? ((cur || []).includes(k) ? cur.filter(x => x !== k) : [...(cur || []), k]) : (cur === k ? undefined : k);
+    recSet(st, { focus: { ...st.focus, [id]: next } });
+  };
+  const excludeNow = () => [...st.recs.map(x => x.title), ...[...st.shown].filter(k => !k.includes(':') && !k.includes('|'))];
+  const applyRecs = (ans, r, interpretation) => {
+    if (interpretation) pushLog({ from: 'bot', text: interpretation });
+    if (!r.length) progress('לא נשארו המלצות שעברו את האימות. נסו לנסח את הבקשה אחרת.');
+    const all = [...st.recs, ...r];
+    const sh = new Set(st.shown); r.forEach(x => { sh.add(x.key); sh.add(x.title); });
+    recSet(st, { recs: all, shown: sh });
+    saveSession(ans, lang, all);
+  };
+  const runAi = async (ans, qa) => {
+    recSet(st, { running: true, questions: [], qa });
     try {
       const { recs: r, interpretation } = await aiRecommend({
-        books: db.books, request, answers: {}, lang, exclude: [...st.recs.map(x => x.title), ...[...st.shown].filter(k => !k.includes(':') && !k.includes('|'))],
-        dismissed: db.dismissed, history: db.history, want: 5, onProgress: progress
+        books: db.books, request: ans.request, focus: ans.focus, qa, lang, exclude: excludeNow(),
+        dismissed: db.dismissed, history: db.history, want: 5, onProgress: progress, ctx: { ans, qa }
       });
-      if (interpretation) pushLog({ from: 'bot', text: interpretation });
-      if (!r.length) progress('לא נשארו המלצות שעברו את האימות. נסו לנסח את הבקשה אחרת.');
-      const all = [...st.recs, ...r];
-      const sh = new Set(st.shown); r.forEach(x => { sh.add(x.key); sh.add(x.title); });
-      recSet(st, { recs: all, shown: sh });
-      saveSession(ans, lang, all);
+      applyRecs(ans, r, interpretation);
     } catch (e) { progress(e.message); }
     recSet(st, { running: false });
   };
+  const goAi = async () => {
+    const request = aiText.trim();
+    const ans = { mode: 'ai', request, focus: st.focus };
+    const sum = focusSummary(st.focus);
+    recSet(st, { answers: ans, step: QUESTIONS.length, running: true, qa: [] });
+    pushLog({ from: 'me', text: [request || 'תמליץ לי על הספר הבא', ...sum].join(' · ') });
+    let qs = [];
+    try { qs = await aiClarify({ books: db.books, request, focus: st.focus }); } catch (e) { qs = []; }
+    if (qs.length) {
+      pushLog({ from: 'bot', text: `כדי לדייק, ${qs.length} שאלות קצרות (אפשר לדלג):` });
+      recSet(st, { questions: qs, qa: [], running: false });
+    } else runAi(ans, []);
+  };
+  const answerQ = (text) => {
+    const qobj = st.questions[st.qa.length];
+    if (!qobj || !text.trim()) return;
+    const qa = [...st.qa, { q: qobj.question, a: text.trim() }];
+    pushLog({ from: 'bot', text: qobj.question }, { from: 'me', text: text.trim() });
+    setOther('');
+    if (qa.length >= st.questions.length) runAi(st.answers, qa); else recSet(st, { qa });
+  };
+  // המלצה שהתחילה לפני שהאפליקציה נסגרה/רועננה: ממשיכים לחכות לה בשרת
+  useEffect(() => {
+    const p = loadPending();
+    if (!p || st.running || st.resuming || Date.now() - p.at > 30 * 60000) return;
+    const ans = (p.ctx && p.ctx.ans) || { mode: 'ai', request: '' };
+    recSet(st, { running: true, resuming: true, answers: ans, step: QUESTIONS.length });
+    progress('ממשיך את ההמלצה שהתחילה קודם…');
+    resumeRecommend(p, { books: db.books, exclude: excludeNow(), want: 5, onProgress: progress })
+      .then(({ recs: r, interpretation }) => applyRecs(ans, r, interpretation))
+      .catch(e => { savePending(null); progress(e.message); })
+      .finally(() => recSet(st, { running: false, resuming: false }));
+  }, []);
   const q = QUESTIONS[step];
   const done = step >= QUESTIONS.length;
 
@@ -3177,7 +3374,7 @@ function DiscoverTab({ db, update, onPick, notify }) {
     <div className="fade-in">
       <header className="pt-4 pb-3">
         <h1 className="font-display font-medium text-[26px] leading-snug">גלה ספר חדש</h1>
-        <p className="text-muted text-[15px]">4 שאלות קצרות. כל המלצה נבדקת מחדש מול המאגר לפני שהיא מוצגת.</p>
+        <p className="text-muted text-[15px]">{hasAi ? 'ספרו מה בא לכם, בחרו מיקוד, ו-Claude ישאל 2–4 שאלות לדיוק. כל המלצה נבדקת מול המאגרים והחנויות.' : '4 שאלות קצרות. כל המלצה נבדקת מחדש מול המאגר לפני שהיא מוצגת.'}</p>
       </header>
       <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2 mb-4" role="tablist" aria-label="תצוגה">
         {[['chat', 'שיחה', 'MessageCircle'], ['history', `היסטוריה (${(db.history || []).length})`, 'History']].map(([k, l, ic]) => {
@@ -3220,14 +3417,21 @@ function DiscoverTab({ db, update, onPick, notify }) {
           <textarea id="ai-request" value={aiText} onChange={e => setAiText(e.target.value)} rows={3}
             placeholder="למשל: משהו כמו 'יער נורווגי' אבל פחות עצוב; רומן שמתרחש בארץ; ספר שאפשר גם לשמוע"
             className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px] leading-relaxed" />
+          <div className="grid gap-2.5 border-t border-line pt-2">
+            <div className="text-[14px] font-semibold text-muted">מיקוד (לא חובה)</div>
+            {['mood', 'origin', 'fame', 'format'].map(id => <FocusGroup key={id} id={id} focus={st.focus} onToggle={toggleFocus} />)}
+            <details>
+              <summary className="text-[14px] font-semibold text-accent cursor-pointer min-h-[36px] flex items-center">עוד: ז'אנר, קצב, אורך, נושאים להימנע מהם</summary>
+              <div className="grid gap-2.5 pt-1">{['genre', 'pacing', 'length', 'avoid'].map(id => <FocusGroup key={id} id={id} focus={st.focus} onToggle={toggleFocus} />)}</div>
+            </details>
+          </div>
           <Btn onClick={goAi} disabled={running}><Icon name="Sparkles" size={20} />המלצה חכמה</Btn>
-          <p className="text-[12px] text-muted">Claude קורא את הספרייה, ההערות והדירוגים שלך, מחפש ביקורות וניתוחים באתרים המאושרים, וממליץ. כל ספר נבדק מול המאגרים לפני שהוא מוצג. לוקח 1–3 דקות, עלות משוערת 20–35 סנט.</p>
+          <p className="text-[12px] text-muted">Claude קורא את הספרייה, ההערות והדירוגים שלך, שואל 2–4 שאלות לדיוק וממליץ. ההמלצה רצה בשרת, כך שאפשר לכבות את המסך או לעבור אפליקציה. כל ספר נבדק מול הספרייה הלאומית, Google Books והחנויות, עם זמינות וקישור.</p>
         </div>
       )}
       {!hasAi && step === 0 && !log.length && (
         <div className="mb-3"><Notice tone="info">המלצות חכמות עם Claude עוד לא זמינות באפליקציה. בינתיים: השאלון המהיר.</Notice></div>
       )}
-      {hasAi && step === 0 && !log.length && <h2 className="font-semibold text-[15px] text-muted mb-2">או: שאלון מהיר, בלי AI</h2>}
 
       <div className="grid gap-2.5 mb-3" aria-live="polite">
         <Bubble from="bot">היי! בואו נמצא את הספר הבא שלך. אני משתמש רק בספרים שקיימים באמת ב-Google Books או ב-Open Library.</Bubble>
@@ -3247,6 +3451,24 @@ function DiscoverTab({ db, update, onPick, notify }) {
             </div>
           </>
         )}
+        {!running && st.questions.length > 0 && st.qa.length < st.questions.length && (() => {
+          const cq = st.questions[st.qa.length];
+          return (
+            <>
+              <Bubble from="bot">{cq.question} <span className="text-muted text-[13px] tabular">({st.qa.length + 1}/{st.questions.length})</span></Bubble>
+              <div className="flex flex-wrap gap-2 justify-end fade-in">
+                {cq.options.map(o => <Chip key={o} onClick={() => answerQ(o)}>{o}</Chip>)}
+              </div>
+              <form className="flex gap-2 fade-in" onSubmit={(e) => { e.preventDefault(); answerQ(other); }}>
+                <label htmlFor="clarify-other" className="sr-only">תשובה אחרת</label>
+                <input id="clarify-other" value={other} onChange={e => setOther(e.target.value)} placeholder="או תשובה משלך"
+                  className="flex-1 min-w-0 min-h-[44px] px-3 rounded-xl border border-line bg-surface text-[16px]" />
+                <Btn type="submit" variant="soft" disabled={!other.trim()}>שליחה</Btn>
+              </form>
+              <button type="button" className="text-accent font-semibold text-[14px] min-h-[40px] justify-self-start" onClick={() => runAi(st.answers, st.qa)}>דילוג, תמליץ כבר ←</button>
+            </>
+          );
+        })()}
         {running && <Bubble from="bot"><span className="inline-flex items-center gap-2 text-muted"><Spinner size={16} />עובד על זה…</span></Bubble>}
       </div>
 
@@ -3267,9 +3489,9 @@ function DiscoverTab({ db, update, onPick, notify }) {
         </section>
       )}
 
-      {done && !running && (
+      {done && !running && !(st.questions.length > 0 && st.qa.length < st.questions.length) && (
         <div className="grid grid-cols-2 gap-2 mt-4">
-          <Btn variant="soft" onClick={() => answers.mode === 'ai' ? goAi() : go(answers, new Set(shown))}><Icon name="RefreshCw" size={18} />עוד המלצות</Btn>
+          <Btn variant="soft" onClick={() => answers.mode === 'ai' ? runAi(answers, st.qa) : go(answers, new Set(shown))}><Icon name="RefreshCw" size={18} />עוד המלצות</Btn>
           <Btn variant="ghost" onClick={reset}><Icon name="MessageCircle" size={18} />שאלון חדש</Btn>
         </div>
       )}
@@ -3595,7 +3817,7 @@ function InstallPrompt() {
 }
 
 const TABS = [
-  { id: 'library', label: 'ספרים שלי', icon: 'Library' },
+  { id: 'library', label: 'הספרים שלי', icon: 'Library' },
   { id: 'add', label: 'הוספת ספר', icon: 'BookPlus' },
   { id: 'discover', label: 'גלה ספר חדש', icon: 'Sparkles' },
   { id: 'backup', label: 'הגדרות', icon: 'Settings' }

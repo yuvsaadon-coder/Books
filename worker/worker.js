@@ -357,6 +357,107 @@ async function handleStores(req, env, cors, ctx) {
   return new Response(body, { status: 200, headers: { ...cors, 'content-type': 'application/json' } });
 }
 
+// ---------- עבודות רקע (Durable Object): המלצה ממשיכה לרוץ בשרת גם כשהטלפון כבוי או עבר אפליקציה ----------
+// האפליקציה שולחת את הבקשה, מקבלת מזהה, ובודקת מדי כמה שניות אם התשובה מוכנה. אחרי יום העבודה נמחקת.
+const JOB_TURNS = 4;
+async function anthropicOnce(body, env) {
+  let blocked = (await env.LIBRARY.get('blocked-domains', 'json')) || [];
+  const requested = body.tools;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const b = { ...body, tools: sanitizeTools(requested, blocked) };
+    if (!b.tools.length) delete b.tools;
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' }, body: JSON.stringify(b)
+    });
+    const text = await r.text();
+    if (r.ok) return JSON.parse(text);
+    const more = r.status === 400 ? blockedDomainsFrom(text).filter(d => !blocked.includes(d)) : [];
+    if (more.length && attempt < 2) { blocked = [...blocked, ...more]; await env.LIBRARY.put('blocked-domains', JSON.stringify(blocked)); continue; }
+    let msg = text.slice(0, 300);
+    try { msg = JSON.parse(text).error.message || msg; } catch (e) { /* */ }
+    const err = new Error(`(${r.status}) ${msg}`); err.status = r.status; throw err;
+  }
+  throw new Error('blocked domains');
+}
+export async function runJob(job, env, onTurn) {
+  const { submit, ...body } = job;
+  let messages = body.messages;
+  const usage = [], hits = [];
+  for (let turn = 0; turn < JOB_TURNS; turn++) {
+    const msg = await anthropicOnce({ ...body, messages }, env);
+    usage.push(msg.usage || {});
+    (msg.content || []).forEach(b => {
+      if (b.type === 'web_search_tool_result' && Array.isArray(b.content)) b.content.forEach(x => x && x.url && hits.push({ url: x.url, title: x.title || '' }));
+    });
+    if (msg.stop_reason === 'refusal') throw new Error('refusal');
+    const sub = (msg.content || []).find(b => b.type === 'tool_use' && b.name === submit);
+    if (sub) return { input: sub.input, usage, hits };
+    if (msg.stop_reason === 'max_tokens') throw new Error('max_tokens');
+    messages = [...messages, { role: 'assistant', content: msg.content }];
+    if (msg.stop_reason !== 'pause_turn') messages.push({ role: 'user', content: `Now call ${submit} with your final answer.` });
+    if (onTurn) await onTurn(turn + 1);
+  }
+  throw new Error('did_not_finish');
+}
+export class AiJob {
+  constructor(state, env) { this.state = state; this.env = env; }
+  async fetch(req) {
+    const u = new URL(req.url);
+    if (u.pathname === '/start') {
+      await this.state.storage.put('job', await req.json());
+      await this.state.storage.put('status', { status: 'running', at: Date.now(), turns: 0 });
+      await this.state.storage.setAlarm(Date.now() + 10);
+      return new Response('{"ok":true}');
+    }
+    const s = await this.state.storage.get('status');
+    return new Response(JSON.stringify(s || { status: 'missing' }), { headers: { 'content-type': 'application/json' } });
+  }
+  async alarm() {
+    const s = await this.state.storage.get('status');
+    if (!s || s.status !== 'running') { await this.state.storage.deleteAll(); return; }   // ניקוי אחרי יום
+    const job = await this.state.storage.get('job');
+    try {
+      const out = await runJob(job, this.env, (turns) => this.state.storage.put('status', { ...s, turns }));
+      await this.state.storage.put('status', { status: 'done', at: Date.now(), ...out });
+    } catch (e) {
+      await this.state.storage.put('status', { status: 'error', at: Date.now(), error: String((e && e.message) || e), code: (e && e.status) || 0 });
+    }
+    await this.state.storage.delete('job');
+    await this.state.storage.setAlarm(Date.now() + 24 * 3600 * 1000);
+  }
+}
+async function handleJobs(req, env, cors, path) {
+  if (!env.JOBS) return json({ error: 'not_configured' }, 503, cors);
+  if (req.method === 'POST' && path === '/jobs') {
+    if (!env.ANTHROPIC_API_KEY) return json({ error: 'not_configured' }, 503, cors);
+    const day = new Date().toISOString().slice(0, 10);
+    const counterKey = 'ai-count:' + day;
+    const used = parseInt((await env.LIBRARY.get(counterKey)) || '0', 10);
+    if (used >= DAILY_AI_LIMIT) return json({ error: 'daily_limit' }, 429, cors);
+    await env.LIBRARY.put(counterKey, String(used + 1), { expirationTtl: 60 * 60 * 48 });
+    let body;
+    try { body = await req.json(); } catch (e) { return json({ error: 'bad_json' }, 400, cors); }
+    const job = {
+      model: ALLOWED_MODELS.includes(body.model) ? body.model : ALLOWED_MODELS[0],
+      max_tokens: Math.min(Number(body.max_tokens) || 16000, 16000),
+      system: body.system, messages: Array.isArray(body.messages) ? body.messages.slice(0, 4) : [], tools: body.tools,
+      submit: String(body.submit || '').slice(0, 64)
+    };
+    if (body.thinking) job.thinking = { type: 'adaptive' };
+    if (body.output_config && ['low', 'medium', 'high'].includes(body.output_config.effort)) job.output_config = { effort: body.output_config.effort };
+    if (!job.submit || !job.messages.length) return json({ error: 'bad_request' }, 400, cors);
+    const id = crypto.randomUUID();
+    await env.JOBS.get(env.JOBS.idFromName(id)).fetch('https://job/start', { method: 'POST', body: JSON.stringify(job) });
+    return json({ id }, 200, cors);
+  }
+  const m = /^\/jobs\/([0-9a-f-]{36})$/.exec(path);
+  if (req.method === 'GET' && m) {
+    const r = await env.JOBS.get(env.JOBS.idFromName(m[1])).fetch('https://job/status');
+    return new Response(r.body, { status: 200, headers: { ...cors, 'content-type': 'application/json' } });
+  }
+  return json({ error: 'not_found' }, 404, cors);
+}
+
 async function handleSync(req, env, cors) {
   if (req.method === 'GET') {
     const cur = await env.LIBRARY.get('state', 'json');
@@ -385,8 +486,9 @@ export default {
     // אין קוד גישה: השרת פתוח לאפליקציה. ההוצאה מוגבלת ע"י DAILY_AI_LIMIT ותקרת ההוצאה בחשבון Anthropic.
     const path = new URL(req.url).pathname;
     try {
-      if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY, gbooks: !!env.GOOGLE_BOOKS_KEY, nli: !!env.NLI_API_KEY }, 200, cors);
+      if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY, gbooks: !!env.GOOGLE_BOOKS_KEY, nli: !!env.NLI_API_KEY, jobs: !!env.JOBS }, 200, cors);
       if (path === '/gbooks' && req.method === 'GET') return await handleGoogleBooks(req, env, cors, ctx);
+      if (path === '/jobs' || path.startsWith('/jobs/')) return await handleJobs(req, env, cors, path);
       if (path === '/stores' && req.method === 'GET') return await handleStores(req, env, cors, ctx);
       if (path === '/nli' && req.method === 'GET') return await handleNli(req, env, cors, ctx);
       if (path === '/page' && req.method === 'GET') return await handlePage(req, cors, ctx);

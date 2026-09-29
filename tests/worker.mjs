@@ -90,3 +90,21 @@ console.log('worker page verification: ok');
   assert.equal(again.items.length, 1); assert.equal(calls.length, n, 'second call served from cache');
   console.log('worker store search: ok');
 }
+// עבודת רקע: pause_turn ממשיך, סבב בלי הגשה מקבל תזכורת, והתוצאה היא הקלט של כלי ההגשה
+{
+  const { runJob } = await import('../worker/worker.js');
+  const replies = [
+    { stop_reason: 'pause_turn', content: [{ type: 'thinking', thinking: 'x' }], usage: { input_tokens: 10, output_tokens: 5 } },
+    { stop_reason: 'end_turn', content: [{ type: 'text', text: 'hmm' }], usage: { input_tokens: 10, output_tokens: 5 } },
+    { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 't', name: 'submit_recommendations', input: { recommendations: [1] } }], usage: { input_tokens: 10, output_tokens: 5 } }
+  ];
+  const sentBodies = [];
+  globalThis.fetch = async (url, init) => { sentBodies.push(JSON.parse(init.body)); return new Response(JSON.stringify(replies.shift()), { status: 200 }); };
+  const envJ = { ANTHROPIC_API_KEY: 'k', LIBRARY: { get: async () => null, put: async () => {} } };
+  const out = await runJob({ model: 'claude-sonnet-4-6', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }], tools: [{ name: 'submit_recommendations', input_schema: { type: 'object' } }], submit: 'submit_recommendations' }, envJ);
+  assert.deepEqual(out.input, { recommendations: [1] }); assert.equal(out.usage.length, 3);
+  assert.deepEqual(sentBodies[1].messages.map(m => m.role), ['user', 'assistant'], 'pause_turn continues without a nudge');
+  assert.deepEqual(sentBodies[2].messages.map(m => m.role), ['user', 'assistant', 'assistant', 'user'], 'no submission → nudge');
+  assert.ok(!('submit' in sentBodies[0]), 'internal field is not sent to Anthropic');
+  console.log('worker background job: ok');
+}

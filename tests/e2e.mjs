@@ -28,6 +28,7 @@ const BOOKS = [
 ];
 let store = { rev: 0, data: null };
 const aiCalls = [], aiScript = [], errors = [];
+const jobs = new Map(), jobBodies = [], jobHold = new Set();
 let viaProxy = 0, direct = 0;
 
 function sse(blocks, stop) {
@@ -61,7 +62,7 @@ async function phone(browser, name) {
     const u = new URL(url);
     if (u.origin === WORKER) {
       if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
-      if (u.pathname === '/ping') return route.fulfill({ headers: cors, json: { ok: true, ai: true, sync: true, gbooks: true, nli: true } });
+      if (u.pathname === '/ping') return route.fulfill({ headers: cors, json: { ok: true, ai: true, sync: true, gbooks: true, nli: true, jobs: true } });
       if (u.pathname === '/stores') {
         storeCalls++;
         const t = u.searchParams.get('title') || '';
@@ -77,6 +78,23 @@ async function phone(browser, name) {
         if (body.baseRev !== store.rev) return route.fulfill({ status: 409, headers: cors, json: store });
         store = { rev: store.rev + 1, data: body.data };
         return route.fulfill({ headers: cors, json: { rev: store.rev } });
+      }
+      // עבודות רקע: כמו השרת האמיתי, מריצים את כל הסבבים (כולל pause_turn) עד שמגיעה קריאה לכלי ההגשה
+      if (u.pathname === '/jobs' && req.method() === 'POST') {
+        const body = JSON.parse(req.postData()); jobBodies.push(body);
+        const id = '00000000-0000-4000-8000-' + String(jobs.size).padStart(12, '0');
+        let out = { status: 'error', error: 'no step' };
+        for (let step = aiScript.shift(); step; step = aiScript.shift()) {
+          if (step.error) { out = { status: 'error', error: `(${step.error}) invalid_request_error: something_very_long_without_spaces_`.repeat(2) }; break; }
+          const sub = step.blocks.find(b => b.type === 'tool_use' && b.name === body.submit);
+          if (sub) { out = { status: 'done', input: sub.input, usage: [{ input_tokens: 20000, output_tokens: 3000 }], hits: [] }; break; }
+        }
+        jobs.set(id, out);
+        return route.fulfill({ headers: cors, json: { id } });
+      }
+      if (u.pathname.startsWith('/jobs/')) {
+        const id = u.pathname.slice(6);
+        return route.fulfill({ headers: cors, json: jobHold.has(id) ? { status: 'running', turns: 1 } : (jobs.get(id) || { status: 'missing' }) });
       }
       if (u.pathname.startsWith('/v1/messages')) {
         aiCalls.push(JSON.parse(req.postData()));
@@ -204,28 +222,55 @@ try {
     await A.click('button:has-text("טופלו (")');
     assert.equal(await A.locator('ul[aria-label="ספרים שטופלו"] li').count(), 2);
   });
-  await step('smart recommendation: fabricated book rejected, pause_turn resumed, chat kept', async () => {
+  await step('smart recommendation: focus + follow-up questions, runs as a server job, fabricated book rejected, chat kept', async () => {
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 'q1', name: 'submit_questions', input: { questions: [
+      { question: 'כמה עצוב מותר?', options: ['קליל', 'אפשר לבכות'] }, { question: 'קלאסיקה או עכשווי?', options: ['קלאסיקה', 'עכשווי'] }] } }], stop: 'tool_use' });
     const fmt = { print: 'yes', ebook: 'yes', audiobook: 'unknown', notes: 'e-vrit' };
     aiScript.push({ blocks: [{ type: 'thinking', thinking: 'הקורא אוהב ספרות ישראלית' }, { type: 'server_tool_use', id: 's2', name: 'web_fetch', input: { url: 'https://www.haaretz.co.il/x' } }, { type: 'web_fetch_tool_result', tool_use_id: 's2', content: { type: 'web_fetch_tool_error', error_code: 'unavailable' } }], stop: 'pause_turn' });
     aiScript.push({ blocks: [{ type: 'tool_use', id: 't4', name: 'submit_recommendations', input: { interpretation: 'הבנתי.', recommendations: [
       { title_he: 'יש ואין', title_original: 'To Have and Have Not', author: 'ארנסט המינגוויי', isbn: '9789650000028', why: 'בדומה ל"מיכאל שלי".', synopsis_he: '', genres: ['ספרות'], formats: fmt, sources: [{ title: 'הארץ', url: 'https://www.haaretz.co.il/x' }] },
       { title_he: 'ספר מומצא', title_original: 'Invented', author: 'אף אחד', isbn: '', why: 'x', synopsis_he: 'x', genres: [], formats: fmt, sources: [] }] } }], stop: 'tool_use' });
-    await A.click('nav >> text=גלה ספר חדש'); await A.fill('#ai-request', 'משהו קלאסי'); await A.click('button:has-text("המלצה חכמה")');
+    await A.click('nav >> text=גלה ספר חדש'); await A.fill('#ai-request', 'משהו קלאסי');
+    await A.click('[role=group][aria-label="מקור"] button:has-text("ספרות מתורגמת")');
+    await A.click('button:has-text("המלצה חכמה")');
+    await A.click('button:has-text("אפשר לבכות")');
+    await A.fill('#clarify-other', 'בעיקר קלאסיקה אמריקאית'); await A.click('button:has-text("שליחה")');
     await A.waitForSelector('text=ההמלצות שלך', { timeout: 20000 });
     assert.deepEqual(await texts(A.locator('section li .font-display.text-\\[18px\\]')), ['יש ואין']);
-    assert.deepEqual(aiCalls.at(-1).messages.map(m => m.role), ['user', 'assistant']);
+    const job = jobBodies.at(-1);
+    assert.equal(job.submit, 'submit_recommendations'); assert.equal(job.tools.length, 1, 'no web tools in the recommendation job');
+    const jp = job.messages[0].content;
+    assert.ok(jp.includes('מקור: ספרות מתורגמת') && jp.includes('כמה עצוב מותר? → אפשר לבכות') && jp.includes('בעיקר קלאסיקה אמריקאית'), 'focus and follow-up answers reach the model');
+    assert.ok(await A.locator('section li >> text=זמינות').count() > 0);
     await A.click('nav >> text=ספרים שלי'); await A.click('nav >> text=גלה ספר חדש');
     assert.deepEqual(await texts(A.locator('section li .font-display.text-\\[18px\\]')), ['יש ואין']);
   });
+  await step('recommendation keeps going after the app is closed (resumes from the server)', async () => {
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 'q2', name: 'submit_questions', input: { questions: [] } }], stop: 'tool_use' });
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 't6', name: 'submit_recommendations', input: { interpretation: 'שוב.', recommendations: [
+      { title_he: 'קפקא על החוף', title_original: 'Kafka on the Shore', author: 'הרוקי מורקמי', isbn: '', why: 'כמו יער נורווגי.', genres: [] }] } }], stop: 'tool_use' });
+    const before = jobs.size;
+    await A.click('button:has-text("שאלון חדש")'); await A.fill('#ai-request', 'משהו של מורקמי');
+    // השרת "עדיין עובד" כשהאפליקציה נסגרת
+    await A.evaluate(() => { window.__hold = true; });
+    const id = '00000000-0000-4000-8000-' + String(before).padStart(12, '0'); jobHold.add(id);
+    await A.click('button:has-text("המלצה חכמה")');
+    await A.waitForFunction(() => Object.keys(localStorage).some(k => k.startsWith('vrt-rec-job-')));
+    await A.reload();
+    jobHold.delete(id);
+    await A.click('nav >> text=גלה ספר חדש');
+    await A.waitForSelector('text=ממשיך את ההמלצה שהתחילה קודם');
+    await A.waitForSelector('section li >> text=קפקא על החוף', { timeout: 20000 });
+  });
   await step('service error is shown briefly and stays on screen', async () => {
-    aiScript.push({ error: 400 });
+    aiScript.push({ error: 400 }); aiScript.push({ error: 400 });
     await A.click('button:has-text("שאלון חדש")'); await A.fill('#ai-request', 'בדיקה'); await A.click('button:has-text("המלצה חכמה")');
     await A.waitForSelector('text=השירות החזיר שגיאה (400)');
     const [sw, w] = await A.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
     assert.ok(sw <= w, `error overflow ${sw} > ${w}`);
   });
   await step('no horizontal overflow on a 360px phone', async () => {
-    for (const tab of ['ספרים שלי', 'הוספת ספר', 'גלה ספר חדש', 'הגדרות']) {
+    for (const tab of ['הספרים שלי', 'הוספת ספר', 'גלה ספר חדש', 'הגדרות']) {
       await A.click(`nav >> text=${tab}`);
       const [sw, w] = await A.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
       assert.ok(sw <= w, `${tab}: ${sw} > ${w}`);
