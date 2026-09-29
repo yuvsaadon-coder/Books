@@ -18,6 +18,7 @@ const WORKER = 'https://books.yuvsaadon.workers.dev';
 const D = 'תקציר רשמי ארוך מספיק כדי לעבור את בדיקת האורך של המערכת, עם עוד כמה מילים.';
 const LONGEN = 'Toru Watanabe looks back on his days as a college student in Tokyo, when he fell in love with two very different women. '.repeat(3);
 const vol = (id, title, authors, isbn, extra = {}) => ({ id, volumeInfo: { title, authors, language: 'iw', pageCount: 250, publishedDate: '1999', description: D, industryIdentifiers: [{ type: 'ISBN_13', identifier: isbn }], ...extra } });
+let storeCalls = 0;
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 const BOOKS = [
   vol('m1', 'מיכאל שלי', ['עמוס עוז'], '9789650000011'), vol('y1', 'יש ואין', ['ארנסט המינגוויי'], '9789650000028'),
@@ -61,6 +62,11 @@ async function phone(browser, name) {
     if (u.origin === WORKER) {
       if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
       if (u.pathname === '/ping') return route.fulfill({ headers: cors, json: { ok: true, ai: true, sync: true, gbooks: true, nli: true } });
+      if (u.pathname === '/stores') {
+        storeCalls++;
+        const t = u.searchParams.get('title') || '';
+        return route.fulfill({ headers: cors, json: { items: t.includes('רוכבי שחקים') ? [{ url: 'https://www.booknet.co.il/רוכבי-שחקים', title: 'רוכבי שחקים', site: 'booknet.co.il', image: '', description: 'ספר הרפתקאות חדש.', authorOk: true }] : [], via: 'direct' } });
+      }
       if (u.pathname === '/nli') {
         const t = u.searchParams.get('title') || '';
         return route.fulfill({ headers: cors, json: { items: t.includes('נגד הטבע') ? [{ id: '990012345670205171', title: 'נגד הטבע', authors: ['תומס אספדל'], year: '2023', publisher: 'תשע נשמות', language: 'heb', isbns: ['9789650000777'], cover: '', link: 'https://www.nli.org.il/he/books/NNL_ALEPH990012345670205171/NLI' }] : [] } });
@@ -178,6 +184,15 @@ try {
     const card = A.locator('main ul > li').first();
     await card.locator('text=הספרייה הלאומית').waitFor();
     assert.equal(await A.locator('main ul > li > div .font-display.text-\\[18px\\]').first().textContent(), 'נגד הטבע');
+  });
+  await step('new Hebrew book is found in the Israeli stores (Tzomet)', async () => {
+    await A.click('nav >> text=הוספת ספר'); await A.fill('#book-q', 'רוכבי שחקים'); await A.click('form button[type=submit]');
+    const card = A.locator('main ul > li').first();
+    await card.locator('text=מאומת · צומת ספרים').waitFor();
+    assert.equal(await A.locator('main ul > li > div .font-display.text-\\[18px\\]').first().textContent(), 'רוכבי שחקים');
+    const before = storeCalls;
+    await A.fill('#book-q', 'Norwegian Wood'); await A.click('form button[type=submit]'); await A.waitForTimeout(500);
+    assert.equal(storeCalls, before, 'no store search when the catalogues already match');
   });
   await step('free text → queue; to-do and done lists', async () => {
     aiScript.push({ blocks: [{ type: 'tool_use', id: 't3', name: 'submit_books', input: { books: [{ title: 'סיפור פשוט', author: 'עגנון', note: 'אהב מאוד' }, { title: 'קפקא על החוף', author: 'הרוקי מורקמי', note: '' }] } }], stop: 'tool_use' });

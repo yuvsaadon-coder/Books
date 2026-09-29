@@ -25,6 +25,12 @@ const parsed = parseNli([{ [DC + 'recordid']: [{ '@value': '990012345670205171' 
 assert.equal(parsed[0].title, 'נגד הטבע'); assert.deepEqual(parsed[0].authors, ['תומס אספדל']); assert.equal(parsed[0].year, '2023');
 assert.deepEqual(parsed[0].isbns, ['9789657759123']); assert.ok(parsed[0].link.includes('990012345670205171'));
 assert.deepEqual(parseNli({ total_results: 0 }), []);
+import { storeLinksFromHtml, cleanStoreTitle, titleHas } from '../worker/worker.js';
+assert.equal(cleanStoreTitle('נגד הטבע - תומס אספדל | עברית'), 'נגד הטבע');
+assert.ok(titleHas('ספר: נגד הטבע / תומס אספדל', 'נגד הטבע')); assert.ok(!titleHas('הטבע של הדברים', 'נגד הטבע'));
+const links = storeLinksFromHtml('<a href="/cart">עגלה</a><a href="/catalogsearch/result?q=x">נגד הטבע</a><a href="/nged-hateva-123"><span>נגד הטבע</span></a><a href="https://evil.example/x">נגד הטבע</a><a href="/other">ספר אחר</a>',
+  'https://www.steimatzky.co.il/catalogsearch/result/?q=x', 'נגד הטבע');
+assert.deepEqual(links, [{ url: 'https://www.steimatzky.co.il/nged-hateva-123', title: 'נגד הטבע', site: 'steimatzky.co.il' }]);
 console.log('worker: ok');
 import { blockedDomainsFrom } from '../worker/worker.js';
 assert.deepEqual(blockedDomainsFrom(`{"type":"error","error":{"type":"invalid_request_error","message":"The following domains are not accessible to our user agent: ['newyorker.com', 'nytimes.com', 'theguardian.com']. Read more: https://support"}}`), ['newyorker.com', 'nytimes.com', 'theguardian.com']);
@@ -56,3 +62,31 @@ assert.ok(ok.ok); assert.equal(ok.image, 'https://www.e-vrit.co.il/img/1.jpg'); 
 assert.equal(checkPage(page, 'ספר אחר לגמרי', 'הרוקי מורקמי').ok, false);
 assert.equal(checkPage(page, 'העיר וחומתה החמקמקה', 'עמוס עוז').ok, false);
 console.log('worker page verification: ok');
+// סבב מלא של /stores: דפי החיפוש של החנויות לא נגישים → חיפוש אחד מוגבל לחנויות דרך Haiku → רק תוצאות מהחנויות ששמן תואם
+{
+  const store = new Map();
+  globalThis.caches = { default: { match: async (r) => store.get(r.url) ? new Response(store.get(r.url)) : undefined, put: async (r, res) => { store.set(r.url, await res.text()); } } };
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push(String(url));
+    if (String(url).startsWith('https://api.anthropic.com/')) {
+      const body = JSON.parse(init.body);
+      assert.equal(body.tools[0].max_uses, 1); assert.deepEqual(body.tools[0].allowed_domains, ['e-vrit.co.il', 'steimatzky.co.il', 'booknet.co.il']);
+      return new Response(JSON.stringify({ content: [{ type: 'server_tool_use', name: 'web_search' }, { type: 'web_search_tool_result', content: [
+        { type: 'web_search_result', url: 'https://www.e-vrit.co.il/Product/1/נגד_הטבע', title: 'נגד הטבע - תומס אספדל | עברית' },
+        { type: 'web_search_result', url: 'https://www.e-vrit.co.il/Product/2/x', title: 'ספר אחר לגמרי' }] }, { type: 'text', text: 'done' }] }), { status: 200 });
+    }
+    return new Response('blocked', { status: 403 });
+  };
+  const envS = { ANTHROPIC_API_KEY: 'k', LIBRARY: { get: async () => null, put: async () => {} } };
+  const waits = []; const ctx = { waitUntil: (p) => waits.push(p) };
+  const res = await worker.fetch(new Request('https://w/stores?title=' + encodeURIComponent('נגד הטבע') + '&author=' + encodeURIComponent('תומס אספדל'), { headers: { Origin: 'https://yuvsaadon-coder.github.io' } }), envS, ctx);
+  const j = await res.json();
+  assert.equal(j.via, 'search');
+  assert.deepEqual(j.items.map(x => [x.title, x.site]), [['נגד הטבע', 'e-vrit.co.il']]);
+  await Promise.all(waits);
+  const n = calls.length;
+  const again = await (await worker.fetch(new Request('https://w/stores?title=' + encodeURIComponent('נגד הטבע') + '&author=' + encodeURIComponent('תומס אספדל')), envS, ctx)).json();
+  assert.equal(again.items.length, 1); assert.equal(calls.length, n, 'second call served from cache');
+  console.log('worker store search: ok');
+}

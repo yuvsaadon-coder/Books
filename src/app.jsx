@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '14';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '15';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -489,6 +489,20 @@ async function nliSearch(params) {
   }));
 }
 
+// חנויות הספרים (דרך השרת): עברית, סטימצקי, צומת ספרים. דף ספר אמיתי בחנות = הספר קיים
+const STORE_NAMES = { 'e-vrit.co.il': 'עברית', 'steimatzky.co.il': 'סטימצקי', 'booknet.co.il': 'צומת ספרים' };
+async function storeSearch(title, author) {
+  const c = loadCloud();
+  if (!c || !title) return [];
+  const d = await fetchJSON(c.url + '/stores?' + new URLSearchParams({ title, author: author || '' }), 25000);
+  return (d.items || []).map(x => ({
+    key: 'store:' + x.url, source: 'web', sourceId: x.url, title: x.title || title, subtitle: '',
+    authors: author && x.authorOk !== false ? [author] : [], year: '', description: x.description || '', descSource: x.description ? (STORE_NAMES[x.site] || x.site) : '',
+    categories: [], cover: x.image || '', pageCount: 0, language: 'he', isbns: [], link: x.url, avgRating: 0, ratingsCount: 0, publisher: '',
+    verifiedVia: x.site
+  }));
+}
+
 // חיפוש ספר מטקסט חופשי / ISBN / קישור — מחזיר רק רשומות שחזרו מ-API בפועל
 async function searchBooks(input, author) {
   const text = (input || '').trim();
@@ -528,6 +542,13 @@ async function searchBooks(input, author) {
   }
   const nli = await nliP;
   if (nli.length) { results = mergeByKey(results, nli); sources.add('הספרייה הלאומית'); }
+  // ספר עברי שלא נמצא טוב במאגרים: מחפשים בחנויות (שם נמצאים גם ספרים חדשים ומהוצאות קטנות)
+  if ((hasHebrew(text) || hasHebrew(author)) && best(results) < 0.75) {
+    try {
+      const st = await storeSearch(text, author || '');
+      if (st.length) { results = mergeByKey(results, st); uniq(st.map(x => STORE_NAMES[x.verifiedVia] || x.verifiedVia)).forEach(n => sources.add(n)); }
+    } catch (e) { notes.push('החיפוש בחנויות לא הגיב.'); }
+  }
   if (results.length < 3 || best(results) < 0.6) {
     try {
       const ol = await olSearch({ q: full, limit: 10 });
@@ -1108,6 +1129,11 @@ async function verifyAiBook(r, many, hits) {
     if (!res) continue;
     for (const c of res.candidates.slice(0, 10)) if (ok(c) && !out.some(o => o.key === c.key)) out.push(c);
     if (out.length && !many) break;
+  }
+  // לא במאגרים? מחפשים את המהדורה העברית בחנויות
+  if (!out.length && r.title_he && hasHebrew(r.title_he)) {
+    const st = await storeSearch(r.title_he, r.author || '').catch(() => []);
+    if (st.length) out.push(...st.slice(0, many ? 3 : 1).map(x => ({ ...x, subtitle: r.title_original && r.title_original !== r.title_he ? r.title_original : '', description: x.description || r.synopsis_he || '', categories: r.genres || [] })));
   }
   // לא במאגרים (נפוץ בספרים עבריים חדשים)? מאמתים מול דף הספר באתר אמין: השרת נכנס לדף ובודק שהשם והמחבר מופיעים בו
   if (!out.length && r.page_url && loadCloud()) {

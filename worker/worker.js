@@ -1,6 +1,8 @@
 // שרת משפחתי למנהל הקריאה (Cloudflare Worker)
 // 1. /sync         סנכרון הספרייה בין מכשירים (KV)
 // 2. /v1/messages  גישה ל-Claude עם חיפוש ברשת שמוגבל לאתרים אמינים. המפתח נשמר כאן ולא בדפדפן.
+// 3. /stores       חיפוש ספר בעברית, סטימצקי וצומת ספרים (דף ספר אמיתי = אימות)
+// 4. /gbooks /nli /page  Google Books, הספרייה הלאומית, ובדיקת דף ספר
 //
 // הגדרות נדרשות ב-Cloudflare (ראו README.md בתיקייה הזו):
 //   Secret   ANTHROPIC_API_KEY  מפתח ה-API של Anthropic
@@ -239,6 +241,111 @@ async function handlePage(req, cors, ctx) {
   return json({ ...res, url: u.toString(), site: host }, 200, cors);
 }
 
+// ---------- חיפוש בחנויות: עברית, סטימצקי, צומת ספרים ----------
+// 1. ניסיון חינמי: דף תוצאות החיפוש של החנות עצמה, ומתוכו קישורים לדפי ספרים ששמם תואם.
+// 2. אם זה לא הצליח (דף שנבנה ב-JavaScript או חסום): חיפוש אחד, מוגבל לשלושת האתרים, דרך Claude Haiku
+//    (בלי "חשיבה"; לוקחים רק את תוצאות מנוע החיפוש: כתובת + כותרת). עולה כסנט, כמה שניות.
+export const STORE_SITES = ['e-vrit.co.il', 'steimatzky.co.il', 'booknet.co.il'];
+const STORE_SEARCH_URLS = [
+  (q) => 'https://www.steimatzky.co.il/catalogsearch/result/?q=' + encodeURIComponent(q),
+  (q) => 'https://www.booknet.co.il/search?q=' + encodeURIComponent(q),
+  (q) => 'https://www.e-vrit.co.il/Search/' + encodeURIComponent(q)
+];
+const STORE_DAILY_LIMIT = 400;
+const storeOf = (url) => { try { const h = new URL(url).hostname.replace(/^www\./, ''); return STORE_SITES.find(d => h === d || h.endsWith('.' + d)) || ''; } catch (e) { return ''; } };
+// הכותרת מכילה את כל המילים של שם הספר
+export function titleHas(text, title) {
+  const t = ' ' + heNorm(text) + ' ';
+  const words = heNorm(title).split(' ').filter(w => w.length > 1);
+  return words.length > 0 && words.every(w => t.includes(' ' + w + ' ') || t.includes(' ' + w) );
+}
+// "נגד הטבע - תומס אספדל | עברית" → "נגד הטבע"
+export function cleanStoreTitle(t) {
+  return decodeEntities(String(t || '')).split(/\s[|–—]\s|\s-\s/)[0].replace(/^(ספר|ספר דיגיטלי|ספר קולי)\s*[:|-]\s*/, '').trim();
+}
+// קישורים לדפי מוצר מתוך דף תוצאות: <a href=...>שם</a> באותו אתר, ששמם מכיל את שם הספר
+export function storeLinksFromHtml(html, base, title) {
+  const out = [];
+  const re = /<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) && out.length < 8) {
+    let url;
+    try { url = new URL(decodeEntities(m[1]), base).toString(); } catch (e) { continue; }
+    if (!storeOf(url) || /search|catalogsearch|login|cart|account/i.test(url)) continue;
+    const titleAttr = (/title=["']([^"']+)["']/i.exec(m[0]) || [])[1] || '';
+    const text = decodeEntities((m[2] || '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim() || titleAttr;
+    if (text.length < 2 || text.length > 200 || !titleHas(text, title)) continue;
+    if (!out.some(o => o.url === url)) out.push({ url, title: cleanStoreTitle(text), site: storeOf(url) });
+  }
+  return out;
+}
+async function fetchHtml(url, ctx, ttl = 86400) {
+  const cacheKey = new Request('https://page-cache/' + encodeURIComponent(url));
+  const hit = await caches.default.match(cacheKey);
+  if (hit) return hit.text();
+  const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 6000);
+  try {
+    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BooksFamilyApp/1.0)', 'Accept-Language': 'he,en;q=0.8' }, redirect: 'follow', signal: ctrl.signal });
+    if (!r.ok) return null;
+    const html = (await r.text()).slice(0, 2000000);
+    ctx.waitUntil(caches.default.put(cacheKey, new Response(html, { headers: { 'content-type': 'text/html', 'cache-control': 'public, max-age=' + ttl } })));
+    return html;
+  } catch (e) { return null; } finally { clearTimeout(timer); }
+}
+async function storeSearchViaClaude(env, q) {
+  if (!env.ANTHROPIC_API_KEY) return [];
+  const day = new Date().toISOString().slice(0, 10);
+  const counterKey = 'store-count:' + day;
+  const used = parseInt((await env.LIBRARY.get(counterKey)) || '0', 10);
+  if (used >= STORE_DAILY_LIMIT) return [];
+  await env.LIBRARY.put(counterKey, String(used + 1), { expirationTtl: 60 * 60 * 48 });
+  const blocked = (await env.LIBRARY.get('blocked-domains', 'json')) || [];
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001', max_tokens: 200,
+      tools: [{ type: 'web_search_20250305', name: 'web_search', allowed_domains: STORE_SITES.filter(d => !blocked.includes(d)), max_uses: 1 }],
+      messages: [{ role: 'user', content: `Run exactly one web search for the book page of: ${q}. Do not search again. Then reply only: done` }]
+    })
+  });
+  if (!r.ok) return [];
+  const msg = await r.json();
+  const out = [];
+  for (const b of msg.content || []) {
+    if (b.type === 'web_search_tool_result' && Array.isArray(b.content)) b.content.forEach(x => x && x.url && storeOf(x.url) && out.push({ url: x.url, title: x.title || '', site: storeOf(x.url) }));
+  }
+  return out;
+}
+async function handleStores(req, env, cors, ctx) {
+  const p = new URL(req.url).searchParams;
+  const title = (p.get('title') || '').slice(0, 150).trim(), author = (p.get('author') || '').slice(0, 80).trim();
+  if (!title) return json({ error: 'missing' }, 400, cors);
+  const cacheKey = new Request('https://stores-cache/' + encodeURIComponent(title + '|' + author));
+  const cached = await caches.default.match(cacheKey);
+  if (cached) return new Response(cached.body, { status: 200, headers: { ...cors, 'content-type': 'application/json', 'x-cache': 'hit' } });
+  const q = author ? `${title} ${author}` : title;
+  let found = [], via = 'direct';
+  const pages = await Promise.all(STORE_SEARCH_URLS.map(f => f(title)).map(u => fetchHtml(u, ctx, 3600).then(h => h ? storeLinksFromHtml(h, u, title) : [])));
+  pages.forEach(list => list.forEach(x => { if (!found.some(f => f.url === x.url)) found.push(x); }));
+  if (!found.length) {
+    via = 'search';
+    found = (await storeSearchViaClaude(env, q)).filter(x => titleHas(x.title, title)).map(x => ({ ...x, title: cleanStoreTitle(x.title) }));
+  }
+  found = found.slice(0, 5);
+  // פרטים מדף הספר עצמו (כריכה, תקציר, מחבר), אם אפשר להיכנס אליו
+  await Promise.all(found.slice(0, 3).map(async (x) => {
+    const html = await fetchHtml(x.url, ctx);
+    if (!html) return;
+    const c = checkPage(html, title, author);
+    x.image = c.image || ''; x.description = c.description || ''; x.authorOk = c.authorOk;
+  }));
+  if (author) found = found.filter(x => x.authorOk !== false || !x.description);
+  const body = JSON.stringify({ items: found, via });
+  ctx.waitUntil(caches.default.put(cacheKey, new Response(body, { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=' + (found.length ? 604800 : 43200) } })));
+  return new Response(body, { status: 200, headers: { ...cors, 'content-type': 'application/json' } });
+}
+
 async function handleSync(req, env, cors) {
   if (req.method === 'GET') {
     const cur = await env.LIBRARY.get('state', 'json');
@@ -269,6 +376,7 @@ export default {
     try {
       if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY, gbooks: !!env.GOOGLE_BOOKS_KEY, nli: !!env.NLI_API_KEY }, 200, cors);
       if (path === '/gbooks' && req.method === 'GET') return await handleGoogleBooks(req, env, cors, ctx);
+      if (path === '/stores' && req.method === 'GET') return await handleStores(req, env, cors, ctx);
       if (path === '/nli' && req.method === 'GET') return await handleNli(req, env, cors, ctx);
       if (path === '/page' && req.method === 'GET') return await handlePage(req, cors, ctx);
       if (path === '/sync') return await handleSync(req, env, cors);
