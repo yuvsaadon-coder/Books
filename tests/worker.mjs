@@ -16,6 +16,15 @@ assert.deepEqual(narrow.allowed_domains, ['e-vrit.co.il']);
 assert.equal(narrow.max_uses, 5);
 assert.equal(sanitizeTools([{ type: 'web_search_20260209', name: 'web_search', max_uses: 2 }])[0].max_uses, 2);
 assert.ok(sanitizeTools([{ type: 'web_search_20260209', name: 'web_search', allowed_domains: ['evil.example'] }])[0].allowed_domains.length > 5, 'unknown-only list falls back to the full trusted list');
+import { parseNli, nliPerson } from '../worker/worker.js';
+assert.equal(nliPerson('אספדל, תומס, 1961- מחבר'), 'תומס אספדל');
+assert.equal(nliPerson('Espedal, Tomas, 1961- author'), 'Tomas Espedal');
+const DC = 'http://purl.org/dc/elements/1.1/';
+const parsed = parseNli([{ [DC + 'recordid']: [{ '@value': '990012345670205171' }], [DC + 'title']: [{ '@value': 'נגד הטבע / תומס אספדל ; מנורווגית: דנה כספי' }],
+  [DC + 'creator']: [{ '@value': 'אספדל, תומס, 1961- מחבר' }], [DC + 'date']: [{ '@value': '2023' }], [DC + 'identifier']: [{ '@value': '978-965-7759-12-3' }] }]);
+assert.equal(parsed[0].title, 'נגד הטבע'); assert.deepEqual(parsed[0].authors, ['תומס אספדל']); assert.equal(parsed[0].year, '2023');
+assert.deepEqual(parsed[0].isbns, ['9789657759123']); assert.ok(parsed[0].link.includes('990012345670205171'));
+assert.deepEqual(parseNli({ total_results: 0 }), []);
 console.log('worker: ok');
 import { blockedDomainsFrom } from '../worker/worker.js';
 assert.deepEqual(blockedDomainsFrom(`{"type":"error","error":{"type":"invalid_request_error","message":"The following domains are not accessible to our user agent: ['newyorker.com', 'nytimes.com', 'theguardian.com']. Read more: https://support"}}`), ['newyorker.com', 'nytimes.com', 'theguardian.com']);

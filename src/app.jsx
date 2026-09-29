@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '13';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '14';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -477,6 +477,18 @@ async function bridgeFromWikidata(text, author) {
   return out;
 }
 
+// הספרייה הלאומית (דרך השרת): הקטלוג של כל מה שיוצא לאור בישראל, כולל ספרים חדשים והוצאות קטנות שאינם ב-Google
+async function nliSearch(params) {
+  const c = loadCloud();
+  if (!c || SYNC.nli === false) return [];
+  const d = await fetchJSON(c.url + '/nli?' + new URLSearchParams(params));
+  return (d.items || []).map(x => ({
+    key: 'nli:' + (x.id || x.title), source: 'nli', sourceId: x.id, title: x.title, subtitle: '', authors: x.authors || [], year: x.year || '',
+    description: '', categories: [], cover: x.cover || '', pageCount: 0, language: x.language === 'heb' || hasHebrew(x.title) ? 'he' : x.language,
+    isbns: x.isbns || [], link: x.link || '', avgRating: 0, ratingsCount: 0, publisher: x.publisher || '', verifiedVia: 'הספרייה הלאומית'
+  }));
+}
+
 // חיפוש ספר מטקסט חופשי / ISBN / קישור — מחזיר רק רשומות שחזרו מ-API בפועל
 async function searchBooks(input, author) {
   const text = (input || '').trim();
@@ -490,6 +502,9 @@ async function searchBooks(input, author) {
   const best = (list) => list.reduce((m, c) => Math.max(m, matchScore(c, full)), 0);
   const tried = [];
   let results = [];
+  // בעברית: הספרייה הלאומית במקביל ל-Google (שם נמצאים גם ספרים שאין בשום מאגר בינלאומי)
+  const nliP = hasHebrew(text) || hasHebrew(author) ? nliSearch({ title: text, author: author || '' })
+    .then(list => (list.length || !author) ? list : nliSearch({ title: text })).catch(() => []) : Promise.resolve([]);
   if (googleAvailable()) {
     try {
       // Google מחיל inauthor רק על המילה הראשונה, לכן מסננים לפי שם המשפחה
@@ -511,6 +526,8 @@ async function searchBooks(input, author) {
   } else {
     notes.push((googleState.lastError || 'Google Books לא זמין כרגע') + ' — משתמשים ב-Open Library.');
   }
+  const nli = await nliP;
+  if (nli.length) { results = mergeByKey(results, nli); sources.add('הספרייה הלאומית'); }
   if (results.length < 3 || best(results) < 0.6) {
     try {
       const ol = await olSearch({ q: full, limit: 10 });
@@ -553,6 +570,10 @@ async function lookupISBN(isbn) {
   try {
     const b = await olByISBN(isbn);
     if (b) return { candidates: [b], notes, sources: ['Open Library'] };
+  } catch (e) { /* לא נמצא */ }
+  try {
+    const n = await nliSearch({ isbn });
+    if (n.length) return { candidates: n.slice(0, 5), notes, sources: ['הספרייה הלאומית'] };
   } catch (e) { /* לא נמצא */ }
   notes.push(`לא נמצא ספר עם ISBN ${isbn} באף מקור. בדקו את המספר או חפשו לפי שם.`);
   return { candidates: [], notes, sources: [] };
@@ -773,14 +794,14 @@ const aiAvailable = () => !!loadCloud() && SYNC.ai !== false;
 const CLOUD_CANDIDATES = ['https://books.yuvsaadon.workers.dev', 'https://books.yuvsaadon-coder.workers.dev', 'https://books.yuvsaadon1.workers.dev', 'https://books.yuval-saadon.workers.dev', 'https://books.yuvalsaadon.workers.dev'];
 async function discoverCloud() {
   if (loadCloud()) {
-    try { const r = await fetch(loadCloud().url + '/ping'); const j = await r.json(); setSyncStatus({ ai: !!j.ai, gbooks: !!j.gbooks }); } catch (e) { /* */ }
+    try { const r = await fetch(loadCloud().url + '/ping'); const j = await r.json(); setSyncStatus({ ai: !!j.ai, gbooks: !!j.gbooks, nli: !!j.nli }); } catch (e) { /* */ }
     return true;
   }
   for (const u of CLOUD_CANDIDATES) {
     try {
       const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 6000);
       const r = await fetch(u + '/ping', { signal: ctrl.signal }); clearTimeout(t);
-      if (r.ok) { const j = await r.json(); if (j && j.ok) { localStorage.setItem('vrt_server_url', u); setSyncStatus({ ai: !!j.ai, gbooks: !!j.gbooks }); return true; } }
+      if (r.ok) { const j = await r.json(); if (j && j.ok) { localStorage.setItem('vrt_server_url', u); setSyncStatus({ ai: !!j.ai, gbooks: !!j.gbooks, nli: !!j.nli }); return true; } }
     } catch (e) { /* ננסה את הבאה */ }
   }
   setSyncStatus({ status: 'error', error: 'השרת לא נמצא. שלחו ל-Claude Code את כתובת ה-Worker מ-Cloudflare.' });
@@ -851,7 +872,7 @@ function applyLocal(state) {
   });
   window.dispatchEvent(new Event('vrt-profiles-changed'));
 }
-const SYNC = { running: false, again: false, status: 'off', lastAt: 0, error: '', ai: null, gbooks: null };
+const SYNC = { running: false, again: false, status: 'off', lastAt: 0, error: '', ai: null, gbooks: null, nli: null };
 function setSyncStatus(patch) { Object.assign(SYNC, patch); window.dispatchEvent(new Event('vrt-sync-status')); }
 async function syncNow() {
   if (!loadCloud()) { setSyncStatus({ status: 'off' }); return; }
@@ -1055,7 +1076,7 @@ async function aiResolveBook(text, author, onProgress) {
     v.forEach(x => { if (!found.some(f => f.key === x.key)) found.push(x); });
   }
   return {
-    candidates: found, sources: ['Claude + ' + uniq(found.map(f => f.source === 'google' ? 'Google Books' : f.source === 'openlibrary' ? 'Open Library' : f.source === 'web' ? f.verifiedVia : 'Wikidata')).join(' + ')],
+    candidates: found, sources: ['Claude + ' + uniq(found.map(f => f.source === 'google' ? 'Google Books' : f.source === 'openlibrary' ? 'Open Library' : f.source === 'web' || f.source === 'nli' ? f.verifiedVia : 'Wikidata')).join(' + ')],
     notes: found.length ? [] : ['גם הזיהוי החכם לא מצא ספר שאפשר לאמת במאגרים.'],
     tried: (input.candidates || []).map(c => `${c.title}${c.author ? ' מאת ' + c.author : ''}`), cost
   };
@@ -1065,8 +1086,6 @@ async function aiResolveBook(text, author, onProgress) {
 // אתרי חנויות והוצאות בישראל: דף ספר שם הוא הוכחה שהספר קיים
 const BOOK_SITES = ['e-vrit.co.il', 'steimatzky.co.il', 'booknet.co.il', 'simania.co.il', 'mendele.co.il', 'indiebook.co.il', 'nli.org.il',
   'am-oved.co.il', 'kibutz-poalim.co.il', 'ybook.co.il', 'kinbooks.co.il', 'keter-books.co.il', 'modan.co.il', 'abayit-books.com', '9livespress.com', 'pardes.co.il', 'resling.co.il'];
-// להמלצות: חיפוש רק ברשתות הגדולות ובהוצאות קטנות מובילות, כדי לאשר מהדורה עברית בלי לסרוק את כל הרשת
-const REC_SITES = ['e-vrit.co.il', 'steimatzky.co.il', 'booknet.co.il', '9livespress.com', 'abayit-books.com', 'pardes.co.il', 'resling.co.il'];
 const siteOf = (url) => { try { const h = new URL(url).hostname.replace(/^www\./, ''); return BOOK_SITES.find(d => h === d || h.endsWith('.' + d)) || ''; } catch (e) { return ''; } };
 // כותרת תוצאת החיפוש מכילה את שם הספר כמילים שלמות
 function hitMatches(hit, title) {
@@ -1176,13 +1195,13 @@ async function aiRecommend({ books, request, answers, lang, exclude, dismissed, 
   const excludeTitles = uniq([...books.map(b => b.title), ...exclude, ...(history || []).flatMap(h => (h.recs || []).map(r => r.title))]).slice(0, 300);
   onProgress && onProgress(`שולח ל-Claude את הספרייה שלך (${books.length} ספרים) ואת הבקשה. זה לוקח בדרך כלל פחות מדקה.`);
   const { input, cost, hits } = await aiRun({
-    effort: 'medium', web: { sites: REC_SITES, searches: 4 }, onProgress,
+    effort: 'medium', web: false, onProgress,
     system: [
       'You are a literary advisor with deep knowledge of world and Israeli literature. Recommend books this specific reader will love.',
       'Think about the reader: what their highly rated books and notes have in common (themes, voice, structure, emotional register, pace, setting), and what they rated low.',
       'Choose candidates from your own knowledge of the books, their critical reception and literary analyses. Prefer well-regarded books over merely popular ones when the reader\'s taste is literary. Decide quickly.',
-      'Then confirm the Hebrew editions with web search. The search is limited to Israeli book stores and publishers (e-vrit, Steimatzky, Tzomet Sfarim, small publishers), so it also finds new Hebrew books missing from international catalogues. You have at most 4 searches in total: put several titles in one query (e.g. "title1" OR "title2"). Do not fetch pages; the search results are enough.',
-      'Recommend only real, published books. title_he must be the exact title of a Hebrew edition you saw in the search results or know for certain (otherwise empty; never translate a title yourself). In page_url put the book page URL from the search results when there is one. Give the ISBN only if you are sure. For formats use "unknown" unless a result says so. Never recommend a book the reader already has.',
+      'You have no web access. Every book you name is checked afterwards against the National Library of Israel catalogue (all Hebrew books published in Israel), Google Books and Open Library; books that are not found are dropped.',
+      'Recommend only real, published books. title_he must be the exact title of a Hebrew edition you know exists (otherwise empty; never translate a title yourself). Leave page_url and sources empty. Give the ISBN only if you are sure. For formats use "unknown" unless you are sure. Never recommend a book the reader already has.',
       '`why` must connect the book to specific books and notes from the reader\'s library and to how critics describe it, in 2–4 sentences.',
       `Language: ${langText}. ` + HEBREW_OUT
     ].join('\n'),
@@ -1200,7 +1219,7 @@ async function aiRecommend({ books, request, answers, lang, exclude, dismissed, 
             formats: FORMAT_SCHEMA, sources: SOURCES_SCHEMA } } } } }
     }
   });
-  onProgress && onProgress(`Claude הציע ${input.recommendations.length} ספרים. בודק כל אחד מול Google Books ו-Open Library…`);
+  onProgress && onProgress(`Claude הציע ${input.recommendations.length} ספרים. בודק כל אחד מול הספרייה הלאומית, Google Books ו-Open Library…`);
   const recs = [];
   let rejected = 0;
   for (const r of input.recommendations) {

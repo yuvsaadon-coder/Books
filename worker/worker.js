@@ -134,6 +134,61 @@ async function handleGoogleBooks(req, env, cors, ctx) {
   return new Response(body, { status: up.status, headers: { ...cors, 'content-type': 'application/json' } });
 }
 
+// הספרייה הלאומית: כמעט כל ספר שיוצא לאור בישראל נרשם בה (חוק הספרים), כולל ספרים חדשים והוצאות קטנות.
+// המפתח שמור בשרת (NLI_API_KEY). התשובה מנורמלת כאן, כדי שהאפליקציה תקבל מבנה פשוט.
+const nliVals = (v) => v == null ? [] : Array.isArray(v) ? v.flatMap(nliVals)
+  : typeof v === 'object' ? nliVals(v['@value'] ?? v.value ?? v['@id'] ?? null) : [String(v).trim()].filter(Boolean);
+const nliField = (item, name) => Object.keys(item).filter(k => k === name || k.endsWith('/' + name) || k.endsWith('#' + name)).flatMap(k => nliVals(item[k]));
+// "אספדל, תומס, 1961- מחבר" → "תומס אספדל"
+export function nliPerson(s) {
+  const parts = String(s).split(',').map(x => x.trim()).filter(x => x && !/\d/.test(x) && !/^(author|translator|editor|מחבר|מתרגם|עורך)/i.test(x));
+  const name = parts.length >= 2 ? `${parts[1]} ${parts[0]}` : (parts[0] || '');
+  return name.replace(/\s*(author|translator|editor|מחבר|מחברת|מתרגם|מתרגמת|עורך|עורכת)\.?$/i, '').replace(/[.,\s]+$/, '').trim();
+}
+export function parseNli(data) {
+  const arr = Array.isArray(data) ? data : ((data && (data.items || data.results || data.docs || Object.values(data).find(Array.isArray))) || []);
+  return arr.filter(x => x && typeof x === 'object').map(item => {
+    const rawTitle = nliField(item, 'title')[0] || '';
+    const title = rawTitle.split(' / ')[0].replace(/\s*[:;]\s*$/, '').trim();
+    const id = (nliField(item, 'recordid')[0] || nliField(item, 'identifier').find(x => /^\d{9,}$/.test(x)) || '').replace(/\D/g, '');
+    const all = [...nliField(item, 'identifier'), ...nliField(item, 'isbn')].join(' ');
+    const isbns = [...new Set((all.match(/97[89][\d-]{10,14}|\b\d{9}[\dXx]\b/g) || []).map(x => x.replace(/-/g, '')).filter(x => x.length === 10 || x.length === 13))];
+    const date = nliField(item, 'date')[0] || nliField(item, 'start_date')[0] || '';
+    return {
+      id, title, subtitle: '',
+      authors: [...new Set(nliField(item, 'creator').map(nliPerson).filter(Boolean))].slice(0, 3),
+      year: (date.match(/\d{4}/) || [''])[0], publisher: (nliField(item, 'publisher')[0] || '').replace(/^[^:]*:\s*/, '').replace(/[,\s]+\d{4}.*$/, '').trim(),
+      language: (nliField(item, 'language')[0] || '').slice(0, 3).toLowerCase(), isbns,
+      cover: nliField(item, 'thumbnail')[0] || '',
+      link: id ? `https://www.nli.org.il/he/books/NNL_ALEPH${id}/NLI` : ''
+    };
+  }).filter(b => b.title);
+}
+async function handleNli(req, env, cors, ctx) {
+  if (!env.NLI_API_KEY) return json({ error: 'not_configured' }, 503, cors);
+  const p = new URL(req.url).searchParams;
+  const title = (p.get('title') || '').slice(0, 200), author = (p.get('author') || '').slice(0, 100), isbn = (p.get('isbn') || '').replace(/[^\dXx]/g, '');
+  if (!title && !isbn) return json({ error: 'missing' }, 400, cors);
+  const clean = (s) => s.replace(/[,;]/g, ' ').replace(/\s+/g, ' ').trim();
+  const query = isbn ? `any,contains,${isbn}` : `title,contains,${clean(title)}` + (author ? `,AND;creator,contains,${clean(author)}` : '');
+  const u = new URL('https://api.nli.org.il/openlibrary/search');
+  u.searchParams.set('query', query); u.searchParams.set('output_format', 'json');
+  u.searchParams.set('material_type', 'books'); u.searchParams.set('rows', '15');
+  const cacheKey = new Request('https://nli-cache/' + encodeURIComponent(u.toString()));
+  const cache = caches.default;
+  const hit = await cache.match(cacheKey);
+  if (hit) return new Response(hit.body, { status: 200, headers: { ...cors, 'content-type': 'application/json', 'x-cache': 'hit' } });
+  u.searchParams.set('api_key', env.NLI_API_KEY);
+  const up = await fetch(u.toString(), { headers: { accept: 'application/json' } });
+  if (!up.ok) return json({ error: 'upstream', status: up.status }, 502, cors);
+  const text = await up.text();
+  let items = [];
+  try { items = parseNli(JSON.parse(text)); } catch (e) { items = []; }
+  const body = JSON.stringify({ items });
+  ctx.waitUntil(cache.put(cacheKey, new Response(body, { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=86400' } })));
+  return new Response(body, { status: 200, headers: { ...cors, 'content-type': 'application/json' } });
+}
+
 // אימות ספר מדף באתר אמין (חנות/הוצאה): השרת נכנס לדף, בודק שהשם (והמחבר) מופיעים בו,
 // ומחזיר כותרת, כריכה ותקציר מתגי ה-og של הדף. משמש לספרים עבריים שאינם במאגרים הפתוחים.
 const heNorm = (t) => (t || '').toLowerCase().replace(/[\u0591-\u05C7]/g, '').replace(/&[#a-z0-9]+;/gi, ' ')
@@ -212,8 +267,9 @@ export default {
     // אין קוד גישה: השרת פתוח לאפליקציה. ההוצאה מוגבלת ע"י DAILY_AI_LIMIT ותקרת ההוצאה בחשבון Anthropic.
     const path = new URL(req.url).pathname;
     try {
-      if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY, gbooks: !!env.GOOGLE_BOOKS_KEY }, 200, cors);
+      if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY, gbooks: !!env.GOOGLE_BOOKS_KEY, nli: !!env.NLI_API_KEY }, 200, cors);
       if (path === '/gbooks' && req.method === 'GET') return await handleGoogleBooks(req, env, cors, ctx);
+      if (path === '/nli' && req.method === 'GET') return await handleNli(req, env, cors, ctx);
       if (path === '/page' && req.method === 'GET') return await handlePage(req, cors, ctx);
       if (path === '/sync') return await handleSync(req, env, cors);
       if (path.startsWith('/v1/messages') && req.method === 'POST') return await handleAI(req, env, cors);

@@ -60,7 +60,11 @@ async function phone(browser, name) {
     const u = new URL(url);
     if (u.origin === WORKER) {
       if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
-      if (u.pathname === '/ping') return route.fulfill({ headers: cors, json: { ok: true, ai: true, sync: true, gbooks: true } });
+      if (u.pathname === '/ping') return route.fulfill({ headers: cors, json: { ok: true, ai: true, sync: true, gbooks: true, nli: true } });
+      if (u.pathname === '/nli') {
+        const t = u.searchParams.get('title') || '';
+        return route.fulfill({ headers: cors, json: { items: t.includes('נגד הטבע') ? [{ id: '990012345670205171', title: 'נגד הטבע', authors: ['תומס אספדל'], year: '2023', publisher: 'תשע נשמות', language: 'heb', isbns: ['9789650000777'], cover: '', link: 'https://www.nli.org.il/he/books/NNL_ALEPH990012345670205171/NLI' }] : [] } });
+      }
       if (u.pathname === '/sync' && req.method() === 'GET') return route.fulfill({ headers: cors, json: store });
       if (u.pathname === '/sync' && req.method() === 'PUT') {
         const body = JSON.parse(req.postData());
@@ -168,6 +172,12 @@ try {
     await A.click('button:has-text("זיהוי חכם עם AI")'); await A.waitForSelector('main ul > li:has-text("העיר וחומתה החמקמקה")');
     assert.deepEqual(await texts(A.locator('main ul > li > div .font-display.text-\\[18px\\]')), ['העיר וחומתה החמקמקה']);
     assert.ok((await A.locator('main ul > li').first().textContent()).includes('מאומת · עברית'));
+  });
+  await step('Hebrew book missing from Google is found in the National Library catalogue', async () => {
+    await A.click('nav >> text=הוספת ספר'); await A.fill('#book-q', 'נגד הטבע'); await A.click('form button[type=submit]');
+    const card = A.locator('main ul > li').first();
+    await card.locator('text=הספרייה הלאומית').waitFor();
+    assert.equal(await A.locator('main ul > li > div .font-display.text-\\[18px\\]').first().textContent(), 'נגד הטבע');
   });
   await step('free text → queue; to-do and done lists', async () => {
     aiScript.push({ blocks: [{ type: 'tool_use', id: 't3', name: 'submit_books', input: { books: [{ title: 'סיפור פשוט', author: 'עגנון', note: 'אהב מאוד' }, { title: 'קפקא על החוף', author: 'הרוקי מורקמי', note: '' }] } }], stop: 'tool_use' });
