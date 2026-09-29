@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '23';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '24';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -277,7 +277,7 @@ function groupEditions(list) {
   });
   groups.forEach(g => {
     // הרשומה הראשית: זו עם הכי הרבה מידע (תקציר, כריכה)
-    const info = (c) => (isHebrewEdition(c) ? 3 : 0) + (hasHebrew(c.description) ? 1.5 : 0) + (c.description ? 2 : 0) + (c.cover ? 1 : 0) + (c.pageCount ? 0.5 : 0) + (c.authors.length ? 1 : 0) + (c.authors.some(hasHebrew) ? 0.5 : 0);
+    const info = (c) => (isHebrewEdition(c) ? 3 : 0) + (isIsraeliRecord(c) ? 2.5 : 0) + (hasHebrew(c.description) ? 1.5 : 0) + (c.description ? 2 : 0) + (c.cover ? 1 : 0) + (c.pageCount ? 0.5 : 0) + (c.authors.length ? 1 : 0) + (c.authors.some(hasHebrew) ? 0.5 : 0);
     g.main = g.editions.slice().sort((a, b) => info(b) - info(a))[0];
   });
   return groups.slice(0, 10);
@@ -382,12 +382,14 @@ function queryVariants(text, author) {
   return out.slice(0, 8);
 }
 
+// מהדורה ישראלית: דף בחנות/הוצאה, רשומה בספרייה הלאומית, או ISBN ישראלי (965). מקבלת עדיפות על מהדורות חו"ל
+const isIsraeliRecord = (b) => b.source === 'web' || b.source === 'nli' || (b.isbns || []).some(x => /^(978)?965/.test(String(x).replace(/[^\d]/g, '')));
 const isHebrewEdition = (b) => ['iw', 'he', 'heb'].includes(b.language) || hasHebrew(b.title);
 function rankByTitle(list, text) {
   const score = (b) => {
     b.match = matchScore(b, text);
     // עדיפות לעברית: מהדורה עברית עולה מעל מהדורה לועזית עם התאמה דומה
-    return b.match * 10 + (isHebrewEdition(b) ? 2 : 0) + (b.cover ? 0.3 : 0) + (b.description ? 0.3 : 0) + (b.authors.length ? 0.2 : 0);
+    return b.match * 10 + (isHebrewEdition(b) ? 2 : 0) + (isIsraeliRecord(b) ? 1.5 : 0) + (b.cover ? 0.3 : 0) + (b.description ? 0.3 : 0) + (b.authors.length ? 0.2 : 0);
   };
   return list.map((b, i) => ({ b, i, s: score(b) })).sort((x, y) => y.s - x.s || x.i - y.i).map(x => x.b);
 }
@@ -1781,9 +1783,10 @@ function Stars({ value, onChange, size = 22, label }) {
   );
 }
 
+const isEink = () => document.documentElement.hasAttribute('data-eink');
 function Cover({ book, className = 'w-16 h-24' }) {
   const [err, setErr] = useState(false);
-  if (!book.cover || err) {
+  if (!book.cover || err || isEink()) {
     return (
       <div className={className + ' shrink-0 rounded-md bg-accentSoft text-accent grid place-items-center font-display font-medium text-xl border border-line'} aria-hidden="true">
         {(book.title || '?').trim().charAt(0)}
@@ -1963,6 +1966,8 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose, initialStatus 
    לשונית: הספרים שלי
    ============================================================ */
 /* ---------- היכרות ראשונה: סימון ספרים מוכרים ---------- */
+// צבע לכל ז'אנר (נגיעת צבע בכרטיסים)
+const GENRE_HUES = ['#3446B0', '#B5534A', '#14897F', '#7A4FC2', '#2E8BD6', '#4E8A3E', '#D4506C', '#A8660F', '#5B5F6B', '#1F7A9E', '#8A4F9E', '#C06A2B', '#2D8C6A', '#D4506C', '#DF8A1F'];
 const STARTER_RATINGS = [[5, 'אהבתי'], [3, 'בסדר'], [2, 'פחות']];
 const STARTER_KEY = (b) => b[0] + '|' + b[1];
 // חפיסה אחת לפי ז'אנרים; "ז'אנר הבא" קופץ לתחילת הז'אנר הבא
@@ -2095,7 +2100,7 @@ function SwipeCard({ b, gi, onSwipe, top }) {
       <div className="px-4 py-3 text-center">
         <div className="font-display font-medium text-[21px] leading-snug">{b[0]}</div>
         <div className="text-muted text-[14px]">{b[1]}{b[2] && b[2] !== b[0] ? <> · <bdi>{b[2]}</bdi></> : null}</div>
-        <div className="text-[12.5px] text-accent mt-0.5">{STARTER[gi].genre}</div>
+        <div className="text-[12.5px] mt-0.5 font-semibold" style={{ color: GENRE_HUES[gi % GENRE_HUES.length] }}>{STARTER[gi].genre}</div>
       </div>
     </div>
   );
@@ -3397,7 +3402,7 @@ function RecCard({ r, onRead, onWant, onDismiss, inLib, onEnrich }) {
     return () => { alive = false; };
   }, [r.key]);
   return (
-    <li className="fade-in bg-surface border border-line rounded-xl p-3">
+    <li className="fade-in bg-surface border border-line rounded-xl p-3 accent-top">
       <div className="flex gap-3">
         <Cover book={r} className="w-20 h-28" />
         <div className="min-w-0 flex-1">
@@ -3817,6 +3822,27 @@ async function copyText(text, fallbackEl) {
 }
 
 // הסנכרון אוטומטי; מוצג רק כשיש בעיה שהמשתמש צריך לדעת עליה
+// מצב קורא אלקטרוני: הגדרה של המכשיר הזה בלבד (לא מסתנכרנת), כי היא תלויה במסך
+function EinkToggle() {
+  const [on, setOn] = useState(isEink);
+  const toggle = () => {
+    const v = !on; setOn(v);
+    try { localStorage.setItem('vrt-eink', v ? '1' : '0'); } catch (e) { /* */ }
+    if (v) document.documentElement.setAttribute('data-eink', ''); else document.documentElement.removeAttribute('data-eink');
+  };
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div>
+        <div className="text-[15px] font-semibold">מצב קורא אלקטרוני</div>
+        <div className="text-[13px] text-muted">שחור-לבן, טקסט גדול, בלי אנימציות ובלי תמונות כריכה. נטען מהר יותר. חל רק על המכשיר הזה.</div>
+      </div>
+      <button type="button" role="switch" aria-checked={on} aria-label="מצב קורא אלקטרוני" onClick={toggle}
+        className={`shrink-0 w-14 h-8 rounded-full border-2 relative ${on ? 'bg-accent border-accent' : 'bg-surface2 border-line'}`}>
+        <span className={`absolute top-0.5 w-6 h-6 rounded-full bg-surface border border-line ${on ? 'left-0.5' : 'right-0.5'}`} />
+      </button>
+    </div>
+  );
+}
 function SyncPanel() {
   const sync = useSyncStatus();
   if (sync.cloud && sync.status !== 'error' && sync.ai !== false) return null;
@@ -3951,6 +3977,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
             ))}
           </div>
         </div>
+        <EinkToggle />
         <div>
           <div className="text-[14px] text-muted mb-1.5">ערכת צבעים</div>
           <div className="flex gap-2 flex-wrap">
@@ -4468,7 +4495,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
 /* ============================================================
    משתמשים: הזדהות בלי סיסמה. כל משתמש מקבל ספרייה נפרדת במכשיר.
    ============================================================ */
-const AVATAR_COLORS = ['#56694F', '#8C6F4A', '#5C6B84', '#86596A', '#6E7A4E', '#6D5D86', '#8E5D48', '#4F7478'];
+const AVATAR_COLORS = ['#3446B0', '#D4506C', '#14897F', '#DF8A1F', '#7A4FC2', '#2E8BD6', '#B5534A', '#4E8A3E'];
 // סמליל "מה שנקרא": ספר פתוח בלילה, עם כוכב קטן של "מה עוד נקרא" (תואם לאייקון במסך הבית)
 function Logo({ size = 32 }) {
   return (

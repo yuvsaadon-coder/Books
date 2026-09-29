@@ -19,25 +19,25 @@
   <!-- נבנה מראש: Tailwind + קוד האפליקציה (tools/build.mjs) -->
   <style>
     :root {
-      --bg: #F3EEE5; --surface: #FFFCF7; --surface-2: #EBE4D7; --ink: #1B1A28; --muted: #6C6878;
-      --line: #E2D9CA; --accent: #2B366B; --accent-2: #46518F; --accent-ink: #FFFCF7; --accent-soft: #E3E5F1;
-      --brass: #BE8433; --danger: #AE4A40; --ok: #3C7757; --warn: #97691E;
+      --bg: #F6F1E7; --surface: #FFFDF8; --surface-2: #EFE8DA; --ink: #1B1A28; --muted: #6A6577;
+      --line: #E6DCCB; --accent: #3446B0; --accent-2: #5E6FDB; --accent-ink: #FFFDF8; --accent-soft: #E7EAFB;
+      --brass: #DF8A1F; --rose: #D4506C; --teal: #14897F; --danger: #C0473C; --ok: #2E8B57; --warn: #A86B10;
       --shadow: 0 1px 0 rgba(27,26,40,.03), 0 10px 24px -18px rgba(27,26,40,.35);
       color-scheme: light;
     }
     @media (prefers-color-scheme: dark) {
       :root:not([data-theme="light"]) {
         --bg: #100F17; --surface: #191823; --surface-2: #232231; --ink: #EDE8DF; --muted: #A39EB0;
-        --line: #2D2B3B; --accent: #AFB9F2; --accent-2: #C8CFF7; --accent-ink: #100F17; --accent-soft: #252946;
-        --brass: #E4AA5C; --danger: #E28E83; --ok: #8DC8A4; --warn: #E1B66C;
+        --line: #2D2B3B; --accent: #9DAEFF; --accent-2: #C3CCFF; --accent-ink: #100F17; --accent-soft: #262B52;
+        --brass: #F4AE52; --rose: #F07A92; --teal: #4CC3B6; --danger: #F08C80; --ok: #7ED3A0; --warn: #F0C06A;
         --shadow: 0 1px 0 rgba(0,0,0,.2), 0 12px 28px -18px rgba(0,0,0,.8);
         color-scheme: dark;
       }
     }
     :root[data-theme="dark"] {
       --bg: #100F17; --surface: #191823; --surface-2: #232231; --ink: #EDE8DF; --muted: #A39EB0;
-      --line: #2D2B3B; --accent: #AFB9F2; --accent-2: #C8CFF7; --accent-ink: #100F17; --accent-soft: #252946;
-      --brass: #E4AA5C; --danger: #E28E83; --ok: #8DC8A4; --warn: #E1B66C;
+      --line: #2D2B3B; --accent: #9DAEFF; --accent-2: #C3CCFF; --accent-ink: #100F17; --accent-soft: #262B52;
+      --brass: #F4AE52; --rose: #F07A92; --teal: #4CC3B6; --danger: #F08C80; --ok: #7ED3A0; --warn: #F0C06A;
       --shadow: 0 1px 0 rgba(0,0,0,.2), 0 12px 28px -18px rgba(0,0,0,.8);
       color-scheme: dark;
     }
@@ -50,6 +50,19 @@
     .eyebrow { font-size: 12px; letter-spacing: .08em; font-weight: 700; color: var(--brass); }
     .wordmark { font-family: "Frank Ruhl Libre", Georgia, serif; font-weight: 700; letter-spacing: -.01em; }
     .rounded-xl { border-radius: 14px; }
+    /* נגיעות צבע: קו מעבר צבע מתחת לכותרות הלשוניות, ופס עליון צבעוני לכרטיסי המלצה */
+    main header h1.font-display { background: linear-gradient(90deg, var(--rose), var(--brass)) no-repeat right bottom / 44px 3px; padding-bottom: 8px; }
+    .accent-top { border-top: 3px solid transparent; border-image: linear-gradient(90deg, var(--accent), var(--rose), var(--brass)) 1; }
+    /* מצב קורא אלקטרוני: שחור-לבן בניגודיות מלאה, בלי אנימציות, צללים, שקיפויות ותמונות כבדות */
+    :root[data-eink] { --bg: #fff; --surface: #fff; --surface-2: #efefef; --ink: #000; --muted: #2b2b2b; --line: #000; --accent: #000; --accent-2: #000; --accent-ink: #fff; --accent-soft: #e6e6e6; --brass: #000; --rose: #000; --teal: #000; --danger: #000; --ok: #000; --warn: #000; --shadow: none; color-scheme: light; }
+    :root[data-eink] body { background: #fff; font-size: 18px; }
+    :root[data-eink] *, :root[data-eink] *::before, :root[data-eink] *::after { animation: none !important; transition: none !important; box-shadow: none !important; }
+    :root[data-eink] .glass { background: #fff; -webkit-backdrop-filter: none; backdrop-filter: none; }
+    :root[data-eink] .btn-primary { background: #000; }
+    :root[data-eink] main header h1.font-display { background: none; }
+    :root[data-eink] .accent-top { border-image: none; border-top-color: #000; }
+    :root[data-eink] .font-reading { font-size: 18.5px; line-height: 1.8; }
+        nav .bg-accentSoft { background: linear-gradient(135deg, var(--accent-soft), color-mix(in srgb, var(--rose) 16%, var(--accent-soft))); }
     body { margin: 0; font-family: Assistant, "Segoe UI", Arial, sans-serif; font-size: 16px; line-height: 1.55; -webkit-tap-highlight-color: transparent; -webkit-font-smoothing: antialiased; }
     /* טקסט לקריאה: תקצירים, הערות, שיחה */
     .font-reading { font-family: "Frank Ruhl Libre", "David Libre", Georgia, serif; font-size: 16.5px; line-height: 1.75; }
@@ -79,6 +92,8 @@
   <div id="root"><div class="boot">טוען את מה שנקרא…</div></div>
   <script>
     // אירוע ההתקנה עלול להגיע לפני ש-React נטען, לכן תופסים אותו כאן
+    // מצב קורא אלקטרוני (הגדרה של המכשיר): מופעל לפני הציור הראשון, בלי הבהוב
+    try { if (localStorage.getItem('vrt-eink') === '1') document.documentElement.setAttribute('data-eink', ''); } catch (e) {}
     window.__installPrompt = null;
     window.addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); window.__installPrompt = e; window.dispatchEvent(new Event('vrt-install-ready')); });
     window.addEventListener('appinstalled', function () { window.__installPrompt = null; window.dispatchEvent(new Event('vrt-install-ready')); });

@@ -333,6 +333,14 @@ try {
       assert.ok(sw <= w, `${tab}: ${sw} > ${w}`);
     }
   });
+  await step('e-reader mode: black and white, no covers, remembered on the device', async () => {
+    await A.click('nav >> text=הגדרות'); await A.click('[role=switch][aria-label="מצב קורא אלקטרוני"]');
+    assert.equal(await A.evaluate(() => document.documentElement.hasAttribute('data-eink')), true);
+    assert.equal(await A.evaluate(() => getComputedStyle(document.body).backgroundColor), 'rgb(255, 255, 255)');
+    await A.reload(); assert.equal(await A.evaluate(() => document.documentElement.hasAttribute('data-eink')), true);
+    await A.click('nav >> text=הגדרות'); await A.click('[role=switch][aria-label="מצב קורא אלקטרוני"]');
+    assert.equal(await A.evaluate(() => document.documentElement.hasAttribute('data-eink')), false);
+  });
   await step('Google Books goes through the family server (shared key + cache)', async () => {
     assert.ok(viaProxy > 0, 'no proxied Google requests');
     assert.equal(direct, 0, `${direct} direct Google requests`);

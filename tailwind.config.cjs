@@ -6,7 +6,7 @@ module.exports = Object.assign({
             bg: 'var(--bg)', surface: 'var(--surface)', surface2: 'var(--surface-2)',
             ink: 'var(--ink)', muted: 'var(--muted)', line: 'var(--line)',
             accent: 'var(--accent)', accentInk: 'var(--accent-ink)', accentSoft: 'var(--accent-soft)',
-            brass: 'var(--brass)', danger: 'var(--danger)', ok: 'var(--ok)', warn: 'var(--warn)'
+            brass: 'var(--brass)', rose: 'var(--rose)', teal: 'var(--teal)', danger: 'var(--danger)', ok: 'var(--ok)', warn: 'var(--warn)'
           },
           fontFamily: {
             display: ['"Frank Ruhl Libre"', '"David Libre"', 'Georgia', 'serif'],
