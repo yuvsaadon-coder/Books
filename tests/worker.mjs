@@ -71,7 +71,7 @@ console.log('worker page verification: ok');
     calls.push(String(url));
     if (String(url).startsWith('https://api.anthropic.com/')) {
       const body = JSON.parse(init.body);
-      assert.equal(body.tools[0].max_uses, 1); assert.deepEqual(body.tools[0].allowed_domains, ['e-vrit.co.il', 'steimatzky.co.il', 'booknet.co.il']);
+      assert.equal(body.tools[0].max_uses, 1); assert.ok(['e-vrit.co.il', 'steimatzky.co.il', 'booknet.co.il', 'am-oved.co.il', '9livespress.com'].every(d => body.tools[0].allowed_domains.includes(d)));
       return new Response(JSON.stringify({ content: [{ type: 'server_tool_use', name: 'web_search' }, { type: 'web_search_tool_result', content: [
         { type: 'web_search_result', url: 'https://www.e-vrit.co.il/Product/1/נגד_הטבע', title: 'נגד הטבע - תומס אספדל | עברית' },
         { type: 'web_search_result', url: 'https://www.e-vrit.co.il/Product/2/x', title: 'ספר אחר לגמרי' }] }, { type: 'text', text: 'done' }] }), { status: 200 });

@@ -241,11 +241,14 @@ async function handlePage(req, cors, ctx) {
   return json({ ...res, url: u.toString(), site: host }, 200, cors);
 }
 
-// ---------- חיפוש בחנויות: עברית, סטימצקי, צומת ספרים ----------
+// ---------- חיפוש בחנויות ובהוצאות: עברית, סטימצקי, צומת ספרים, והוצאות הספרים ----------
 // 1. ניסיון חינמי: דף תוצאות החיפוש של החנות עצמה, ומתוכו קישורים לדפי ספרים ששמם תואם.
 // 2. אם זה לא הצליח (דף שנבנה ב-JavaScript או חסום): חיפוש אחד, מוגבל לשלושת האתרים, דרך Claude Haiku
-//    (בלי "חשיבה"; לוקחים רק את תוצאות מנוע החיפוש: כתובת + כותרת). עולה כסנט, כמה שניות.
-export const STORE_SITES = ['e-vrit.co.il', 'steimatzky.co.il', 'booknet.co.il'];
+//    ובאתרי ההוצאות (בלי "חשיבה"; לוקחים רק את תוצאות מנוע החיפוש: כתובת + כותרת). עולה כסנט, כמה שניות.
+// רשתות הספרים + ההוצאות (גדולות וקטנות מובילות): דף ספר באחד מהם = הספר קיים בעברית
+export const STORE_SITES = ['e-vrit.co.il', 'steimatzky.co.il', 'booknet.co.il',
+  'am-oved.co.il', 'kibutz-poalim.co.il', 'ybook.co.il', 'kinbooks.co.il', 'keter-books.co.il', 'modan.co.il',
+  '9livespress.com', 'abayit-books.com', 'pardes.co.il', 'resling.co.il'];
 const STORE_SEARCH_URLS = [
   (q) => 'https://www.steimatzky.co.il/catalogsearch/result/?q=' + encodeURIComponent(q),
   (q) => 'https://www.booknet.co.il/search?q=' + encodeURIComponent(q),
@@ -299,18 +302,26 @@ async function storeSearchViaClaude(env, q) {
   const used = parseInt((await env.LIBRARY.get(counterKey)) || '0', 10);
   if (used >= STORE_DAILY_LIMIT) return [];
   await env.LIBRARY.put(counterKey, String(used + 1), { expirationTtl: 60 * 60 * 48 });
-  const blocked = (await env.LIBRARY.get('blocked-domains', 'json')) || [];
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001', max_tokens: 200,
-      tools: [{ type: 'web_search_20250305', name: 'web_search', allowed_domains: STORE_SITES.filter(d => !blocked.includes(d)), max_uses: 1 }],
-      messages: [{ role: 'user', content: `Run exactly one web search for the book page of: ${q}. Do not search again. Then reply only: done` }]
-    })
-  });
-  if (!r.ok) return [];
-  const msg = await r.json();
+  let blocked = (await env.LIBRARY.get('blocked-domains', 'json')) || [];
+  let msg = null;
+  for (let attempt = 0; attempt < 2 && !msg; attempt++) {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001', max_tokens: 200,
+        tools: [{ type: 'web_search_20250305', name: 'web_search', allowed_domains: STORE_SITES.filter(d => !blocked.includes(d)), max_uses: 1 }],
+        messages: [{ role: 'user', content: `Run exactly one web search for the book page of: ${q}. Do not search again. Then reply only: done` }]
+      })
+    });
+    if (r.ok) { msg = await r.json(); break; }
+    // אתר שמנוע החיפוש לא יכול לגשת אליו: מסירים, זוכרים, ומנסים שוב
+    const more = r.status === 400 ? blockedDomainsFrom(await r.text()).filter(d => !blocked.includes(d)) : [];
+    if (!more.length) return [];
+    blocked = [...blocked, ...more];
+    await env.LIBRARY.put('blocked-domains', JSON.stringify(blocked));
+  }
+  if (!msg) return [];
   const out = [];
   for (const b of msg.content || []) {
     if (b.type === 'web_search_tool_result' && Array.isArray(b.content)) b.content.forEach(x => x && x.url && storeOf(x.url) && out.push({ url: x.url, title: x.title || '', site: storeOf(x.url) }));

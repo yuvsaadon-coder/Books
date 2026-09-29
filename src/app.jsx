@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '15';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '16';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -489,8 +489,10 @@ async function nliSearch(params) {
   }));
 }
 
-// חנויות הספרים (דרך השרת): עברית, סטימצקי, צומת ספרים. דף ספר אמיתי בחנות = הספר קיים
-const STORE_NAMES = { 'e-vrit.co.il': 'עברית', 'steimatzky.co.il': 'סטימצקי', 'booknet.co.il': 'צומת ספרים' };
+// חנויות והוצאות (דרך השרת): עברית, סטימצקי, צומת ספרים והוצאות הספרים. דף ספר אמיתי שם = הספר קיים
+const STORE_NAMES = { 'e-vrit.co.il': 'עברית', 'steimatzky.co.il': 'סטימצקי', 'booknet.co.il': 'צומת ספרים', 'kinbooks.co.il': 'כנרת זמורה', 'ybook.co.il': 'ידיעות ספרים',
+  'am-oved.co.il': 'עם עובד', 'kibutz-poalim.co.il': 'הקיבוץ המאוחד', 'keter-books.co.il': 'כתר', 'modan.co.il': 'מודן', 'simania.co.il': 'סימניה',
+  '9livespress.com': 'תשע נשמות', 'abayit-books.com': 'הוצאת הבית', 'pardes.co.il': 'פרדס', 'resling.co.il': 'רסלינג' };
 async function storeSearch(title, author) {
   const c = loadCloud();
   if (!c || !title) return [];
@@ -1549,7 +1551,7 @@ function Cover({ book, className = 'w-16 h-24' }) {
 }
 
 function SourceBadge({ book }) {
-  const SITE_NAMES = { 'e-vrit.co.il': 'עברית', 'steimatzky.co.il': 'סטימצקי', 'booknet.co.il': 'צומת ספרים', 'kinbooks.co.il': 'כנרת זמורה דביר', 'ybook.co.il': 'ידיעות ספרים', 'am-oved.co.il': 'עם עובד', 'kibutz-poalim.co.il': 'הקיבוץ המאוחד', 'keter-books.co.il': 'כתר', 'modan.co.il': 'מודן', 'simania.co.il': 'סימניה' };
+  const SITE_NAMES = STORE_NAMES;
   const src = SITE_NAMES[book.verifiedVia] || book.verifiedVia || (book.source === 'google' ? 'Google Books' : book.source === 'openlibrary' ? 'Open Library' : book.source === 'wikidata' ? 'Wikidata' : 'מקור');
   return (
     <span className="inline-flex items-center gap-1 text-[12px] font-semibold px-2 py-0.5 rounded-full bg-accentSoft text-accent">
