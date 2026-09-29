@@ -704,12 +704,13 @@ Suggest 14 books this reader has not read that would interest them now — a var
 export async function generateDigest(env, ctx, pid, db) {
   const prior = (await env.LIBRARY.get('digest:' + pid, 'json')) || [];
   const lang = (db.settings && db.settings.recLang) || 'auto';
+  const heOnly = lang === 'he' || lang === 'auto';   // באפליקציה 'אוטומטי' = עברית
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
       model: ALLOWED_MODELS[0], max_tokens: 8000, thinking: { type: 'adaptive' }, output_config: { effort: 'low' },
       system: 'You are a literary advisor with deep knowledge of world and Israeli literature. Every book you name is checked against real catalogues; name only real, published books. title_he must be the exact title of a Hebrew edition you know exists (otherwise empty; never translate a title yourself). `why` is one or two sentences in Hebrew that connect the book to this reader.' +
-        (lang === 'he' ? ' Only books with a Hebrew edition.' : '') + (ADDRESS_RULE[(db.settings && db.settings.address) || 'n'] || ''),
+        (heOnly ? ' Only books that have a published Hebrew edition; title_he is required for every book.' : '') + (ADDRESS_RULE[(db.settings && db.settings.address) || 'n'] || ''),
       tools: [DIGEST_TOOL], messages: [{ role: 'user', content: digestPrompt(db, prior) }]
     })
   });
@@ -718,7 +719,7 @@ export async function generateDigest(env, ctx, pid, db) {
   const sub = (msg.content || []).find(b => b.type === 'tool_use' && b.name === 'submit_digest');
   if (!sub) throw new Error('no digest');
   const have = new Set([...(db.books || []).map(b => heNorm(b.title)), ...prior.flatMap(d => d.books.map(b => heNorm(b.title)))]);
-  const cands = (sub.input.books || []).filter(b => b && (b.title_he || b.title_original) && !have.has(heNorm(b.title_he)) && !have.has(heNorm(b.title_original)));
+  const cands = (sub.input.books || []).filter(b => b && (b.title_he || b.title_original) && (!heOnly || /[\u0590-\u05FF]/.test(b.title_he || '')) && !have.has(heNorm(b.title_he)) && !have.has(heNorm(b.title_original)));
   const out = [];
   // אימות במקביל (בקבוצות קטנות): רק ספר שנמצא במאגר או בחנות נכנס לרשימה
   for (let i = 0; i < cands.length && out.length < DIGEST_SIZE; i += 5) {
@@ -758,7 +759,9 @@ export async function runDigests(env, ctx, now = Date.now()) {
     try {
       const d = await generateDigest(env, ctx, p.id, db);
       await env.LIBRARY.put('digest-meta:' + p.id, JSON.stringify({ next: now + DIGEST_EVERY, last: d.id }));
-      if (d.books.length) await pushTo(env, p.id);
+      // ההתראה מזמינה לסיכום הדו-שבועי (מחושב באפליקציה), ומשם להצעות החדשות
+      const done = (db.books || []).filter(b => ['read', 'partial'].includes(b.status || 'read') && b.readAt && b.readAt >= now - DIGEST_EVERY).length;
+      if (d.books.length) await pushTo(env, p.id, { title: 'הסיכום הדו-שבועי שלך מוכן 📚', body: `${done ? `${done} ספרים הסתיימו בשבועיים האחרונים. ` : ''}ומחכים לך ${d.books.length} ספרים חדשים`, url: './?view=summary' });
     } catch (e) {
       await env.LIBRARY.put('digest-meta:' + p.id, JSON.stringify({ next: now + 6 * 3600000, error: String(e.message || e) }));   // ננסה שוב בעוד כמה שעות
     }

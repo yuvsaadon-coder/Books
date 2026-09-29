@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '27';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '28';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -75,6 +75,8 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const fmtDate = (ts) => { try { return new Date(ts).toLocaleDateString(DEFAULT_LOCALE, { day: 'numeric', month: 'short', year: 'numeric' }); } catch (e) { return ''; } };
 // סטטוסים של ספר: קראתי / קורא עכשיו / רוצה לקרוא / קראתי חלקית
 const STATUSES = [['read', 'קראתי', 'BookCheck'], ['reading', 'קורא עכשיו', 'BookOpen'], ['want', 'רוצה לקרוא', 'Bookmark'], ['partial', 'קראתי חלקית', 'BookX']];
+// צבע לכל סטטוס (תג בכרטיס הספר)
+const STATUS_TONE = { reading: 'bg-tealSoft text-teal', want: 'bg-brassSoft text-brass', partial: 'bg-roseSoft text-rose' };
 const statusOf = (b) => (b && ['want', 'reading', 'partial'].includes(b.status)) ? b.status : 'read';
 // ספר שיש בו אות על הטעם (קראתי, או קראתי חלקית עם דירוג)
 const libLabel = (b) => ({ want: 'ברשימת "רוצה לקרוא"', reading: 'בקריאה עכשיו', partial: 'קראת חלקית' }[statusOf(b)] || `כבר בספרייה (${b.rating}★)`);
@@ -391,6 +393,7 @@ function queryVariants(text, author) {
 // מהדורה ישראלית: דף בחנות/הוצאה, רשומה בספרייה הלאומית, או ISBN ישראלי (965). מקבלת עדיפות על מהדורות חו"ל
 const isIsraeliRecord = (b) => b.source === 'web' || b.source === 'nli' || (b.isbns || []).some(x => /^(978)?965/.test(String(x).replace(/[^\d]/g, '')));
 const isHebrewEdition = (b) => ['iw', 'he', 'heb'].includes(b.language) || hasHebrew(b.title);
+const isHebrewOrIsraeli = (b) => !!b && (isHebrewEdition(b) || isIsraeliRecord(b));
 function rankByTitle(list, text) {
   const score = (b) => {
     b.match = matchScore(b, text);
@@ -607,7 +610,7 @@ async function lookupISBN(isbn) {
     const n = await nliSearch({ isbn });
     if (n.length) return { candidates: n.slice(0, 5), notes, sources: ['הספרייה הלאומית'] };
   } catch (e) { /* לא נמצא */ }
-  notes.push(`לא נמצא ספר עם ISBN ${isbn} באף מקור. בדקו את המספר או חפשו לפי שם.`);
+  notes.push(`לא נמצא ספר עם ISBN ${isbn} באף מקור. ${T('בדקו את המספר או חפשו לפי שם.')}`);
   return { candidates: [], notes, sources: [] };
 }
 async function resolveLink(url) {
@@ -678,7 +681,7 @@ async function lookupHebrewTitle(b) {
 /* ============================================================
    שכבת אחסון: localStorage + IndexedDB
    ============================================================ */
-const emptyDB = () => ({ version: SCHEMA_VERSION, books: [], tagLibrary: DEFAULT_TAGS.slice(), dismissed: [], settings: { theme: 'system', apiKey: '', recLang: 'auto' }, history: [], tombstones: { books: {}, history: {} }, updatedAt: 0, lastBackupAt: 0 });
+const emptyDB = () => ({ version: SCHEMA_VERSION, books: [], tagLibrary: DEFAULT_TAGS.slice(), dismissed: [], settings: { theme: 'system', apiKey: '', recLang: 'auto' }, history: [], tombstones: { books: {}, history: {}, misc: {} }, updatedAt: 0, lastBackupAt: 0 });
 
 function sanitizeBook(b) {
   if (!b || typeof b !== 'object' || !b.title || !b.key) return null;
@@ -715,7 +718,9 @@ function sanitizeDB(raw) {
     settings: { ...base.settings, ...(raw.settings && typeof raw.settings === 'object' ? raw.settings : {}) },
     tombstones: {
       books: raw.tombstones && raw.tombstones.books && typeof raw.tombstones.books === 'object' ? raw.tombstones.books : {},
-      history: raw.tombstones && raw.tombstones.history && typeof raw.tombstones.history === 'object' ? raw.tombstones.history : {}
+      history: raw.tombstones && raw.tombstones.history && typeof raw.tombstones.history === 'object' ? raw.tombstones.history : {},
+      // מחיקות ממסך "מה האפליקציה יודעת עליי": שלילות, משוב, והפרופיל הספרותי ('litProfile')
+      misc: raw.tombstones && raw.tombstones.misc && typeof raw.tombstones.misc === 'object' ? raw.tombstones.misc : {}
     },
     // ספרים ששללתי מההמלצות: לחודש או לתמיד, עם הערה שמדייקת את הפרופיל
     rejections: Array.isArray(raw.rejections) ? raw.rejections.filter(x => x && x.id && x.title).slice(0, 500) : [],
@@ -848,7 +853,7 @@ async function discoverCloud() {
       if (r.ok) { const j = await r.json(); if (j && j.ok) { localStorage.setItem('vrt_server_url', u); setSyncStatus({ ai: !!j.ai, gbooks: !!j.gbooks, nli: !!j.nli, jobs: !!j.jobs }); return true; } }
     } catch (e) { /* ננסה את הבאה */ }
   }
-  setSyncStatus({ status: 'error', error: 'השרת לא נמצא. שלחו ל-Claude Code את כתובת ה-Worker מ-Cloudflare.' });
+  setSyncStatus({ status: 'error', error: T('השרת לא נמצא. שלחו ל-Claude Code את כתובת ה-Worker מ-Cloudflare.') });
   return false;
 }
 async function cloudFetch(path, opts = {}) {
@@ -896,7 +901,8 @@ function friendsOf(items, me) {
 function mergeDB(a, b) {
   if (!a) return b; if (!b) return a;
   const prune = (t) => { const cut = Date.now() - 180 * 86400000; const o = {}; Object.entries(t).forEach(([k, v]) => { if (v > cut) o[k] = v; }); return o; };
-  const tomb = { books: prune(mergeTomb(a.tombstones.books, b.tombstones.books)), history: prune(mergeTomb(a.tombstones.history, b.tombstones.history)) };
+  const tomb = { books: prune(mergeTomb(a.tombstones.books, b.tombstones.books)), history: prune(mergeTomb(a.tombstones.history, b.tombstones.history)), misc: prune(mergeTomb(a.tombstones.misc || {}, b.tombstones.misc || {})) };
+  const alive = (x) => !(tomb.misc[x.id] >= (x.editedAt || x.at || 0));
   const bt = (x) => x.editedAt || x.addedAt || 0;
   const books = mergeByIdNewest(a.books, b.books, bt).filter(x => !(tomb.books[x.id] >= bt(x))).sort((x, y) => (y.addedAt || 0) - (x.addedAt || 0));
   const history = mergeByIdNewest(a.history, b.history, h => h.at || 0).filter(h => !tomb.history[h.id]).sort((x, y) => y.at - x.at).slice(0, 40);
@@ -905,9 +911,9 @@ function mergeDB(a, b) {
     ...newer, books, history, tombstones: tomb,
     tagLibrary: uniq([...(a.tagLibrary || []), ...(b.tagLibrary || [])]),
     dismissed: uniq([...(a.dismissed || []), ...(b.dismissed || [])]),
-    rejections: mergeByIdNewest(a.rejections, b.rejections, x => x.editedAt || x.at || 0).sort((x, y) => (y.at || 0) - (x.at || 0)),
-    feedback: mergeByIdNewest(a.feedback, b.feedback, x => x.at || 0).sort((x, y) => (y.at || 0) - (x.at || 0)).slice(0, 200),
-    litProfile: ((a.litProfile && a.litProfile.at) || 0) >= ((b.litProfile && b.litProfile.at) || 0) ? a.litProfile || null : b.litProfile || null,
+    rejections: mergeByIdNewest(a.rejections, b.rejections, x => x.editedAt || x.at || 0).filter(alive).sort((x, y) => (y.at || 0) - (x.at || 0)),
+    feedback: mergeByIdNewest(a.feedback, b.feedback, x => x.at || 0).filter(alive).sort((x, y) => (y.at || 0) - (x.at || 0)).slice(0, 200),
+    litProfile: (() => { const lp = ((a.litProfile && a.litProfile.at) || 0) >= ((b.litProfile && b.litProfile.at) || 0) ? a.litProfile || null : b.litProfile || null; return lp && tomb.misc.litProfile >= lp.at ? null : lp; })(),
     lastBackupAt: Math.max(a.lastBackupAt || 0, b.lastBackupAt || 0),
     updatedAt: Math.max(a.updatedAt || 0, b.updatedAt || 0)
   };
@@ -1094,13 +1100,13 @@ async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', 
       break;
     } catch (e) {
       if (attempt === 0 && e instanceof Anthropic.APIConnectionError) { onProgress && onProgress('החיבור נפל, מנסה שוב…'); continue; }
-      if (e instanceof Anthropic.AuthenticationError) throw new Error('השרת לא הצליח להתחבר ל-Claude. בדקו את ANTHROPIC_API_KEY ב-Cloudflare.');
-      if (e instanceof Anthropic.RateLimitError) throw new Error('הגעתם למגבלת השימוש היומית ב-AI, או שהשירות עמוס. נסו שוב מאוחר יותר.');
+      if (e instanceof Anthropic.AuthenticationError) throw new Error(T('השרת לא הצליח להתחבר ל-Claude. בדקו את ANTHROPIC_API_KEY ב-Cloudflare.'));
+      if (e instanceof Anthropic.RateLimitError) throw new Error(T('הגעתם למגבלת השימוש היומית ב-AI, או שהשירות עמוס. נסו שוב מאוחר יותר.'));
       if (e instanceof Anthropic.APIError) {
         const detail = (e.error && e.error.error && e.error.error.message) || e.message || '';
         throw new Error('השירות החזיר שגיאה (' + (e.status || '') + '). ' + detail.slice(0, 140));
       }
-      throw new Error('אין חיבור לשרת המשפחתי. בדקו אינטרנט ונסו שוב.');
+      throw new Error(T('אין חיבור לשרת המשפחתי. בדקו אינטרנט ונסו שוב.'));
     }
     cost += costOf(msg.usage, fast ? PRICE_FAST : PRICE);
     msg.content.forEach(b => {
@@ -1108,14 +1114,14 @@ async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', 
       if (b.type === 'server_tool_use' && b.name === 'web_fetch') fetchesLeft--;
       if (b.type === 'web_search_tool_result' && Array.isArray(b.content)) b.content.forEach(x => x && x.url && hits.push({ url: x.url, title: x.title || '' }));
     });
-    if (msg.stop_reason === 'refusal') throw new Error('המודל סירב לבקשה הזו. נסו לנסח אחרת.');
+    if (msg.stop_reason === 'refusal') throw new Error(T('המודל סירב לבקשה הזו. נסו לנסח אחרת.'));
     const sub = msg.content.find(b => b.type === 'tool_use' && b.name === submitTool.name);
     if (sub) return { input: sub.input, cost, hits };
-    if (msg.stop_reason === 'max_tokens') throw new Error('התשובה נקטעה באמצע. נסו בקשה ממוקדת יותר.');
+    if (msg.stop_reason === 'max_tokens') throw new Error(T('התשובה נקטעה באמצע. נסו בקשה ממוקדת יותר.'));
     messages = [...messages, { role: 'assistant', content: echoable(msg.content) }];
     if (msg.stop_reason !== 'pause_turn') messages.push({ role: 'user', content: `Now call ${submitTool.name} with your final answer.` });
   }
-  throw new Error('המודל לא סיים לעבוד. נסו שוב.');
+  throw new Error(T('המודל לא סיים לעבוד. נסו שוב.'));
 }
 const HEBREW_OUT = 'Write every free-text field in Hebrew (except original-language titles and author names in their original form).';
 // לשון פנייה בעברית, לפי בחירת המשתמש (הגדרות)
@@ -1126,6 +1132,38 @@ const addressRule = (a) => ({
   n: ' Address the reader in Hebrew in a gender-neutral way (plural forms or impersonal phrasing).'
 }[a || 'n']);
 const addressOf = () => { try { const d = loadDBOf(ACTIVE.id); return (d && d.settings && d.settings.address) || 'n'; } catch (e) { return 'n'; } };
+// טקסטים בממשק: נכתבים ברבים (ברירת המחדל), ו-T() מתאים אותם ללשון שנבחרה בהגדרות
+let ADDR = 'n';
+const PLURAL_FORMS = {
+  'נסו': ['נסה', 'נסי'], 'ונסו': ['ונסה', 'ונסי'], 'בדקו': ['בדוק', 'בדקי'], 'בחרו': ['בחר', 'בחרי'], 'פתחו': ['פתח', 'פתחי'],
+  'לחצו': ['לחץ', 'לחצי'], 'ולחצו': ['ולחץ', 'ולחצי'], 'הדביקו': ['הדבק', 'הדביקי'], 'הקלידו': ['הקלד', 'הקלידי'], 'כתבו': ['כתוב', 'כתבי'],
+  'ספרו': ['ספר', 'ספרי'], 'דייקו': ['דייק', 'דייקי'], 'שלחו': ['שלח', 'שלחי'], 'חזרו': ['חזור', 'חזרי'], 'חפשו': ['חפש', 'חפשי'],
+  'הגעתם': ['הגעת', 'הגעת'], 'קראתם': ['קראת', 'קראת'], 'אהבתם': ['אהבת', 'אהבת'], 'שהעתקתם': ['שהעתקת', 'שהעתקת'], 'תבחרו': ['תבחר', 'תבחרי'],
+  'ותדרגו': ['ותדרג', 'ותדרגי'], 'לכם': ['לך', 'לך'], 'בואו': ['בוא', 'בואי'], 'סמנו': ['סמן', 'סמני'], 'הוסיפו': ['הוסף', 'הוסיפי'],
+  'דרגו': ['דרג', 'דרגי'], 'שתפו': ['שתף', 'שתפי'], 'תוכלו': ['תוכל', 'תוכלי'], 'שלכם': ['שלך', 'שלך'], 'תקבלו': ['תקבל', 'תקבלי'],
+  'רוצים': ['רוצה', 'רוצה'], 'אתם': ['אתה', 'את'], 'גללו': ['גלול', 'גללי'], 'העלו': ['העלה', 'העלי'],
+  'מוזמנים': ['מוזמן', 'מוזמנת'], 'ודאו': ['ודא', 'ודאי'], 'העתיקו': ['העתק', 'העתיקי'], 'תרצו': ['תרצה', 'תרצי'], 'שמרו': ['שמור', 'שמרי'], 'ייבאו': ['ייבא', 'ייבאי'], 'בחרתם': ['בחרת', 'בחרת'],
+  'סיימתם': ['סיימת', 'סיימת'], 'דירגתם': ['דירגת', 'דירגת'], 'הייתם': ['היית', 'היית'], 'תגלו': ['תגלה', 'תגלי'], 'קראו': ['קרא', 'קראי'],
+  'מחקו': ['מחק', 'מחקי'], 'הפעילו': ['הפעל', 'הפעילי'], 'אפשרו': ['אפשר', 'אפשרי']
+};
+// מילים שכתובות בזכר יחיד (למשל דוגמאות בשדות טקסט): בלשון נקבה מחליפים
+const MASC_FORMS = { 'אוהב': 'אוהבת', 'מתחבר': 'מתחברת', 'מחפש': 'מחפשת', 'תקרא': 'תקראי', 'שאתה': 'שאת', 'אתה': 'את', 'קורא': 'קוראת', 'מוכן': 'מוכנה', 'תאהב': 'תאהבי', 'קורא/ת': 'קוראת', 'ממליץ': 'ממליצה', 'ממליץ…': 'ממליצה…' };
+function T(text) {
+  if (ADDR === 'n' || !text) return text;
+  return String(text).replace(/[א-ת/]+/g, (w) => {
+    const pl = PLURAL_FORMS[w];
+    if (pl) return pl[ADDR === 'f' ? 1 : 0];
+    if (ADDR === 'f' && MASC_FORMS[w]) return MASC_FORMS[w];
+    if (ADDR === 'm' && w === 'קורא/ת') return 'קורא';
+    return w;
+  });
+}
+// שלוש צורות מפורשות, כשהמשפט לא מתאים להחלפת מילים
+const gx = (m, f, n) => ADDR === 'f' ? f : ADDR === 'm' ? m : n;
+function setAddr(a) {
+  ADDR = a === 'f' || a === 'm' ? a : 'n';
+  STATUSES[1][1] = ADDR === 'f' ? 'קוראת עכשיו' : 'קורא עכשיו';
+}
 
 // 1. פסקה חופשית ← רשימת ספרים
 async function aiExtractBooks(paragraph) {
@@ -1236,7 +1274,8 @@ async function verifyAiBook(r, many, hits) {
 const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
 // אימות מהיר להמלצה: חיפוש ממוקד במקביל ב-Google Books ובספרייה הלאומית (מהדורה עברית קודם),
 // ורק אם שם עברי לא נמצא באף מאגר, בחנויות ובהוצאות
-async function verifyRec(r) {
+// heOnly: כשהמשתמש ביקש עברית, מקבלים רק מהדורה עברית/ישראלית (לא נופלים למהדורה המקורית)
+async function verifyRec(r, heOnly = false) {
   const clean = (x) => (x || '').replace(/[^\dXx]/g, '');
   const isbn = clean(r.isbn);
   const author = r.author || '';
@@ -1249,10 +1288,11 @@ async function verifyRec(r) {
     he ? g(he, 'iw') : [], he ? nliSearch({ title: he, author: hasHebrew(author) ? author : '' }).catch(() => []) : [],
     orig ? g(orig) : [], isbn.length === 10 || isbn.length === 13 ? lookupISBN(isbn).then(x => x.candidates).catch(() => []) : []
   ]);
-  const hit = match(gHe, he) || match(nHe, he) || match(byIsbn, he || orig) || match(gOrig, orig);
+  const heEd = (list) => heOnly ? (list || []).filter(isHebrewOrIsraeli) : list;
+  const hit = match(heEd(gHe), he) || match(nHe, he) || match(heEd(byIsbn), he || orig) || (heOnly ? null : match(gOrig, orig));
   if (hit) return hit;
   if (!orig && !he) return null;
-  if (orig) {
+  if (orig && !heOnly) {
     const ol = await olSearch({ q: `${orig} ${author}`, limit: 5 }).catch(() => []);
     const o = match(ol, orig);
     if (o) return o;
@@ -1336,11 +1376,11 @@ function focusSummary(focus) {
 }
 
 // שאלות המשך קצרות לדיוק הבקשה (2–4), לפני ההמלצה
-async function aiClarify({ books, request, focus, profile, avoid = [], count = 0 }) {
+async function aiClarify({ books, request, focus, profile, avoid = [], count = 0, gift = false }) {
   const { input } = await aiRun({
     fast: true, web: false,
     system: (count ? `You help a reader find their next book. Ask exactly ${count} new short follow-up question, different from the questions listed under ALREADY ASKED,` : 'You help a reader find their next book. Before recommending, ask 2 to 4 short follow-up questions') + ' that would most change which books you pick, given their library and request. Do not ask what they already answered. Each question gets 2–5 short answer options. ' + HEBREW_OUT + addressRule(addressOf()),
-    prompt: `${profile && profile.text ? `READER PROFILE:\n${profile.brief || profile.text}` : `READER'S LIBRARY (title (published) — author | rating 1-5 | year read | tags | notes):\n${libraryForPrompt(books).split('\n').slice(0, 40).join('\n') || '(empty)'}`}\n\nREQUEST: ${request || '(none)'}\nPREFERENCES: ${focusSummary(focus).join('; ') || '(none)'}${avoid.length ? `\nALREADY ASKED: ${avoid.join(' | ')}` : ''}`,
+    prompt: `${gift ? 'GIFT MODE: the book is a gift for someone else, described in the request. Ask about the recipient (age, what they like to read, occasion), not about the user.' : profile && profile.text ? `READER PROFILE:\n${profile.brief || profile.text}` : `READER'S LIBRARY (title (published) — author | rating 1-5 | year read | tags | notes):\n${libraryForPrompt(books).split('\n').slice(0, 40).join('\n') || '(empty)'}`}\n\nREQUEST: ${request || '(none)'}\nPREFERENCES: ${focusSummary(focus).join('; ') || '(none)'}${avoid.length ? `\nALREADY ASKED: ${avoid.join(' | ')}` : ''}`,
     submitTool: {
       name: 'submit_questions', description: 'Return 2 to 4 follow-up questions.',
       input_schema: { type: 'object', additionalProperties: false, required: ['questions'], properties: {
@@ -1371,7 +1411,8 @@ REC_TOOL.input_schema.properties.recommendations.items.required.push('candidate'
    3. ספרים מרשימת 400 הספרים המוכרים, מהז'אנרים שאתה הכי אוהב (לפי הקטלוג הפנימי)
    4. התאמה למיקוד שנבחר (ז'אנר, תקופה), מהדורה עברית/ישראלית
    Claude בוחר מהם ומסביר, ויכול להוסיף עד 2 ספרים משלו. ספר שנבחר מהרשימה לא צריך בדיקה נוספת. */
-async function buildCandidates(db, focus = {}, limit = 30) {
+async function buildCandidates(db, focus = {}, limit = 30, lang = 'he') {
+  const heOnly = lang === 'he';
   const books = db.books;
   const owned = (b) => !!findInLibrary(b, books);
   const rej = new Set(rejectedKeys(db).map(x => normTitle(x)));
@@ -1382,6 +1423,7 @@ async function buildCandidates(db, focus = {}, limit = 30) {
     const author = item.book ? (item.book.authors || [])[0] || '' : item.seed[1];
     const k = normTitle(title) + '|' + norm(author).split(' ').pop();
     if (rej.has(normTitle(title)) || neg.has(norm(author))) return;
+    if (heOnly && item.book && !isHebrewOrIsraeli(item.book)) return;   // ביקשו עברית: רק מהדורות עבריות
     const cur = out.get(k) || { ...item, title, author, score: 0, signals: [] };
     if (item.book && !cur.book) cur.book = item.book;
     cur.score += score; if (!cur.signals.includes(signal)) cur.signals.push(signal);
@@ -1393,7 +1435,7 @@ async function buildCandidates(db, focus = {}, limit = 30) {
   const aScore = new Map();
   books.filter(b => isRated(b) && b.rating >= 4).forEach(b => (b.authors || []).slice(0, 1).forEach(a => aScore.set(a, (aScore.get(a) || 0) + b.rating - 3)));
   const topAuthors = [...aScore.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
-  const jobs = topAuthors.map(([a, w]) => (googleAvailable() ? googleSearch(`inauthor:"${a}"`, { lang: hasHebrew(a) ? 'iw' : undefined, max: 15 }) : Promise.resolve([])).catch(() => []).then(list => {
+  const jobs = topAuthors.map(([a, w]) => (googleAvailable() ? googleSearch(`inauthor:"${a}"`, { lang: heOnly || hasHebrew(a) ? 'iw' : undefined, max: 15 }) : Promise.resolve([])).catch(() => []).then(list => {
     const sur = norm(a).split(' ').pop();
     list.filter(c => (c.authors || []).some(x => norm(x).includes(sur)) && !owned(c) && c.title).slice(0, 6).forEach(c =>
       add({ book: c }, 2 + w * 0.5 + (isHebrewEdition(c) ? 1 : 0) + (isIsraeliRecord(c) ? 0.5 : 0) + eraOk(c.year), `סופר/ת שאהבת: ${a}`));
@@ -1412,7 +1454,7 @@ async function buildCandidates(db, focus = {}, limit = 30) {
     const g = STARTER.find(x => x.tag === tag);
     if (!g) return;
     g.books.filter(b => !owned({ title: b[0], authors: [b[1]] }) && !(b[2] && owned({ title: b[2], authors: [b[1]] })))
-      .slice(0, 8).forEach(b => add({ seed: b, genre: tag }, 1 + w + (focusG.has(tag) ? 2 : 0), focusG.has(tag) ? `הז'אנר שביקשת: ${g.genre}` : `ז'אנר שאתה אוהב: ${g.genre}`));
+      .slice(0, 8).forEach(b => add({ seed: b, genre: tag }, 1 + w + (focusG.has(tag) ? 2 : 0), focusG.has(tag) ? `הז'אנר שביקשת: ${g.genre}` : T(`ז'אנר שאתה אוהב: ${g.genre}`)));
   });
   await withTimeout(Promise.all(jobs), 8000).catch(() => {});
   return [...out.values()].sort((a, b) => b.score - a.score).slice(0, limit);
@@ -1437,7 +1479,7 @@ function profileStale(db) {
 }
 async function aiBuildProfile(db) {
   const p = db.litProfile;
-  const wish = db.books.filter(b => b.status === 'want').slice(0, 40).map(b => b.title).join('; ');
+  const wish = db.books.filter(b => b.status === 'want' && !(b.tags || []).includes('מתנה')).slice(0, 40).map(b => b.title).join('; ');
   const rej = (db.rejections || []).filter(x => x.note).slice(0, 30).map(x => `${x.title} (${x.note})`).join('; ');
   const note = db.profileNote ? `\nREADER'S OWN NOTE ABOUT THEIR TASTE: ${db.profileNote}` : '';
   const fbs = (db.feedback || []).filter(x => !p || (x.at || 0) > p.at).slice(0, 20).map(x => `"${x.text}"${x.request ? ` (when asking for: ${x.request})` : ''}`).join('; ');
@@ -1452,15 +1494,21 @@ async function aiBuildProfile(db) {
   return { text: input.profile_he, brief: input.brief_en, at: Date.now(), count: db.books.length, cost };
 }
 
-function recRequest({ books, request, focus, qa, lang, exclude, dismissed, history, want, profile, profileNote, rejections = [], friendsLoved = [], feedback = [], genreMix = '', candidates = [] }) {
+function recRequest(opts) {
+  // מצב מתנה: בלי הטעם, ההיסטוריה והשלילות של המשתמש; רק הבקשה והתשובות על מקבל המתנה
+  if (opts.gift) return recRequestBase({ ...opts, books: [], history: [], profile: null, profileNote: '', rejections: [], friendsLoved: [], feedback: [], genreMix: '', candidates: [], dismissed: [], giftFor: true });
+  return recRequestBase(opts);
+}
+function recRequestBase({ books, request, focus, qa, lang, exclude, dismissed, history, want, profile, profileNote, rejections = [], friendsLoved = [], feedback = [], genreMix = '', candidates = [], giftFor = false }) {
   const candBlock = candidates.length ? `\n\nCANDIDATES (real books already found in the catalogues for this reader, with the signals that surfaced them). Prefer choosing from these by number when they fit the request; you may add up to 2 books of your own (candidate 0):\n${candidates.map(candidateLine).join('\n')}` : '';
-  const langText = { he: 'Hebrew only (books available in a Hebrew edition)', en: 'English only', both: 'Hebrew or English editions', any: 'any language', auto: 'Hebrew or English' }[lang] || 'Hebrew or English';
+  const langText = { he: 'Hebrew only. Recommend ONLY books that have a published Hebrew edition (original Hebrew or translated to Hebrew), and give its exact Hebrew title in title_he. Books without a Hebrew edition are dropped automatically, so do not suggest them', en: 'English only', both: 'Hebrew or English editions', any: 'any language', auto: 'Hebrew or English' }[lang] || 'Hebrew or English';
   const excludeTitles = uniq([...books.map(b => b.title), ...exclude, ...(history || []).flatMap(h => (h.recs || []).map(r => r.title))]).slice(0, 300);
   const prefs = focusSummary(focus);
-  const read = books.filter(isRated), wish = books.filter(b => ['want', 'reading'].includes(statusOf(b)));
+  const read = books.filter(isRated), wish = books.filter(b => ['want', 'reading'].includes(statusOf(b)) && !(b.tags || []).includes('מתנה'));   // ספרי מתנה לא מעידים על הטעם שלי
   const recent = profile ? libraryForPrompt(read.filter(b => (b.editedAt || b.addedAt || 0) > profile.at), 25) : '';
   const readerBlock = profile && profile.text
     ? `READER PROFILE (built from their whole library):\n${profile.brief || profile.text}${recent ? `\n\nADDED OR CHANGED SINCE THE PROFILE (title (published) — author | rating | year read | tags | notes):\n${recent}` : ''}`
+    : giftFor ? 'GIFT MODE: the user is choosing a book as a gift for someone else. Recommend for the recipient described in the REQUEST and FOLLOW-UP ANSWERS, not for the user. Prefer well-loved, giftable books.'
     : `READER'S LIBRARY (title (published) — author | rating 1-5 | year read | tags | notes):\n${libraryForPrompt(read) || '(empty)'}`;
   const wishBlock = wish.length ? `\nWISHLIST (they already plan to read these; do not recommend them, but they show current interests): ${wish.slice(0, 40).map(b => b.title).join('; ')}` : '';
   const rejBlock = rejections.length ? `\nREJECTED RECOMMENDATIONS (do not recommend; learn from the reasons): ${rejections.slice(0, 30).map(x => `${x.title}${x.note ? ` (${x.note})` : ''}`).join('; ')}` : '';
@@ -1478,7 +1526,7 @@ function recRequest({ books, request, focus, qa, lang, exclude, dismissed, histo
       '`why` must connect the book to specific books and notes from the reader\'s library, to their answers, and to how critics describe it, in 2–4 sentences.',
       `Language: ${langText}. ` + HEBREW_OUT + addressRule(addressOf())
     ].join('\n'),
-    prompt: `${readerBlock}${profileNote ? `\nREADER'S NOTE ABOUT THEIR TASTE: ${profileNote}` : ''}${mixBlock}${wishBlock}${rejBlock}${fbBlock}${friendsBlock}\n\nALREADY READ, OWNED OR SEEN (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 450).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history.slice(0, profile ? 3 : 6), books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs.length ? `\nPREFERENCES: ${prefs.join('; ')}` : ''}${qa && qa.length ? `\nFOLLOW-UP ANSWERS:\n${qa.map(x => `- ${x.q} → ${x.a}`).join('\n')}` : ''}${candBlock}\n\nRecommend ${want + 2} books.`
+    prompt: `${readerBlock}${profileNote ? `\nREADER'S NOTE ABOUT THEIR TASTE: ${profileNote}` : ''}${mixBlock}${wishBlock}${rejBlock}${fbBlock}${friendsBlock}\n\nALREADY READ, OWNED OR SEEN (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 450).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history.slice(0, profile ? 3 : 6), books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs.length ? `\nPREFERENCES: ${prefs.join('; ')}` : ''}${qa && qa.length ? `\nFOLLOW-UP ANSWERS:\n${qa.map(x => `- ${x.q} → ${x.a}`).join('\n')}` : ''}${candBlock}\n\nRecommend ${want + (lang === 'he' ? 4 : 2)} books.`
   };
 }
 
@@ -1491,7 +1539,7 @@ async function startJob({ system, prompt, submitTool, effort }) {
     model: AI_MODEL, max_tokens: 16000, thinking: { type: 'adaptive' }, output_config: { effort }, system,
     tools: [{ ...submitTool, strict: true }], messages: [{ role: 'user', content: prompt }], submit: submitTool.name, pid: ACTIVE.id
   }) });
-  if (r.status === 429) throw new Error('הגעתם למגבלת השימוש היומית ב-AI. נסו שוב מחר.');
+  if (r.status === 429) throw new Error(T('הגעתם למגבלת השימוש היומית ב-AI. נסו שוב מחר.'));
   if (!r.ok) throw new Error('השרת לא הצליח להתחיל את ההמלצה (' + r.status + ').');
   return (await r.json()).id;
 }
@@ -1506,11 +1554,11 @@ async function pollJob(id, onProgress) {
     // השרת קיבל את הבקשה אבל לא התחיל לעבוד: לא מחכים לנצח, עוברים לעבודה ישירה מהטלפון
     if (s.status === 'running' && !s.started && Date.now() - started > 20000) { const e = new Error('stalled'); e.stalled = true; throw e; }
     if (s.status === 'done') return { input: s.input, cost: (s.usage || []).reduce((a, u) => a + costOf(u), 0), hits: s.hits || [] };
-    if (s.status === 'error') throw new Error(/daily|429/.test(s.error) ? 'הגעתם למגבלת השימוש היומית ב-AI.' : 'השירות החזיר שגיאה ' + String(s.error || '').slice(0, 140));
-    if (s.status === 'missing') throw new Error('ההמלצה כבר לא שמורה בשרת. נסו שוב.');
+    if (s.status === 'error') throw new Error(/daily|429/.test(s.error) ? T('הגעתם למגבלת השימוש היומית ב-AI.') : 'השירות החזיר שגיאה ' + String(s.error || '').slice(0, 140));
+    if (s.status === 'missing') throw new Error(T('ההמלצה כבר לא שמורה בשרת. נסו שוב.'));
     const sec = Math.round((Date.now() - started) / 1000);
     if (onProgress && sec - said >= 30) { said = sec; onProgress(`Claude עדיין חושב (${sec} שניות). אפשר לצאת מהאפליקציה, ההמלצה תחכה כאן.`); }
-    if (Date.now() - started > 20 * 60000) throw new Error('ההמלצה לקחה יותר מדי זמן. נסו שוב.');
+    if (Date.now() - started > 20 * 60000) throw new Error(T('ההמלצה לקחה יותר מדי זמן. נסו שוב.'));
   }
 }
 const PENDING_KEY = () => 'vrt-rec-job-' + ACTIVE.id;
@@ -1530,8 +1578,8 @@ async function aiRecommend(opts) {
       res = await pollJob(id, onProgress);
     } catch (e) {
       // שגיאת רשת בשליחה, או שהשרת לא התחיל: ממשיכים ישירות (כל עוד האפליקציה פתוחה)
+      savePending(null);   // שגיאה: לא "ממשיכים" את אותה עבודה בכל כניסה ללשונית
       if (!(e.stalled || e instanceof TypeError || /fetch|network|timeout/i.test(e.message || ''))) throw e;
-      savePending(null);
       onProgress && onProgress('ההמלצה ברקע לא התחילה, ממשיך ישירות מהטלפון. כדאי להשאיר את האפליקציה פתוחה עד שזה מסתיים.');
     }
   }
@@ -1544,26 +1592,27 @@ async function resumeRecommend(pending, opts) {
   savePending(null);
   return finishRecs({ ...opts, candidates: (pending.ctx && pending.ctx.candidates) || [], ...res });
 }
-async function finishRecs({ input, cost, books, exclude, want = 5, onProgress, candidates = [] }) {
+async function finishRecs({ input, cost, books, exclude, want = 5, onProgress, candidates = [], lang = 'he' }) {
+  const heOnly = lang === 'he';
   onProgress && onProgress(`Claude הציע ${input.recommendations.length} ספרים. בודק כל אחד מול הספרייה הלאומית, Google Books והחנויות…`);
   // ספר שנבחר מרשימת המועמדים כבר אומת; השאר נבדקים במקביל, כל אחד עם תקרת זמן
   const fromCand = (r) => { const c = candidates[(r.candidate || 0) - 1]; return c ? c : null; };
   const checked = await Promise.all(input.recommendations.map(r => {
     const c = fromCand(r);
-    if (c && c.book) return Promise.resolve(c.book);
+    if (c && c.book && (!heOnly || isHebrewOrIsraeli(c.book))) return Promise.resolve(c.book);
     const q = c && c.seed ? { ...r, title_he: c.seed[0], title_original: c.seed[2] || r.title_original, author: c.seed[1] } : r;
-    return withTimeout(verifyRec(q), 15000).catch(() => null);
+    return withTimeout(verifyRec(q, heOnly), 15000).catch(() => null);
   }));
   const recs = [];
   let rejected = 0;
   input.recommendations.forEach((r, i) => {
     const c = checked[i];
     if (recs.length >= want) return;
-    if (!c || findInLibrary(c, books) || exclude.includes(c.key) || recs.some(x => x.key === c.key)) { rejected++; return; }
+    if (!c || (heOnly && !isHebrewOrIsraeli(c)) || findInLibrary(c, books) || exclude.includes(c.key) || recs.some(x => x.key === c.key)) { rejected++; return; }
     recs.push({ ...c, reasons: [r.why], genres: r.genres, verifiedAt: Date.now(), verifiedVia: c.verifiedVia || (c.source === 'google' ? 'Google Books' : 'Open Library') });
   });
   // הזמינות והתקציר מהחנויות נטענים אחר כך בכל כרטיס, כדי שההמלצות יופיעו מיד
-  onProgress && onProgress(`אומתו ${recs.length} ספרים${rejected ? `; ${rejected} נפסלו (לא נמצאו במאגרים, או כבר אצלך)` : ''}. עלות משוערת: $${cost.toFixed(2)}`);
+  onProgress && onProgress(`אומתו ${recs.length} ספרים${rejected ? `; ${rejected} נפסלו (לא נמצאו במאגרים${heOnly ? ', אין מהדורה עברית' : ''}, או כבר אצלך)` : ''}. עלות משוערת: $${cost.toFixed(2)}`);
   return { recs, interpretation: input.interpretation, cost };
 }
 // זמינות (מודפס/דיגיטלי/קולי) וקישורים מהחנויות, ותקציר בשפת הספר מהמקור (לא תרגום)
@@ -1937,11 +1986,17 @@ function Notice({ tone = 'info', children }) {
   );
 }
 
+// חיווי קצר: אייקון וצבע לפי סוג ההודעה (הצלחה / שגיאה / מידע)
+function toastKind(t) { return /נכשל|שגיאה|לא הצליח|אין חיבור/.test(t) ? 'error' : /נוסף|נשמר|הועתק|יובא|נמחק|עודכן|הושלם|מוכן|🎉|✓/.test(t) ? 'ok' : 'info'; }
 function Toast({ toast }) {
   if (!toast) return null;
+  const k = toastKind(String(toast));
   return (
     <div className="fixed inset-x-0 z-50 flex justify-center px-4 pointer-events-none" style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 84px)' }}>
-      <div className="fade-in pointer-events-auto bg-ink text-bg px-4 py-3 rounded-xl shadow-md text-[15px] font-semibold max-w-md" role="status">{toast}</div>
+      <div key={String(toast)} className="toast-in pointer-events-auto bg-ink text-bg ps-3 pe-4 py-3 rounded-2xl shadow-md text-[15px] font-semibold max-w-md flex items-center gap-2.5" role="status">
+        <span className={`shrink-0 w-7 h-7 rounded-full grid place-items-center ${k === 'error' ? 'bg-danger' : k === 'ok' ? 'bg-ok' : 'bg-accent'} text-white`}><Icon name={k === 'error' ? 'X' : k === 'ok' ? 'Check' : 'Info'} size={16} /></span>
+        <span>{toast}</span>
+      </div>
     </div>
   );
 }
@@ -1977,9 +2032,13 @@ function Sheet({ open, onClose, title, children }) {
 function RateSheet({ book, existing, tagLibrary, onSave, onClose, initialStatus }) {
   const [status, setStatus] = useState(initialStatus || (existing ? existing.status || 'read' : 'read'));
   const [rating, setRating] = useState(existing ? existing.rating : (book.presetRating || 0));
-  const [tags, setTags] = useState(existing ? existing.tags : []);
+  const [tags, setTags] = useState(existing ? existing.tags : (book.presetTags || []));
   const monthOf = (t) => { const d = new Date(t || Date.now()); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
   const [readMonth, setReadMonth] = useState(() => monthOf(existing && (existing.readAt || existing.addedAt)));
+  // מתי סיימתי: היום / אתמול / חודש לבחירה (ספר חדש: ברירת המחדל "היום")
+  const [when, setWhen] = useState(() => existing && statusOf(existing) !== 'reading' && statusOf(existing) !== 'want' ? 'month' : 'today');
+  const readAtOf = () => when === 'today' ? Date.now() : when === 'yesterday' ? Date.now() - 86400000
+    : /^\d{4}-\d{2}$/.test(readMonth) ? (existing && existing.readAt && monthOf(existing.readAt) === readMonth ? existing.readAt : readMonth === monthOf() ? Date.now() : new Date(readMonth + '-15T12:00:00').getTime()) : 0;
   const [note, setNote] = useState(existing ? existing.note || '' : (book.note || ''));
   const [draft, setDraft] = useState('');
   const suggested = useMemo(() => {
@@ -2014,10 +2073,11 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose, initialStatus 
         ))}
       </div>
       {(status === 'read' || status === 'partial') && (
-        <div className="mb-4 flex items-center gap-2 flex-wrap">
-          <label htmlFor="read-month" className="text-[13px] font-semibold tracking-wide text-muted">{status === 'partial' ? 'מתי הפסקתי?' : 'מתי קראתי?'}</label>
-          <input id="read-month" type="month" value={readMonth} max={monthOf()} onChange={e => setReadMonth(e.target.value)}
-            className="min-h-[44px] px-2 rounded-xl border border-line bg-bg text-[15px]" />
+        <div className="mb-4 flex items-center gap-2 flex-wrap" role="group" aria-label={status === 'partial' ? 'מתי הפסקתי?' : 'מתי סיימתי?'}>
+          <span className="text-[13px] font-semibold tracking-wide text-muted">{status === 'partial' ? 'מתי הפסקתי?' : 'מתי סיימתי?'}</span>
+          {[['today', 'היום'], ['yesterday', 'אתמול'], ['month', 'בחירת חודש']].map(([k, l]) => <Chip key={k} active={when === k} onClick={() => setWhen(k)}>{l}</Chip>)}
+          {when === 'month' && <><label htmlFor="read-month" className="sr-only">חודש</label><input id="read-month" type="month" value={readMonth} max={monthOf()} onChange={e => setReadMonth(e.target.value)}
+            className="min-h-[44px] px-2 rounded-xl border border-line bg-bg text-[15px]" /></>}
         </div>
       )}
       {(status === 'read' || status === 'partial') && (
@@ -2045,13 +2105,13 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose, initialStatus 
       <div className="mb-4">
         <label htmlFor="book-note" className="block text-[13px] font-semibold tracking-wide text-muted mb-1.5">{{ want: 'למה בא לך לקרוא אותו? (רשות)', reading: 'רשמים בינתיים (רשות)', partial: 'למה הפסקת, ועד איפה הגעת? (רשות, עוזר להמלצות)' }[status] || 'מה חשבת על הספר? (רשות)'}</label>
         <textarea id="book-note" value={note} onChange={e => setNote(e.target.value)} rows={3} maxLength={4000}
-          placeholder="מה אהבת, מה פחות, למי היית ממליץ… ההמלצות החכמות משתמשות בזה."
+          placeholder={T('מה אהבת, מה פחות, למי היית ממליץ… ההמלצות החכמות משתמשות בזה.')}
           className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px] leading-relaxed" />
       </div>
-      <Btn className="w-full" disabled={status === 'read' && !rating} onClick={() => onSave({ status, rating: ['want', 'reading'].includes(status) ? 0 : rating, tags, note: note.trim(), readAt: (status === 'read' || status === 'partial') && /^\d{4}-\d{2}$/.test(readMonth) ? new Date(readMonth + '-15T12:00:00').getTime() : 0 })}>
-        <Icon name="Check" size={20} />{existing ? 'שמירת שינויים' : { want: 'הוספה לרשימת "רוצה לקרוא"', reading: 'הוספה ל"קורא עכשיו"', partial: 'שמירה כ"קראתי חלקית"' }[status] || 'שמירה לספרייה'}
+      <Btn className="w-full" disabled={status === 'read' && !rating} onClick={() => onSave({ status, rating: ['want', 'reading'].includes(status) ? 0 : rating, tags, note: note.trim(), readAt: status === 'read' || status === 'partial' ? readAtOf() : 0 })}>
+        <Icon name="Check" size={20} />{existing ? 'שמירת שינויים' : { want: 'הוספה לרשימת "רוצה לקרוא"', reading: `הוספה ל"${STATUSES[1][1]}"`, partial: 'שמירה כ"קראתי חלקית"' }[status] || 'שמירה לספרייה'}
       </Btn>
-      {status === 'read' && !rating && <p className="text-center text-muted text-[13px] mt-2">בחרו דירוג כדי לשמור</p>}
+      {status === 'read' && !rating && <p className="text-center text-muted text-[13px] mt-2">{T('בחרו דירוג כדי לשמור')}</p>}
     </Sheet>
   );
 }
@@ -2159,6 +2219,10 @@ function StarterCover({ b, className }) {
 }
 
 /* ---------- היכרות ראשונה: סוויפ ימינה "קראתי", שמאלה "לא קראתי", ואז דירוג אם רוצים ---------- */
+function starterFinished(books) {
+  if (loadStarterState().pos >= STARTER_DECK.length) return true;
+  return STARTER_DECK.every(([b]) => findInLibrary({ title: b[0], authors: [b[1]] }, books) || (b[2] && findInLibrary({ title: b[2], authors: [b[1]] }, books)));
+}
 function loadStarterState() {
   try { const s = JSON.parse(localStorage.getItem('vrt-starter2-' + ACTIVE.id) || 'null'); if (s && typeof s.pos === 'number' && s.picks) return s; } catch (e) { /* */ }
   return { pos: 0, picks: {}, trail: [] };
@@ -2491,7 +2555,7 @@ function genreMixText(books) {
   if (total < 5) return '';
   return st.slice(0, 6).map(x => `${GENRE_OF_TAG[x.tag] || x.tag} ${Math.round(x.count * 100 / total)}% (avg ${(x.sum / x.count).toFixed(1)}★)`).join(', ');
 }
-function LibraryStats({ books }) {
+function LibraryStats({ books, onSummary }) {
   const read = books.filter(isRated);
   const gs = genreStats(read);
   const years = new Map();
@@ -2515,11 +2579,12 @@ function LibraryStats({ books }) {
       </div>
       {ys.length > 0 && <div className="text-[13px]"><span className="font-semibold text-muted">לפי שנת קריאה: </span><span className="tabular">{ys.map(([y, n]) => `${y}: ${n}`).join(' · ')}</span></div>}
       {topA.length > 0 && <div className="text-[13px]"><span className="font-semibold text-muted">הסופרים שקראת הכי הרבה: </span>{topA.map(([a, n]) => `${a} (${n})`).join(' · ')}</div>}
+      {onSummary && <Btn variant="soft" onClick={onSummary}><Icon name="Trophy" size={18} />הסיכום הדו-שבועי שלי</Btn>}
     </section>
   );
 }
 
-function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
+function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify, onSummary }) {
   const [q, setQ] = useState('');
   const [tag, setTag] = useState('');
   const [sort, setSort] = useState('recent');
@@ -2575,7 +2640,7 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
           {readBooks.length > 0 && <button type="button" className="text-accent font-semibold text-[14px] mr-2 min-h-[36px] inline-flex items-center gap-1" aria-expanded={showStats} onClick={() => setShowStats(!showStats)}>סטטיסטיקות{showStats ? ' ▴' : ' ▾'}</button>}
         </p>
       </header>
-      {showStats && <LibraryStats books={db.books} />}
+      {showStats && <LibraryStats books={db.books} onSummary={onSummary} />}
       <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2 mb-3" role="tablist" aria-label="מדף">
         {STATUSES.map(([k, l, ic]) => (
           <button key={k} type="button" role="tab" aria-selected={shelf === k} onClick={() => { setShelf(k); setTag(''); }}
@@ -2630,7 +2695,7 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
       ) : (
       <ul className="grid gap-2.5">
         {list.map(b => (
-          <li key={b.id}>
+          <li key={b.id} className="relative">
             <button type="button" onClick={() => { setOpen(b.id); setConfirmDel(false); }}
               className="w-full text-right flex gap-3 p-3 bg-surface border border-line rounded-xl active:bg-surface2 transition-colors">
               <Cover book={b} className="w-14 h-20" />
@@ -2638,10 +2703,12 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
                 <div className="font-display font-medium text-[17px] leading-snug clamp-2">{b.title}</div>
                 <div className="text-muted text-[14px] truncate">{[b.authors.join(', '), b.publisher, b.year].filter(Boolean).join(' · ')}</div>
                 {statusOf(b) === 'read' || b.rating > 0 ? <div className="mt-1"><Stars value={b.rating} size={15} /></div>
-                  : <div className="mt-1 text-[13px] text-accent font-semibold inline-flex items-center gap-1"><Icon name={(STATUSES.find(x => x[0] === statusOf(b)) || [])[2]} size={13} />{(STATUSES.find(x => x[0] === statusOf(b)) || [])[1]}</div>}
+                  : <div className={`mt-1 text-[12px] font-semibold inline-flex items-center gap-1 px-2 py-0.5 rounded-full ${STATUS_TONE[statusOf(b)] || ''}`}><Icon name={(STATUSES.find(x => x[0] === statusOf(b)) || [])[2]} size={13} />{(STATUSES.find(x => x[0] === statusOf(b)) || [])[1]}</div>}
                 {b.tags.length > 0 && <div className="flex flex-wrap gap-1 mt-1.5">{b.tags.slice(0, 4).map(t => <span key={t} className="text-[12px] px-2 py-0.5 rounded-full bg-surface2 text-muted font-semibold">{t}</span>)}{b.tags.length > 4 && <span className="text-[12px] text-muted">+{b.tags.length - 4}</span>}</div>}
               </div>
             </button>
+            {statusOf(b) === 'reading' && <button type="button" onClick={() => onEdit(b)} aria-label={`סיימתי את ${b.title}`}
+              className="absolute left-3 bottom-3 min-h-[36px] px-3 rounded-full bg-teal text-accentInk text-[13px] font-bold inline-flex items-center gap-1 shadow-sm active:scale-95 transition-transform"><Icon name="Check" size={15} />סיימתי</button>}
           </li>
         ))}
       </ul>
@@ -2679,7 +2746,7 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
             <Btn variant="soft" onClick={() => { onEdit(current); setOpen(null); }}><Icon name={['want', 'reading'].includes(statusOf(current)) ? 'BookCheck' : 'Pencil'} size={18} />{['want', 'reading'].includes(statusOf(current)) ? 'סיימתי אותו' : 'עריכה'}</Btn>
             {!confirmDel
               ? <Btn variant="danger" onClick={() => setConfirmDel(true)}><Icon name="Trash2" size={18} />מחיקה</Btn>
-              : <Btn variant="danger" className="!bg-danger !text-accentInk" onClick={() => { onDelete(current.id); setOpen(null); }}>לחצו שוב למחיקה</Btn>}
+              : <Btn variant="danger" className="!bg-danger !text-accentInk" onClick={() => { onDelete(current.id); setOpen(null); }}>{T('לחצו שוב למחיקה')}</Btn>}
           </div>
         </Sheet>
       )}
@@ -2798,7 +2865,7 @@ function CandidateGroup({ group, inLib, onPick }) {
     if (next && canLoadOL && !olEd.list && !olEd.loading) {
       setOlEd({ loading: true, list: null, error: '' });
       try { setOlEd({ loading: false, list: await olEditions(c.sourceId, c), error: '' }); }
-      catch (e) { setOlEd({ loading: false, list: [], error: 'טעינת המהדורות נכשלה. נסו שוב.' }); }
+      catch (e) { setOlEd({ loading: false, list: [], error: T('טעינת המהדורות נכשלה. נסו שוב.') }); }
     }
   };
 
@@ -2837,7 +2904,7 @@ function CandidateGroup({ group, inLib, onPick }) {
           </button>
           {showEd && (
             <div className="fade-in">
-              <p className="text-[13px] text-muted mb-1">בחרו את ההוצאה שקראתם: כריכה, הוצאה, שנה ומספר עמודים.</p>
+              <p className="text-[13px] text-muted mb-1">{T('בחרו את ההוצאה שקראתם: כריכה, הוצאה, שנה ומספר עמודים.')}</p>
               {olEd.loading && <div className="text-muted text-[14px] py-2 inline-flex items-center gap-2"><Spinner size={16} />טוען מהדורות מ-Open Library…</div>}
               {olEd.error && <Notice tone="error">{olEd.error}</Notice>}
               {!olEd.loading && !editions.length && <p className="text-muted text-[14px] py-2">לא נמצאו מהדורות נוספות במקור.</p>}
@@ -2900,10 +2967,10 @@ function SearchResults({ res, db, onPick, goSettings, smart, onSmart }) {
         <p className="text-[13px] text-muted">חיפשנו גם בדרכים נוספות: {res.tried.slice(0, 3).join(' · ')}</p>
       )}
       {(groups.length === 0 || weak) && (
-        <Notice tone="error">לא נמצא ספר שתואם לחיפוש. נסו את השם המלא או איות אחר, את השם בשפת המקור, או ISBN מהכריכה האחורית.</Notice>
+        <Notice tone="error">{T('לא נמצא ספר שתואם לחיפוש. נסו את השם המלא או איות אחר, את השם בשפת המקור, או ISBN מהכריכה האחורית.')}</Notice>
       )}
       {(groups.length === 0 || weak || partial) && onSmart && <SmartBox st={smart} onRun={onSmart} prominent />}
-      {partial && <Notice tone="warn">לא נמצאה התאמה מלאה. בדקו שהספר נכון, או דייקו את השם והמחבר.</Notice>}
+      {partial && <Notice tone="warn">{T('לא נמצאה התאמה מלאה. בדקו שהספר נכון, או דייקו את השם והמחבר.')}</Notice>}
       {weak ? (
         <details className="bg-surface border border-line rounded-xl p-3">
           <summary className="font-semibold text-[14px] text-muted cursor-pointer min-h-[32px]">תוצאות רחוקות ({groups.length})</summary>
@@ -2911,7 +2978,7 @@ function SearchResults({ res, db, onPick, goSettings, smart, onSmart }) {
         </details>
       ) : groups.length > 0 && (
         <>
-          <p className="text-[14px] text-muted">{groups.length} ספרים{edCount > groups.length ? ` (${edCount} מהדורות)` : ''} מ-{res.sources.join(' + ')}. בחרו את הספר, או פתחו את רשימת המהדורות כדי לבחור את ההדפסה המדויקת:</p>
+          <p className="text-[14px] text-muted">{groups.length} ספרים{edCount > groups.length ? ` (${edCount} מהדורות)` : ''} מ-{res.sources.join(' + ')}{T('. בחרו את הספר, או פתחו את רשימת המהדורות כדי לבחור את ההדפסה המדויקת:')}</p>
           {list}
           {!partial && onSmart && <SmartBox st={smart} onRun={onSmart} />}
         </>
@@ -2938,7 +3005,7 @@ function SingleSearch({ db, onPick, goSettings }) {
       const res = await searchBooks(text, mode === 'text' ? author.trim() : '');
       if (id === reqId.current) setState({ loading: false, res, error: '' });
     } catch (err) {
-      if (id === reqId.current) setState({ loading: false, res: null, error: 'החיפוש נכשל. בדקו חיבור לאינטרנט ונסו שוב.' });
+      if (id === reqId.current) setState({ loading: false, res: null, error: T('החיפוש נכשל. בדקו חיבור לאינטרנט ונסו שוב.') });
     }
   };
 
@@ -3144,7 +3211,7 @@ function BulkImport({ db, onPick, goSettings }) {
   if (!queue) {
     return (
       <div className="grid gap-2">
-        <label htmlFor="bulk-list" className="text-[15px]">הדביקו או הקלידו רשימה, <b>ספר בכל שורה</b>. אפשר להוסיף מחבר אחרי מקף, ואפשר גם ISBN או קישור.</label>
+        <label htmlFor="bulk-list" className="text-[15px]">{T('הדביקו או הקלידו רשימה,')} <b>ספר בכל שורה</b>. אפשר להוסיף מחבר אחרי מקף, ואפשר גם ISBN או קישור.</label>
         <textarea id="bulk-list" value={draft} onChange={e => setDraft(e.target.value)} rows={8}
           placeholder={'יער נורווגי - מורקמי\nסיפור על אהבה וחושך\nProject Hail Mary - Andy Weir\n9789650731234'}
           className="w-full rounded-xl border border-line bg-surface p-3 text-[16px] leading-relaxed" />
@@ -3270,7 +3337,7 @@ function BulkImport({ db, onPick, goSettings }) {
           {(cur.status === 'pending' || cur.status === 'searching') && (
             <div className="bg-surface border border-line rounded-xl p-4 text-muted inline-flex items-center gap-2"><Spinner />מחפש ומאמת מול המאגרים…</div>
           )}
-          {cur.status === 'error' && <Notice tone="error">החיפוש נכשל (בעיית רשת). לחצו "חיפוש מחדש".</Notice>}
+          {cur.status === 'error' && <Notice tone="error">{T('החיפוש נכשל (בעיית רשת). לחצו "חיפוש מחדש".')}</Notice>}
           {res && !isDone(cur.status) && (() => {
             const top = res.candidates[0];
             const already = top && findInLibrary(top, db.books);
@@ -3320,7 +3387,7 @@ function FreeTextIntake({ goBulk, goSettings }) {
   };
   return (
     <div className="grid gap-2">
-      <label htmlFor="free-text" className="text-[15px]">כתבו בחופשיות על ספרים שקראתם: שמות, סופרים, מה אהבתם. Claude יזהה את הספרים, ואחר כך תבחרו ותדרגו כל אחד.</label>
+      <label htmlFor="free-text" className="text-[15px]">{T('כתבו בחופשיות על ספרים שקראתם: שמות, סופרים, מה אהבתם. Claude יזהה את הספרים, ואחר כך תבחרו ותדרגו כל אחד.')}</label>
       <textarea id="free-text" value={text} onChange={e => setText(e.target.value)} rows={7}
         placeholder={'למשל: השנה קראתי את החדש של אשכול נבו, ממש אהבתי. גם משהו של פרנזן על משפחה, ואת זה של מורקמי עם הבאר, שקצת שעמם אותי.'}
         className="w-full rounded-xl border border-line bg-surface p-3 text-[16px] leading-relaxed" />
@@ -3329,7 +3396,7 @@ function FreeTextIntake({ goBulk, goSettings }) {
       {found && (
         <div className="fade-in bg-surface border border-line rounded-xl p-3 grid gap-2">
           <div className="font-semibold text-[15px]">זוהו {found.length} ספרים{st.cost ? <span className="text-muted font-normal text-[13px]"> · עלות משוערת ${st.cost.toFixed(2)}</span> : null}</div>
-          {found.length === 0 && <p className="text-muted text-[14px]">לא זוהו ספרים בטקסט. נסו לכתוב שמות של ספרים או סופרים.</p>}
+          {found.length === 0 && <p className="text-muted text-[14px]">{T('לא זוהו ספרים בטקסט. נסו לכתוב שמות של ספרים או סופרים.')}</p>}
           <ul className="grid gap-1.5">
             {found.map((b, i) => (
               <li key={i} className="flex items-start gap-2 border-b border-line last:border-0 pb-1.5">
@@ -3495,7 +3562,7 @@ function LitProfileCard({ db, update }) {
       {editNote ? (
         <div className="grid gap-2">
           <label htmlFor="profile-note" className="text-[13px] font-semibold text-muted">משהו שחשוב לדעת על הטעם שלך?</label>
-          <textarea id="profile-note" rows={3} value={note} onChange={e => setNote(e.target.value)} maxLength={1500} placeholder="למשל: אוהב סופים פתוחים, לא מתחבר לספרי מתח, מחפש עכשיו ספרים קצרים"
+          <textarea id="profile-note" rows={3} value={note} onChange={e => setNote(e.target.value)} maxLength={1500} placeholder={T("למשל: אוהב סופים פתוחים, לא מתחבר לספרי מתח, מחפש עכשיו ספרים קצרים")}
             className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px]" />
           <div className="grid grid-cols-2 gap-2">
             <Btn onClick={() => { update(d => ({ ...d, profileNote: note.trim(), profileNoteAt: Date.now() })); setEditNote(false); }}>שמירה</Btn>
@@ -3585,7 +3652,7 @@ function RejectSheet({ book, onDone, onClose }) {
       </div>
       <label htmlFor="reject-note" className="block text-[13px] font-semibold text-muted mb-1.5">למה? (רשות, עוזר לדייק את הפרופיל הספרותי)</label>
       <textarea id="reject-note" value={note} onChange={e => setNote(e.target.value)} rows={3} maxLength={500}
-        placeholder="למשל: כבר קראתי משהו דומה; כבד מדי בשבילי עכשיו; לא אוהב את הסופר"
+        placeholder={T("למשל: כבר קראתי משהו דומה; כבד מדי בשבילי עכשיו; לא אוהב את הסופר")}
         className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px] leading-relaxed mb-3" />
       <Btn className="w-full" onClick={() => onDone({ forever, note })}><Icon name="ThumbsDown" size={18} />{forever ? 'לא להציג יותר' : 'להסתיר לחודש'}</Btn>
     </Sheet>
@@ -3674,7 +3741,7 @@ function HistoryView({ db, update, onPick, notify, openId, setOpenId }) {
         <h2 className="font-display font-medium text-[20px]">{open.recs.length} המלצות</h2>
         <ul className="grid gap-3">
           {open.recs.map(r => (
-            <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)} onRead={(b) => onPick(b)} onWant={(b) => onPick(b, { status: 'want', fromRec: true })}
+            <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)} onRead={(b) => onPick(b)} onWant={(b) => onPick(open.answers && open.answers.gift ? { ...b, presetTags: ['מתנה'] } : b, { status: 'want', fromRec: !(open.answers && open.answers.gift) })}
               onDismiss={(b) => setRejecting(b)} />
           ))}
         </ul>
@@ -3706,7 +3773,7 @@ function HistoryView({ db, update, onPick, notify, openId, setOpenId }) {
         })}
       </ul>
       <Btn variant="ghost" onClick={() => { if (!confirmClear) { setConfirmClear(true); return; } update(d => { const t = { ...d.tombstones.history }; d.history.forEach(h => { t[h.id] = Date.now(); }); return { ...d, history: [], tombstones: { ...d.tombstones, history: t } }; }); setConfirmClear(false); notify('ההיסטוריה נוקתה'); }}>
-        {confirmClear ? 'לחצו שוב לניקוי כל ההיסטוריה' : 'ניקוי ההיסטוריה'}
+        {confirmClear ? T('לחצו שוב לניקוי כל ההיסטוריה') : 'ניקוי ההיסטוריה'}
       </Btn>
     </div>
   );
@@ -3735,6 +3802,26 @@ function useRecStore(pid, db) {
   return st;
 }
 
+// חיווי שלבים בזמן ההמלצה: שאלות → מועמדים מהמאגרים → Claude בוחר → אימות מול המאגרים והחנויות
+const REC_STEPS = ['שאלות', 'מועמדים', 'Claude בוחר', 'אימות'];
+function RecStepper({ log }) {
+  const last = [...log].reverse().find(m => m.progress);
+  const t = last ? last.text : '';
+  const cur = /בודק כל אחד|אומתו/.test(t) ? 3 : /Claude|שולח|חושב|ממשיך/.test(t) ? 2 : 1;
+  return (
+    <div className="fade-in bg-surface border border-line rounded-2xl p-3" role="status" aria-label={`שלב ${cur + 1} מתוך ${REC_STEPS.length}: ${REC_STEPS[cur]}`}>
+      <ol className="flex items-center gap-1">
+        {REC_STEPS.map((l, i) => (
+          <li key={l} className="flex-1 flex flex-col items-center gap-1 min-w-0">
+            <span className={`w-8 h-8 rounded-full grid place-items-center text-[13px] font-bold transition-colors ${i < cur ? 'bg-ok text-white' : i === cur ? 'bg-accent text-accentInk' : 'bg-surface2 text-muted'}`}>
+              {i < cur ? <Icon name="Check" size={16} /> : i === cur ? <Spinner size={14} /> : i + 1}</span>
+            <span className={`text-[12px] truncate max-w-full ${i === cur ? 'font-semibold text-ink' : 'text-muted'}`}>{l}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
 function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
   const digests = useDigest().digests.filter(d => d.books.length);
   // מצב השיחה נשמר מחוץ ללשונית (לכל משתמש): יציאה מהלשונית לא מאפסת את השיחה, והמלצה שרצה ממשיכה ברקע
@@ -3781,13 +3868,13 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
     try {
       if (!db.books.length) progress('הספרייה ריקה, אז ההמלצות יתבססו רק על התשובות שלך. דירוג ספרים שקראת ישפר מאוד את הדיוק.');
       const { recs: r } = await recommend({ books: db.books, answers: ans, lang, exclude, dismissed: [...db.dismissed, ...rejectedKeys(db)], want: 5, onProgress: progress });
-      if (!r.length) progress('לא נמצאו ספרים שעברו את כל שלבי האימות. נסו לשנות תשובה (למשל אורך או שפה), או להוסיף עוד ספרים מדורגים.');
+      if (!r.length) progress(T('לא נמצאו ספרים שעברו את כל שלבי האימות. נסו לשנות תשובה (למשל אורך או שפה), או להוסיף עוד ספרים מדורגים.'));
       const all = [...st.recs, ...r];
       const sh = new Set(st.shown); r.forEach(x => { sh.add(x.key); sh.add(dedupeKey(x)); });
       recSet(st, { recs: all, shown: sh });
       saveSession(ans, lang, all);
     } catch (e) {
-      progress('אירעה שגיאת רשת בזמן החיפוש. בדקו חיבור לאינטרנט ונסו שוב.');
+      progress(T('אירעה שגיאת רשת בזמן החיפוש. בדקו חיבור לאינטרנט ונסו שוב.'));
     }
     recSet(st, { running: false });
   };
@@ -3802,7 +3889,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
   const excludeNow = () => [...st.recs.map(x => x.title), ...[...st.shown].filter(k => !k.includes(':') && !k.includes('|')), ...activeRejections(db).map(x => x.title)];
   const applyRecs = (ans, r, interpretation) => {
     if (interpretation) pushLog({ from: 'bot', text: interpretation });
-    if (!r.length) progress('לא נשארו המלצות שעברו את האימות. נסו לנסח את הבקשה אחרת.');
+    if (!r.length) progress(T('לא נשארו המלצות שעברו את האימות. נסו לנסח את הבקשה אחרת.'));
     const all = [...st.recs, ...r];
     const sh = new Set(st.shown); r.forEach(x => { sh.add(x.key); sh.add(x.title); });
     recSet(st, { recs: all, shown: sh });
@@ -3812,10 +3899,11 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
     recSet(st, { running: true, questions: [], qa });
     try {
       // השכבה האלגוריתמית: המועמדים נאספו כבר בזמן שאלות ההמשך
-      const candidates = await (st.candP || (st.candP = buildCandidates(db, ans.focus || {}))).catch(() => []);
+      const candidates = await (st.candP || (st.candP = buildCandidates(db, ans.focus || {}, 30, lang))).catch(() => []);
       if (candidates.length) progress(`נמצאו ${candidates.length} ספרים מתאימים במאגרים (לפי סופרים שאהבת, חברים וז'אנרים). Claude בוחר מתוכם.`);
+      const gift = !!ans.gift;
       const { recs: r, interpretation } = await aiRecommend({
-        candidates,
+        candidates, gift,
         books: db.books, request: ans.request, focus: ans.focus, qa, lang, exclude: excludeNow(),
         dismissed: db.dismissed, history: db.history, want: 5, onProgress: progress, ctx: { ans, qa },
         profile: db.litProfile, profileNote: db.profileNote, rejections: activeRejections(db).concat((db.rejections || []).filter(x => x.note && x.until && x.until <= Date.now())), friendsLoved: friendsLovedTitles(db.books), feedback: db.feedback || [], genreMix: genreMixText(db.books)
@@ -3826,13 +3914,14 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
   };
   const goAi = async () => {
     const request = aiText.trim();
-    const ans = { mode: 'ai', request, focus: st.focus };
+    const gift = !!st.gift;
+    const ans = { mode: 'ai', request, focus: st.focus, gift };
     const sum = focusSummary(st.focus);
     recSet(st, { answers: ans, step: QUESTIONS.length, running: true, qa: [] });
-    st.candP = buildCandidates(db, st.focus || {});   // רץ במקביל לשאלות ההמשך
-    pushLog({ from: 'me', text: [request || 'תמליץ לי על הספר הבא', ...sum].join(' · ') });
+    st.candP = gift ? Promise.resolve([]) : buildCandidates(db, st.focus || {}, 30, lang);   // רץ במקביל לשאלות ההמשך (במתנה: בלי הטעם שלי)
+    pushLog({ from: 'me', text: [gift ? `🎁 מתנה: ${request || 'ספר טוב'}` : request || 'תמליץ לי על הספר הבא', ...sum].join(' · ') });
     let qs = [];
-    try { qs = await aiClarify({ books: db.books, request, focus: st.focus, profile: db.litProfile }); } catch (e) { qs = []; }
+    try { qs = await aiClarify({ books: gift ? [] : db.books, request, focus: st.focus, profile: gift ? null : db.litProfile, gift }); } catch (e) { qs = []; }
     if (qs.length) {
       pushLog({ from: 'bot', text: `כדי לדייק, ${qs.length} שאלות קצרות (אפשר לדלג):` });
       recSet(st, { questions: qs, qa: [], running: false });
@@ -3846,7 +3935,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
     if (!text) return;
     const shownTitles = st.recs.map(x => x.title);
     pushLog({ from: 'me', text });
-    update(d => ({ ...d, feedback: [{ id: uid(), text, at: Date.now(), request: st.answers.request || '', about: shownTitles.slice(0, 8) }, ...(d.feedback || [])].slice(0, 200) }));
+    if (!st.answers.gift) update(d => ({ ...d, feedback: [{ id: uid(), text, at: Date.now(), request: st.answers.request || '', about: shownTitles.slice(0, 8) }, ...(d.feedback || [])].slice(0, 200) }));
     setFbText('');
     const sh = new Set(st.shown); shownTitles.forEach(t => sh.add(t));
     recSet(st, { recs: [], shown: sh });
@@ -3856,7 +3945,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
   const swapQ = async () => {
     setSwapping(true);
     try {
-      const [nq] = await aiClarify({ books: db.books, request: st.answers.request, focus: st.focus, profile: db.litProfile, avoid: st.questions.map(q => q.question), count: 1 });
+      const [nq] = await aiClarify({ books: st.answers.gift ? [] : db.books, request: st.answers.request, focus: st.focus, profile: st.answers.gift ? null : db.litProfile, gift: !!st.answers.gift, avoid: st.questions.map(q => q.question), count: 1 });
       if (nq) recSet(st, { questions: st.questions.map((q, i) => i === st.qa.length ? nq : q) });
     } catch (e) { notify('לא הצלחתי להביא שאלה אחרת. אפשר לדלג.'); }
     setSwapping(false);
@@ -3876,7 +3965,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
     const ans = (p.ctx && p.ctx.ans) || { mode: 'ai', request: '' };
     recSet(st, { running: true, resuming: true, answers: ans, step: QUESTIONS.length });
     progress('ממשיך את ההמלצה שהתחילה קודם…');
-    resumeRecommend(p, { books: db.books, exclude: excludeNow(), want: 5, onProgress: progress })
+    resumeRecommend(p, { books: db.books, exclude: excludeNow(), want: 5, onProgress: progress, lang })
       .then(({ recs: r, interpretation }) => applyRecs(ans, r, interpretation))
       .catch(e => { savePending(null); progress(e.message); })
       .finally(() => recSet(st, { running: false, resuming: false }));
@@ -3888,7 +3977,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
     <div className="fade-in">
       <header className="pt-4 pb-3">
         <h1 className="font-display font-medium text-[26px] leading-snug">גלה ספר חדש</h1>
-        <p className="text-muted text-[15px]">{hasAi ? 'ספרו מה בא לכם, בחרו מיקוד, ו-Claude ישאל 2–4 שאלות לדיוק. כל המלצה נבדקת מול המאגרים והחנויות.' : '4 שאלות קצרות. כל המלצה נבדקת מחדש מול המאגר לפני שהיא מוצגת.'}</p>
+        <p className="text-muted text-[15px]">{hasAi ? T('ספרו מה בא לכם, בחרו מיקוד, ו-Claude ישאל 2–4 שאלות לדיוק. כל המלצה נבדקת מול המאגרים והחנויות.') : '4 שאלות קצרות. כל המלצה נבדקת מחדש מול המאגר לפני שהיא מוצגת.'}</p>
       </header>
       <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2 mb-4" role="tablist" aria-label="תצוגה">
         {[['chat', 'שיחה', 'MessageCircle'], ['history', `היסטוריה (${(db.history || []).length})`, 'History']].map(([k, l, ic]) => {
@@ -3934,9 +4023,16 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
 
       {hasAi && step === 0 && !log.length && (
         <div className="bg-surface border border-accent rounded-xl p-3 mb-4 grid gap-2">
-          <label htmlFor="ai-request" className="font-semibold text-[16px] flex items-center gap-1.5"><Icon name="Sparkles" size={18} />מה בא לך לקרוא?</label>
+          <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2" role="tablist" aria-label="בשביל מי הספר">
+            {[[false, 'בשבילי', 'Sparkles'], [true, '🎁 בשביל מישהו אחר', 'Gift']].map(([g, l, ic]) => (
+              <button key={l} type="button" role="tab" aria-selected={!!st.gift === g} onClick={() => recSet(st, { gift: g })}
+                className={`min-h-[40px] rounded-xl font-semibold text-[14px] inline-flex items-center justify-center gap-1.5 ${!!st.gift === g ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}>{g ? l : <><Icon name={ic} size={16} />{l}</>}</button>
+            ))}
+          </div>
+          <label htmlFor="ai-request" className="font-semibold text-[16px] flex items-center gap-1.5"><Icon name={st.gift ? 'Gift' : 'Sparkles'} size={18} />{st.gift ? T('למי הספר? ספרו עליו או עליה') : 'מה בא לך לקרוא?'}</label>
+          {st.gift && <p className="text-[13px] text-muted -mt-1">במצב מתנה ההמלצה לא נשענת על הטעם שלך ולא משנה את הפרופיל שלך. ספר שנשמר נכנס ל"רוצה לקרוא" עם התגית "מתנה".</p>}
           <textarea id="ai-request" value={aiText} onChange={e => setAiText(e.target.value)} rows={3}
-            placeholder="למשל: משהו כמו 'יער נורווגי' אבל פחות עצוב; רומן שמתרחש בארץ; ספר שאפשר גם לשמוע"
+            placeholder={st.gift ? "למשל: לאבא שלי, בן 70, אוהב היסטוריה וביוגרפיות, קרא את 'סאפיינס'" : "למשל: משהו כמו 'יער נורווגי' אבל פחות עצוב; רומן שמתרחש בארץ; ספר שאפשר גם לשמוע"}
             className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px] leading-relaxed" />
           <div className="grid gap-2.5 border-t border-line pt-2">
             <div className="text-[14px] font-semibold text-muted">מיקוד (לא חובה)</div>
@@ -3955,7 +4051,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
       )}
 
       <div className="grid gap-2.5 mb-3" aria-live="polite">
-        <Bubble from="bot">היי! בואו נמצא את הספר הבא שלך. אני משתמש רק בספרים שקיימים באמת ב-Google Books או ב-Open Library.</Bubble>
+        <Bubble from="bot">{T('היי! בואו נמצא את הספר הבא שלך.')} אני משתמש רק בספרים שקיימים באמת ב-Google Books או ב-Open Library.</Bubble>
         {log.map((m, i) => <Bubble key={i} from={m.from}>{m.progress ? <span className="text-muted text-[14px]">{m.text}</span> : m.text}</Bubble>)}
         {!done && q && (
           <>
@@ -3994,7 +4090,8 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
             </>
           );
         })()}
-        {running && <Bubble from="bot"><span className="inline-flex items-center gap-2 text-muted"><Spinner size={16} />עובד על זה…</span></Bubble>}
+        {running && (answers.mode === 'ai' && !(st.questions.length > 0 && st.qa.length < st.questions.length) ? <RecStepper log={log} />
+          : <Bubble from="bot"><span className="inline-flex items-center gap-2 text-muted"><Spinner size={16} />עובד על זה…</span></Bubble>)}
         {running && answers.mode === 'ai' && pushSupported() && (typeof Notification === 'undefined' || Notification.permission !== 'granted') && (
           <div className="fade-in bg-surface border border-line rounded-2xl p-3 grid gap-1.5">
             <p className="text-[14px]">אפשר לצאת מהאפליקציה בינתיים. רוצה התראה כשההמלצות מוכנות?</p>
@@ -4009,7 +4106,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
           <ul className="grid gap-3">
             {recs.map(r => (
               <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)}
-                onRead={(b) => onPick(b)} onWant={(b) => onPick(b, { status: 'want', fromRec: true })}
+                onRead={(b) => onPick(b)} onWant={(b) => onPick(st.answers.gift ? { ...b, presetTags: ['מתנה'] } : b, { status: 'want', fromRec: !st.answers.gift })}
                 onEnrich={(e) => { const all = st.recs.map(x => x.key === e.key ? e : x); recSet(st, { recs: all }); if (st.session.id) saveSession(st.answers, lang, all); }}
                 onDismiss={(b) => setRejecting(b)} />
             ))}
@@ -4019,7 +4116,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
 
       {recs.length > 0 && !running && answers.mode === 'ai' && (
         <form className="mt-4 bg-surface border border-line rounded-2xl p-3 grid gap-2" onSubmit={(e) => { e.preventDefault(); critique(); }}>
-          <label htmlFor="rec-feedback" className="font-semibold text-[15px] flex items-center gap-1.5"><Icon name="MessageCircle" size={17} />לא בדיוק זה? ספרו מה לא מתאים</label>
+          <label htmlFor="rec-feedback" className="font-semibold text-[15px] flex items-center gap-1.5"><Icon name="MessageCircle" size={17} />{T('לא בדיוק זה? ספרו מה לא מתאים')}</label>
           <textarea id="rec-feedback" rows={2} value={fbText} onChange={e => setFbText(e.target.value)} maxLength={600}
             placeholder="למשל: כבדים מדי בשבילי עכשיו; רוצה משהו עם הומור; פחות מלחמה"
             className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px]" />
@@ -4107,7 +4204,177 @@ function SyncPanel() {
 }
 window.__vrtSync = () => syncNow();   // לבדיקות ולתחזוקה בלבד
 
+/* ---------- מה האפליקציה יודעת עליי: כל מה שמשפיע על ההמלצות, עם מחיקה של כל פריט ---------- */
+function KnowsAboutMe({ db, update, notify }) {
+  const [open, setOpen] = useState(false);
+  const tomb = (d, id) => ({ ...d.tombstones, misc: { ...(d.tombstones.misc || {}), [id]: Date.now() } });
+  const delItem = (kind, id) => update(d => ({ ...d, [kind]: (d[kind] || []).filter(x => x.id !== id), tombstones: tomb(d, id) }));
+  const rej = db.rejections || [], fb = db.feedback || [];
+  const notes = db.books.filter(b => b.note).length;
+  const Row = ({ children, onDel, label }) => (
+    <li className="flex items-start gap-2 py-2 border-b border-line last:border-0">
+      <div className="flex-1 min-w-0 text-[14px] leading-relaxed">{children}</div>
+      <button type="button" onClick={onDel} aria-label={`מחיקה: ${label}`} className="shrink-0 w-9 h-9 rounded-full grid place-items-center text-muted hover:text-danger"><Icon name="Trash2" size={17} /></button>
+    </li>
+  );
+  return (
+    <section className="bg-surface border border-line rounded-xl p-3 grid gap-2">
+      <button type="button" onClick={() => setOpen(o => !o)} aria-expanded={open} className="flex items-center gap-2 text-right min-h-[44px]">
+        <Icon name="UserSearch" size={20} className="text-accent" />
+        <span className="flex-1"><span className="block font-semibold text-[17px]">מה האפליקציה יודעת עליי</span>
+          <span className="block text-[13px] text-muted">{db.books.filter(isRated).length} דירוגים · {notes} הערות · {rej.length} ספרים שנשללו · {fb.length} משובים{db.litProfile ? ' · פרופיל ספרותי' : ''}</span></span>
+        <Icon name={open ? 'ChevronUp' : 'ChevronDown'} size={20} className="text-muted" />
+      </button>
+      {open && <div className="grid gap-3 fade-in">
+        <p className="text-[13px] text-muted">זה כל מה שנשלח ל-Claude כשמבקשים המלצה (חוץ מהספרים עצמם). אפשר למחוק כל פריט; המחיקה מסתנכרנת לכל המכשירים.</p>
+        <div>
+          <h3 className="text-[14px] font-semibold mb-1">הפרופיל הספרותי</h3>
+          {db.litProfile ? <ul><Row label="הפרופיל הספרותי" onDel={() => { update(d => ({ ...d, litProfile: null, tombstones: tomb(d, 'litProfile') })); notify('הפרופיל נמחק. ייבנה מחדש מהספרייה בהמלצה הבאה'); }}>
+            <div className="whitespace-pre-line clamp-4">{db.litProfile.text}</div><div className="text-[12px] text-muted mt-1">עודכן {fmtDate(db.litProfile.at)}</div></Row></ul>
+            : <p className="text-[13px] text-muted">עוד אין (נבנה אחרי 3 ספרים מדורגים).</p>}
+        </div>
+        <div>
+          <h3 className="text-[14px] font-semibold mb-1">ההערה שלי על הטעם</h3>
+          {db.profileNote ? <ul><Row label="ההערה על הטעם" onDel={() => { update(d => ({ ...d, profileNote: '', profileNoteAt: Date.now() })); notify('ההערה נמחקה'); }}>{db.profileNote}</Row></ul>
+            : <p className="text-[13px] text-muted">אין.</p>}
+        </div>
+        <div>
+          <h3 className="text-[14px] font-semibold mb-1">משוב על המלצות ({fb.length})</h3>
+          {fb.length ? <ul>{fb.slice(0, 50).map(x => <Row key={x.id} label={x.text} onDel={() => delItem('feedback', x.id)}>"{x.text}"<div className="text-[12px] text-muted">{fmtDate(x.at)}{x.request ? ` · בבקשה: ${x.request}` : ''}</div></Row>)}</ul>
+            : <p className="text-[13px] text-muted">אין.</p>}
+        </div>
+        <div>
+          <h3 className="text-[14px] font-semibold mb-1">ספרים שנשללו ({rej.length})</h3>
+          {rej.length ? <ul>{rej.slice(0, 80).map(x => <Row key={x.id} label={x.title} onDel={() => delItem('rejections', x.id)}><b>{x.title}</b>{x.note ? ` · ${x.note}` : ''}<div className="text-[12px] text-muted">{x.until ? `עד ${fmtDate(x.until)}` : 'לתמיד'}</div></Row>)}</ul>
+            : <p className="text-[13px] text-muted">אין.</p>}
+        </div>
+        <p className="text-[13px] text-muted">עוד: {(db.history || []).length} שיחות המלצה (נמחקות בלשונית "המלצות" ← היסטוריה), והספרים, הדירוגים וההערות שבספרייה.</p>
+      </div>}
+    </section>
+  );
+}
+
+/* ---------- ייצוא וייבוא מאפליקציות ספרים אחרות (Goodreads, StoryGraph, CSV כללי) ---------- */
+function parseCSV(text) {
+  const rows = []; let row = [], cur = '', q = false;
+  const t = String(text || '').replace(/^﻿/, '');
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (q) {
+      if (ch === '"' && t[i + 1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') q = false;
+      else cur += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === ',' || ch === '\t' || ch === ';' && !t.slice(0, 400).includes(',')) { row.push(cur); cur = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && t[i + 1] === '\n') i++; row.push(cur); rows.push(row); row = []; cur = ''; }
+    else cur += ch;
+  }
+  if (cur || row.length) { row.push(cur); rows.push(row); }
+  return rows.filter(r => r.some(x => x.trim()));
+}
+const csvCell = (v) => { const s = String(v == null ? '' : v); return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+const ymd = (ts) => { if (!ts) return ''; const d = new Date(ts); return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`; };
+// קובץ בפורמט של Goodreads: אפשר לייבא אותו ל-Goodreads, ל-StoryGraph ולרוב אפליקציות הספרים
+function toGoodreadsCSV(db) {
+  const shelf = { read: 'read', want: 'to-read', reading: 'currently-reading', partial: 'read' };
+  const head = ['Title', 'Author', 'ISBN', 'ISBN13', 'My Rating', 'Publisher', 'Year Published', 'Date Read', 'Date Added', 'Bookshelves', 'Exclusive Shelf', 'My Review'];
+  const lines = db.books.map(b => {
+    const isbns = (b.isbns || []).map(x => String(x).replace(/[^\dXx]/g, ''));
+    const s = statusOf(b);
+    return [b.title, (b.authors || [])[0] || '', isbns.find(x => x.length === 10) || '', isbns.find(x => x.length === 13) || '', b.rating || 0, b.publisher || '', b.year || '',
+      ymd(b.readAt), ymd(b.addedAt), [...(b.tags || []), ...(s === 'partial' ? ['did-not-finish'] : [])].join(', '), shelf[s], b.note || ''].map(csvCell).join(',');
+  });
+  return '﻿' + [head.join(','), ...lines].join('\r\n');
+}
+// מזהה את מבנה הקובץ לפי הכותרות, ומחזיר רשומות אחידות
+function readImportRows(text) {
+  const rows = parseCSV(text);
+  if (rows.length < 2) return { app: '', items: [] };
+  const h = rows[0].map(x => x.trim().toLowerCase());
+  const col = (...names) => { for (const n of names) { const i = h.indexOf(n); if (i >= 0) return i; } return -1; };
+  const app = h.includes('exclusive shelf') ? 'Goodreads' : h.includes('read status') ? 'StoryGraph' : 'CSV';
+  const iT = col('title', 'שם', 'שם הספר', 'כותר', 'ספר'), iA = col('author', 'authors', 'מחבר', 'סופר', 'מחברים', 'author l-f');
+  const iI = col('isbn13', 'isbn/uid', 'isbn'), iI2 = col('isbn'), iR = col('my rating', 'star rating', 'rating', 'דירוג');
+  const iS = col('exclusive shelf', 'read status', 'status', 'סטטוס'), iD = col('date read', 'last date read', 'read date', 'תאריך קריאה');
+  const iN = col('my review', 'review', 'notes', 'הערה', 'הערות'), iShelves = col('bookshelves', 'tags', 'תגיות');
+  if (iT < 0) return { app, items: [] };
+  const date = (s) => { const m = String(s || '').match(/(\d{4})[/-](\d{1,2})(?:[/-](\d{1,2}))?/); return m ? new Date(+m[1], +m[2] - 1, +(m[3] || 15), 12).getTime() : 0; };
+  const items = rows.slice(1).map(r => {
+    const g = (i) => (i >= 0 ? String(r[i] || '') : '').trim();
+    const shelfRaw = g(iS).toLowerCase(), shelves = g(iShelves).toLowerCase();
+    const status = /to-read|want|רוצה/.test(shelfRaw) ? 'want' : /currently|reading|קורא/.test(shelfRaw) ? 'reading'
+      : /did-not-finish|dnf|paused/.test(shelfRaw + ' ' + shelves) ? 'partial' : 'read';
+    const isbn = (g(iI) || g(iI2)).replace(/[^\dXx]/g, '');
+    return { title: g(iT).replace(/\s*\([^)]*#\d+\)\s*$/, ''), author: g(iA).split(/\s*,\s*(?=[A-Z֐-׿][^,]*\s)/)[0], isbn: isbn.length === 10 || isbn.length === 13 ? isbn : '',
+      rating: Math.max(0, Math.min(5, Math.round(parseFloat(g(iR)) || 0))), status, readAt: date(g(iD)), note: g(iN).replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '').slice(0, 4000) };
+  }).filter(x => x.title);
+  return { app, items: items.slice(0, 1500) };
+}
+function AppImport({ db, update, notify, onExport }) {
+  const fileRef = useRef(null);
+  const [st, setSt] = useState(null);   // { app, total, done, added, queued, dup, busy }
+  const run = async (text) => {
+    const { app, items } = readImportRows(text);
+    if (!items.length) { notify('לא זוהו ספרים בקובץ. צריך קובץ CSV עם עמודת Title / שם הספר.'); return; }
+    const s = { app, total: items.length, done: 0, added: 0, queued: 0, dup: 0, busy: true };
+    setSt({ ...s });
+    const added = [], queued = [];
+    const one = async (it) => {
+      try {
+        if (findInLibrary({ title: it.title, authors: [it.author] }, db.books)) { s.dup++; return; }
+        let best = null;
+        if (it.isbn) { const r = await lookupISBN(it.isbn).catch(() => null); best = r && r.candidates[0]; }
+        if (!best) {
+          const r = await searchBooks(it.title, it.author).catch(() => null);
+          const c = r && r.candidates[0];
+          if (c && (c.match >= 0.6 || matchScore(c, `${it.title} ${it.author}`) >= 0.6)) best = c;
+        }
+        const now = Date.now();
+        const fields = { status: it.status, rating: ['want', 'reading'].includes(it.status) ? 0 : it.rating, note: it.note, readAt: ['read', 'partial'].includes(it.status) ? it.readAt : 0 };
+        if (best && !findInLibrary(best, db.books) && !findInLibrary(best, added)) {
+          if (fields.status === 'read' && !fields.rating) queued.push({ id: uid(), raw: it.title, title: it.title, author: it.author, rating: 0, want: false, note: it.note, status: 'pending', savedTitle: '' });
+          else added.push(sanitizeBook({ ...best, id: uid(), ...fields, tags: [], addedAt: now, editedAt: now, verifiedAt: now, startedAt: fields.status === 'reading' ? now : 0 }));
+        } else if (best) s.dup++;
+        else queued.push({ id: uid(), raw: it.title, title: it.title, author: it.author, rating: fields.rating, want: it.status === 'want', note: it.note, status: 'pending', savedTitle: '' });
+      } finally { s.done++; s.added = added.length; s.queued = queued.length; setSt({ ...s }); }
+    };
+    for (let i = 0; i < items.length; i += 4) await Promise.all(items.slice(i, i + 4).map(one));
+    if (added.length) update(d => ({ ...d, books: [...added.filter(b => !findInLibrary(b, d.books)), ...d.books] }));
+    if (queued.length) { const q0 = loadQueue(); saveQueue(q0 ? { ...q0, items: [...q0.items, ...queued] } : { items: queued, current: queued[0].id, createdAt: Date.now() }); }
+    s.busy = false; setSt({ ...s });
+    notify(`יובאו ${added.length} ספרים מ-${app}${queued.length ? `; ${queued.length} ממתינים לאימות בלשונית "הוספה" ← רשימה` : ''}`);
+  };
+  const onFile = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => run(String(r.result || ''));
+    r.readAsText(f);
+    e.target.value = '';
+  };
+  const pct = st ? Math.round(100 * st.done / Math.max(1, st.total)) : 0;
+  return (
+    <section className="bg-surface border border-line rounded-xl p-3 grid gap-2">
+      <h2 className="font-semibold text-[17px]">ייצוא וייבוא: אפליקציות ספרים אחרות</h2>
+      <Btn variant="soft" disabled={!db.books.length} onClick={onExport}><Icon name="Sheet" size={18} />ייצוא CSV (Goodreads / StoryGraph)</Btn>
+      <p className="text-[14px] text-muted">ייבוא מ-Goodreads (My Books ← Import and export ← Export Library), StoryGraph (Manage Account ← Export), או כל קובץ CSV עם שם ספר ומחבר. כל ספר נבדק מול המאגרים; מה שלא אומת עובר לרשימת ההוספה.</p>
+      <input ref={fileRef} id="import-apps" type="file" accept=".csv,text/csv,text/plain,.tsv" className="hidden" onChange={onFile} />
+      <Btn variant="soft" disabled={st && st.busy} onClick={() => fileRef.current && fileRef.current.click()}><Icon name="Upload" size={18} />ייבוא מקובץ CSV</Btn>
+      {st && (
+        <div className="grid gap-1.5" aria-live="polite">
+          <div className="h-2 rounded-full bg-surface2 overflow-hidden" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="התקדמות הייבוא">
+            <div className="h-full bg-accent transition-all" style={{ width: pct + '%' }} />
+          </div>
+          <div className="text-[13px] text-muted tabular">{st.app}: {st.done}/{st.total} · נוספו {st.added} · לאימות {st.queued}{st.dup ? ` · כבר היו ${st.dup}` : ''}{st.busy ? '' : ' · הסתיים ✓'}</div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function BackupTab({ db, update, replace, status, notify, profile, onRenameProfile, onDeleteProfile, onOpenStarter }) {
+  // רשימת ההיכרות הושלמה (עברו על כל 400 הספרים, או שכולם כבר בספרייה): לא מציגים אותה בהגדרות
+  const starterDone = useMemo(() => starterFinished(db.books), [db.books]);
   const [nameDraft, setNameDraft] = useState(profile.name);
   const [confirmProfileDel, setConfirmProfileDel] = useState(false);
   const [paste, setPaste] = useState('');
@@ -4133,9 +4400,9 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
       else {
         const body = await r.json().catch(() => ({}));
         const m = (body.error && body.error.message) || ('שגיאה ' + r.status);
-        setKeyTest({ ok: false, msg: /not been used|disabled/i.test(m) ? 'המפתח תקין, אבל Books API לא הופעל בפרויקט. חזרו לשלב 2 ולחצו Enable.' : /API key not valid/i.test(m) ? 'המפתח לא תקין. בדקו שהעתקתם אותו במלואו.' : /referer|referrer/i.test(m) ? 'המפתח מוגבל לאתר אחר. בדקו את Website restrictions.' : 'Google החזיר שגיאה: ' + m });
+        setKeyTest({ ok: false, msg: /not been used|disabled/i.test(m) ? T('המפתח תקין, אבל Books API לא הופעל בפרויקט. חזרו לשלב 2 ולחצו Enable.') : /API key not valid/i.test(m) ? T('המפתח לא תקין. בדקו שהעתקתם אותו במלואו.') : /referer|referrer/i.test(m) ? T('המפתח מוגבל לאתר אחר. בדקו את Website restrictions.') : 'Google החזיר שגיאה: ' + m });
       }
-    } catch (err) { setKeyTest({ ok: false, msg: 'אין חיבור לרשת. נסו שוב.' }); }
+    } catch (err) { setKeyTest({ ok: false, msg: T('אין חיבור לרשת. נסו שוב.') }); }
   };
   const stamp = new Date().toISOString().slice(0, 10);
   const json = () => JSON.stringify({ ...db, exportedAt: Date.now(), app: 'verified-reading-tracker' }, null, 2);
@@ -4148,7 +4415,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
       if (!d) throw new Error('bad');
       const fresh = d.books.filter(b => !findInLibrary(b, db.books));
       setPreview({ data: d, fresh: fresh.length });
-    } catch (e) { setErr('הקובץ אינו גיבוי תקין של האפליקציה. ודאו שזה קובץ JSON שיוצא מכאן.'); }
+    } catch (e) { setErr(T('הקובץ אינו גיבוי תקין של האפליקציה. ודאו שזה קובץ JSON שיוצא מכאן.')); }
   };
   const onFile = (e) => {
     const f = e.target.files && e.target.files[0];
@@ -4191,11 +4458,11 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
 
       <SyncPanel />
 
-      <section className="bg-surface border border-line rounded-xl p-3 grid gap-2">
+      {!starterDone && <section className="bg-surface border border-line rounded-xl p-3 grid gap-2">
         <h2 className="font-semibold text-[17px]">היכרות עם הטעם שלך</h2>
         <p className="text-[14px] text-muted">סימון מהיר של ספרים מוכרים מתוך 400 ספרים לפי ז'אנרים. ספרים שכבר בספרייה לא יתווספו שוב.</p>
         <Btn variant="soft" onClick={onOpenStarter}><Icon name="ListChecks" size={18} />בחירה מרשימת ספרים מוכרים</Btn>
-      </section>
+      </section>}
 
       <section className="bg-surface border border-line rounded-xl p-3 grid gap-2">
         <h2 className="font-semibold text-[17px]">המשתמש שלך</h2>
@@ -4206,7 +4473,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
           <Btn variant="soft" type="submit" disabled={!nameDraft.trim() || nameDraft.trim() === profile.name}>שינוי שם</Btn>
         </form>
         <Btn variant="danger" onClick={() => { if (!confirmProfileDel) { setConfirmProfileDel(true); return; } onDeleteProfile(); }}>
-          {confirmProfileDel ? `לחצו שוב: מחיקת "${profile.name}" וכל הספרים שלו` : 'מחיקת המשתמש מהמכשיר'}
+          {confirmProfileDel ? T(`לחצו שוב: מחיקת "${profile.name}" וכל הספרים שלו`) : 'מחיקת המשתמש מהמכשיר'}
         </Btn>
       </section>
 
@@ -4273,6 +4540,8 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
         )}
       </section>
 
+      <KnowsAboutMe db={db} update={update} notify={notify} />
+      <AppImport db={db} update={update} notify={notify} onExport={() => { downloadFile(`my-books-${profile.name}-${stamp}.csv`, toGoodreadsCSV(db), 'text/csv;charset=utf-8'); notify('קובץ ה-CSV נוצר'); }} />
       <details className="bg-surface border border-line rounded-xl p-3">
         <summary className="font-semibold text-[17px] cursor-pointer min-h-[36px] flex items-center">גיבוי ידני לקובץ (לא חובה)</summary>
         <p className="text-[14px] text-muted mt-1 mb-3">הכול מסתנכרן ונשמר אוטומטית. כאן אפשר בנוסף לשמור עותק לקובץ או לייבא ממנו.</p>
@@ -4290,7 +4559,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
           <Icon name="Download" size={20} />הורדת גיבוי מלא (JSON)
         </Btn>
         <div className="grid grid-cols-2 gap-2">
-          <Btn variant="soft" disabled={!db.books.length} onClick={async () => { const ok = await copyText(json(), taRef.current); if (ok) { markBackup(); notify('הגיבוי הועתק. אפשר להדביק בהערות או במייל.'); } else notify('ההעתקה נחסמה. הטקסט מסומן בתיבה למטה, העתיקו ידנית.'); }}>
+          <Btn variant="soft" disabled={!db.books.length} onClick={async () => { const ok = await copyText(json(), taRef.current); if (ok) { markBackup(); notify('הגיבוי הועתק. אפשר להדביק בהערות או במייל.'); } else notify(T('ההעתקה נחסמה. הטקסט מסומן בתיבה למטה, העתיקו ידנית.')); }}>
             <Icon name="Copy" size={18} />העתקת JSON
           </Btn>
           <Btn variant="soft" disabled={!db.books.length} onClick={() => { downloadFile(`my-books-${profile.name}-${stamp}.txt`, toText(db), 'text/plain;charset=utf-8'); notify('רשימת הטקסט נוצרה'); }}>
@@ -4302,7 +4571,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
         <h2 className="font-semibold text-[17px]">ייבוא ושחזור</h2>
         <input ref={fileRef} id="import-file" type="file" accept="application/json,.json,text/plain" className="hidden" onChange={onFile} />
         <Btn variant="ghost" onClick={() => fileRef.current && fileRef.current.click()}><Icon name="Upload" size={20} />בחירת קובץ גיבוי</Btn>
-        <label htmlFor="import-paste" className="text-[14px] text-muted">או הדביקו כאן את תוכן הגיבוי:</label>
+        <label htmlFor="import-paste" className="text-[14px] text-muted">{T('או הדביקו כאן את תוכן הגיבוי:')}</label>
         <textarea id="import-paste" ref={taRef} value={paste} onChange={e => setPaste(e.target.value)} rows={3} dir="ltr"
           className="w-full rounded-xl border border-line bg-bg p-2 text-[13px] font-mono" placeholder='{"version":1,"books":[...]}' />
         <Btn variant="soft" disabled={!paste.trim()} onClick={() => parse(paste)}>בדיקת הטקסט</Btn>
@@ -4311,7 +4580,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
           <div className="fade-in grid gap-2 border border-accent rounded-xl p-3">
             <p className="text-[15px]">בגיבוי יש <b className="tabular">{preview.data.books.length}</b> ספרים, מתוכם <b className="tabular">{preview.fresh}</b> שלא קיימים כאן.</p>
             <Btn onClick={merge} disabled={!preview.fresh}>מיזוג: הוספת {preview.fresh} ספרים חדשים</Btn>
-            <Btn variant="danger" onClick={doReplace}>{confirmReplace ? `לחצו שוב: להחליף את כל ${db.books.length} הספרים הנוכחיים` : 'החלפה מלאה של הספרייה'}</Btn>
+            <Btn variant="danger" onClick={doReplace}>{confirmReplace ? T(`לחצו שוב: להחליף את כל ${db.books.length} הספרים הנוכחיים`) : 'החלפה מלאה של הספרייה'}</Btn>
           </div>
         )}
       </section>
@@ -4323,7 +4592,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
           const now = Date.now(); const tb = { ...db.tombstones.books }; const th = { ...db.tombstones.history };
           db.books.forEach(b => { tb[b.id] = now; }); db.history.forEach(h => { th[h.id] = now; });
           replace({ ...emptyDB(), settings: db.settings, tombstones: { books: tb, history: th } }); setConfirmWipe(false); notify('כל הספרים נמחקו');
-        }}>{confirmWipe ? 'לחצו שוב למחיקה סופית' : 'מחיקת הכל'}</Btn>
+        }}>{confirmWipe ? T('לחצו שוב למחיקה סופית') : 'מחיקת הכל'}</Btn>
       </section>
         </div>
       </details>
@@ -4746,6 +5015,143 @@ const digestBook = (b, d) => ({
   link: (b.urls && b.urls[0] && b.urls[0].url) || '', publisher: '', verifiedVia: (b.urls && b.urls[0] && b.urls[0].site) || 'המאגרים', verifiedAt: d.at,
   offers: b.urls || [], availability: b.available || null, reasons: b.why ? [b.why] : []
 });
+/* ---------- סיכום דו-שבועי בסגנון Wrapped: מחושב במכשיר מהספרייה, בלי AI ---------- */
+const DAY_MS = 86400000;
+const SUMMARY_ANCHOR = Date.UTC(2026, 0, 4, 6);   // יום ראשון; כל 14 יום מתחילה תקופה חדשה
+const summaryPeriod = (now = Date.now()) => Math.floor((now - SUMMARY_ANCHOR) / (14 * DAY_MS));
+function readerType(s) {
+  const T3 = (m, f, n, d) => ({ name: gx(m, f, n), desc: d });
+  if (!s.finished.length) return s.started.length || s.wanted.length ? T3('החולם', 'החולמת', 'תוכניות גדולות', 'עוד לא הסתיים ספר, אבל הרשימה מתמלאת ויש ספר בדרך.') : T3('בהפסקה', 'בהפסקה', 'הפסקה קטנה', 'שבועיים שקטים. הספר הבא מחכה.');
+  if (s.finished.length >= 4) return T3('המרתוניסט', 'המרתוניסטית', 'מרתון קריאה', 'ספר אחרי ספר, כמעט בלי לנשום.');
+  const yrs = s.finished.map(b => parseInt(b.year, 10)).filter(Boolean), nowY = new Date().getFullYear();
+  if (yrs.length >= 2 && yrs.filter(y => y < 1960).length * 2 >= yrs.length) return T3('חובב הקלאסיקות', 'חובבת הקלאסיקות', 'קלאסיקה בדם', 'הספרים הכי ותיקים על המדף, ובצדק.');
+  if (yrs.length >= 2 && yrs.filter(y => y >= nowY - 3).length * 2 >= yrs.length) return T3('צייד החידושים', 'ציידת החידושים', 'תמיד על החדש', 'מה שיצא עכשיו, כבר נקרא.');
+  if (s.avg >= 4.5 && s.rated >= 2) return T3('מוצא הפנינים', 'מוצאת הפנינים', 'פנינים בלבד', 'כל ספר שנבחר, קלע.');
+  if (s.genres.length >= 3) return T3('הנווט הספרותי', 'הנווטת הספרותית', 'מסע בין ז\'אנרים', 'קפיצה בין עולמות, בלי להתקבע.');
+  if (s.partial >= 2) return T3('הטועם', 'הטועמת', 'טעימות ספרותיות', 'לא כל ספר צריך להיגמר. בוחרים מה שווה את הזמן.');
+  if (s.avg && s.avg <= 2.5 && s.rated >= 2) return T3('המבקר החריף', 'המבקרת החריפה', 'עין ביקורתית', 'רף גבוה. הספר הבא יצטרך להתאמץ.');
+  return T3('הקורא המתמיד', 'הקוראת המתמידה', 'קריאה בקצב קבוע', 'קצב יציב, ספר טוב אחרי ספר טוב.');
+}
+function summaryStats(books, now = Date.now()) {
+  const from = now - 14 * DAY_MS;
+  const inWin = (t) => t >= from && t <= now + DAY_MS;
+  // רק ספרים עם תאריך סיום (לא ספרים שסומנו בבת אחת מרשימת ההיכרות)
+  const finished = books.filter(b => ['read', 'partial'].includes(statusOf(b)) && b.readAt && inWin(b.readAt)).sort((a, b) => (b.rating || 0) - (a.rating || 0) || b.readAt - a.readAt);
+  const started = books.filter(b => statusOf(b) === 'reading' && inWin(b.startedAt || b.addedAt));
+  const wanted = books.filter(b => statusOf(b) === 'want' && inWin(b.addedAt));
+  const ratedL = finished.filter(b => b.rating > 0);
+  const gm = new Map();
+  finished.forEach(b => { const [g] = classifyBook(b); if (g) gm.set(g, (gm.get(g) || 0) + 1); });
+  const genres = [...gm.entries()].sort((a, b) => b[1] - a[1]).map(([t, n]) => ({ tag: t, name: GENRE_OF_TAG[t] || t, n }));
+  const s = { from, to: now, finished, started, wanted, partial: finished.filter(b => statusOf(b) === 'partial').length,
+    pages: finished.filter(b => statusOf(b) === 'read').reduce((a, b) => a + (b.pageCount || 0), 0), rated: ratedL.length,
+    avg: ratedL.length ? ratedL.reduce((a, b) => a + b.rating, 0) / ratedL.length : 0, top: ratedL[0] || finished[0] || null, genres,
+    total: books.filter(isRated).length, year: books.filter(b => isRated(b) && b.readAt && new Date(b.readAt).getFullYear() === new Date(now).getFullYear()).length };
+  s.type = readerType(s);
+  s.active = !!(finished.length || started.length || wanted.length);
+  return s;
+}
+const fmtShort = (ts) => { try { return new Date(ts).toLocaleDateString(DEFAULT_LOCALE, { day: 'numeric', month: 'short' }); } catch (e) { return ''; } };
+// תמונת סטורי 1080×1920 לשיתוף (בלי כריכות: תמונות מאתרים אחרים לא ניתנות לציור ושמירה)
+async function summaryImage(s) {
+  const c = document.createElement('canvas'); c.width = 1080; c.height = 1920;
+  const x = c.getContext('2d');
+  const g = x.createLinearGradient(0, 0, 1080, 1920); g.addColorStop(0, '#3446B0'); g.addColorStop(.55, '#D4506C'); g.addColorStop(1, '#DF8A1F');
+  x.fillStyle = g; x.fillRect(0, 0, 1080, 1920);
+  x.direction = 'rtl'; x.textAlign = 'center'; x.fillStyle = '#fff';
+  const font = (px, w = 700) => `${w} ${px}px "Assistant", "Frank Ruhl Libre", sans-serif`;
+  const line = (t, y, px, w, a = 1) => { x.globalAlpha = a; x.font = font(px, w); x.fillText(t, 540, y, 960); x.globalAlpha = 1; };
+  line('השבועיים שלי בספרים', 200, 64, 700, .9);
+  line(`${fmtShort(s.from)} – ${fmtShort(s.to)}`, 280, 44, 400, .8);
+  line(String(s.finished.length), 640, 300, 800);
+  line(s.finished.length === 1 ? 'ספר שהסתיים' : 'ספרים שהסתיימו', 740, 64, 600);
+  if (s.pages) line(`${s.pages.toLocaleString(DEFAULT_LOCALE)} עמודים`, 830, 52, 400, .9);
+  if (s.top) { line('הספר של התקופה', 1010, 44, 400, .85); line(s.top.title, 1100, 76, 700); if (s.top.rating) line('★'.repeat(s.top.rating), 1190, 60, 400); }
+  if (s.genres[0]) { line('הז\'אנר המוביל', 1330, 44, 400, .85); line(s.genres[0].name, 1410, 64, 700); }
+  line(s.type.name, 1600, 96, 800);
+  line('מה שנקרא', 1820, 44, 600, .8);
+  return new Promise(r => c.toBlob(r, 'image/png'));
+}
+async function shareSummary(s, notify) {
+  try {
+    const blob = await summaryImage(s);
+    const file = new File([blob], 'my-reading-summary.png', { type: 'image/png' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], text: 'השבועיים שלי בספרים 📚' }); return; }
+    downloadFile('my-reading-summary.png', blob, 'image/png');
+    notify && notify('התמונה נשמרה');
+  } catch (e) { /* ביטול שיתוף */ }
+}
+function SummaryBanner({ db, update, onOpen }) {
+  const s = useMemo(() => summaryStats(db.books), [db.books]);
+  const p = summaryPeriod();
+  if (!s.active || db.settings.summarySeen === p || !db.books.length) return null;
+  return (
+    <button type="button" onClick={() => { update(d => ({ ...d, settings: { ...d.settings, summarySeen: p } })); onOpen(); }}
+      className="fade-in mt-3 w-full text-right rounded-2xl p-3 flex items-center gap-3 text-white shadow-md" style={{ background: 'linear-gradient(120deg, var(--accent), var(--rose) 60%, var(--brass))' }}>
+      <span className="w-11 h-11 rounded-full grid place-items-center shrink-0 bg-white/20"><Icon name="Trophy" size={22} /></span>
+      <span className="flex-1 min-w-0">
+        <span className="block font-bold text-[16px]">הסיכום הדו-שבועי שלך מוכן</span>
+        <span className="block text-[13px] opacity-90 truncate">{s.finished.length ? `${s.finished.length} ספרים הסתיימו · ${s.type.name}` : s.type.name}</span>
+      </span>
+      <Icon name="ChevronLeft" size={20} />
+    </button>
+  );
+}
+function SummaryStory({ db, onClose, onOpenDigest, notify }) {
+  const s = useMemo(() => summaryStats(db.books), [db.books]);
+  const { digests } = useDigest();
+  const [i, setI] = useState(0);
+  const card = (key, body) => ({ key, body });
+  const big = 'font-display font-bold leading-none';
+  const slides = [
+    card('intro', <><div className="text-[15px] font-bold tracking-[.2em] opacity-90">הסיכום הדו-שבועי</div>
+      <div className={`${big} text-[44px] mt-4`}>השבועיים שלך בספרים</div>
+      <div className="text-[18px] opacity-90 mt-3">{fmtShort(s.from)} – {fmtShort(s.to)}</div></>),
+    card('count', <><div className={`${big} text-[120px]`}>{s.finished.length}</div>
+      <div className="text-[24px] font-semibold mt-2">{s.finished.length === 1 ? 'ספר הסתיים' : 'ספרים הסתיימו'}</div>
+      {s.pages > 0 && <div className="text-[18px] opacity-90 mt-2">{s.pages.toLocaleString(DEFAULT_LOCALE)} עמודים</div>}
+      {(s.started.length > 0 || s.wanted.length > 0) && <div className="text-[16px] opacity-90 mt-4">{[s.started.length ? `${s.started.length} בקריאה עכשיו` : '', s.wanted.length ? `${s.wanted.length} נוספו לרשימה` : ''].filter(Boolean).join(' · ')}</div>}
+      <div className="text-[15px] opacity-80 mt-4">השנה: {s.year} ספרים · סה"כ בספרייה: {s.total}</div></>),
+    s.top && card('top', <><div className="text-[15px] font-bold tracking-[.2em] opacity-90">הספר של התקופה</div>
+      <div className="mx-auto w-32 h-48 rounded-lg overflow-hidden shadow-2xl ring-4 ring-white/30 bg-white/20 grid place-items-center mt-4">
+        {s.top.cover && !isEink() ? <img src={s.top.cover} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" /> : <span className="font-display text-[44px]">{s.top.title.charAt(0)}</span>}</div>
+      <div className={`${big} text-[30px] mt-4`}>{s.top.title}</div>
+      {(s.top.authors || [])[0] && <div className="text-[17px] opacity-90 mt-1">{s.top.authors[0]}</div>}
+      {s.top.rating > 0 && <div className="text-[26px] mt-2" aria-label={`${s.top.rating} כוכבים`}>{'★'.repeat(s.top.rating)}</div>}</>),
+    s.genres.length > 0 && card('genre', <><div className="text-[15px] font-bold tracking-[.2em] opacity-90">הז'אנר המוביל</div>
+      <div className={`${big} text-[42px] mt-4`}>{s.genres[0].name}</div>
+      <div className="flex flex-wrap gap-2 justify-center mt-5">{s.genres.slice(1, 5).map(g => <span key={g.tag} className="px-3 py-1 rounded-full bg-white/20 text-[15px] font-semibold">{g.name}</span>)}</div>
+      {s.avg > 0 && <div className="text-[18px] opacity-90 mt-5">דירוג ממוצע: {s.avg.toFixed(1)}★</div>}</>),
+    card('type', <><div className="text-[15px] font-bold tracking-[.2em] opacity-90">סוג הקריאה שלך</div>
+      <div className={`${big} text-[46px] mt-4`}>{s.type.name}</div>
+      <p className="text-[18px] opacity-95 mt-4 leading-relaxed">{s.type.desc}</p></>),
+    card('end', <><div className={`${big} text-[34px]`}>נתראה בעוד שבועיים 📚</div>
+      <div className="grid gap-2 mt-6 w-full">
+        <button type="button" onClick={(e) => { e.stopPropagation(); shareSummary(s, notify); }} className="min-h-[48px] rounded-xl bg-white text-[#1B1A28] font-bold inline-flex items-center justify-center gap-2"><Icon name="Share2" size={18} />שיתוף כתמונה</button>
+        {digests[0] && digests[0].books.length > 0 && <button type="button" onClick={(e) => { e.stopPropagation(); onClose(); onOpenDigest(digests[0]); }} className="min-h-[48px] rounded-xl bg-white/20 font-bold">{digests[0].books.length} ספרים חדשים בשבילך ←</button>}
+      </div></>)
+  ].filter(Boolean);
+  const last = slides.length - 1;
+  useEffect(() => { if (i >= last) return; const t = setTimeout(() => setI(n => Math.min(last, n + 1)), 6000); return () => clearTimeout(t); }, [i, last]);
+  useEffect(() => { const k = (e) => { if (e.key === 'Escape') onClose(); if (e.key === 'ArrowLeft') setI(n => Math.min(last, n + 1)); if (e.key === 'ArrowRight') setI(n => Math.max(0, n - 1)); }; document.addEventListener('keydown', k); return () => document.removeEventListener('keydown', k); }, [last]);
+  const hues = ['var(--accent)', 'var(--rose)', 'var(--brass)', 'var(--teal)'];
+  return ReactDOM.createPortal((
+    <div className="fixed inset-0 z-50 fade-in text-white select-none" role="dialog" aria-modal="true" aria-label="הסיכום הדו-שבועי"
+      style={{ background: `linear-gradient(160deg, ${hues[i % 4]} 0%, ${hues[(i + 1) % 4]} 60%, ${hues[(i + 2) % 4]} 100%)`, transition: 'background .6s' }}
+      onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setI(n => e.clientX - r.left < r.width / 2 ? Math.min(last, n + 1) : Math.max(0, n - 1)); }}>
+      <div className="absolute z-10 inset-x-0 top-0 px-3 pt-[calc(env(safe-area-inset-top,0px)+10px)] flex gap-1.5" dir="rtl">
+        {slides.map((sl, j) => <span key={sl.key} className="story-bar flex-1"><i className={j < i ? 'full' : j === i ? 'run' : ''} key={j === i ? 'r' + i : 'x'} /></span>)}
+      </div>
+      <button type="button" aria-label="סגירה" onClick={(e) => { e.stopPropagation(); onClose(); }} className="absolute z-10 left-3 top-[calc(env(safe-area-inset-top,0px)+22px)] w-11 h-11 rounded-full bg-white/20 grid place-items-center"><Icon name="X" size={22} /></button>
+      <div key={slides[i].key} className="sheet-in h-full max-w-md mx-auto px-7 flex flex-col items-center justify-center text-center">{slides[i].body}</div>
+      <div className="absolute z-10 inset-x-0 bottom-0 pb-[calc(env(safe-area-inset-bottom,0px)+14px)] flex justify-center gap-3">
+        <button type="button" onClick={(e) => { e.stopPropagation(); setI(n => Math.max(0, n - 1)); }} disabled={i === 0} className="min-h-[40px] px-4 rounded-full bg-white/15 text-[14px] font-semibold disabled:opacity-40">הקודם</button>
+        <button type="button" onClick={(e) => { e.stopPropagation(); i >= last ? onClose() : setI(i + 1); }} className="min-h-[40px] px-4 rounded-full bg-white/25 text-[14px] font-semibold">{i >= last ? 'סיום' : 'הבא'}</button>
+      </div>
+    </div>
+  ), document.body);
+}
+
 function DigestBanner({ db, update, onOpen }) {
   const { digests } = useDigest();
   const latest = digests[0];
@@ -4812,8 +5218,10 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
   const { db, update, replace, status } = usePersistentDB();
   const friendsBadge = useFriends().badge;
   const [digestOpen, setDigestOpen] = useState(null);
+  const [summaryOpen, setSummaryOpen] = useState(false);
   // פתיחה מהתראה: ?view=digest
   useEffect(() => {
+    if (/[?&]view=summary/.test(location.search)) { setSummaryOpen(true); update(d => ({ ...d, settings: { ...d.settings, summarySeen: summaryPeriod() } })); try { history.replaceState(null, '', location.pathname); } catch (e) { /* */ } return; }
     if (/[?&]view=recs/.test(location.search)) { setTab('discover'); try { history.replaceState(null, '', location.pathname); } catch (e) { /* */ } return; }
     if (!/[?&]view=digest/.test(location.search)) return;
     const c = loadCloud(); if (!c) return;
@@ -4828,6 +5236,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
   const toastTimer = useRef(null);
 
   CONFIG.apiKey = db.settings.apiKey || '';
+  setAddr(db.settings.address);
 
   useEffect(() => { try { sessionStorage.setItem('vrt_tab', tab); } catch (e) { /* */ } window.scrollTo({ top: 0 }); }, [tab]);
   useEffect(() => {
@@ -4884,7 +5293,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
     });
     // ספר שבחרת מתוך המלצה: כרטיס חגיגי בסגנון Wrapped, ובעוד 3 שבועות נשאל איך היה
     if (!existing && pending.fromRec && status !== 'read') setCelebrate({ book, status, why: (book.reasons || [])[0] || '' });
-    notify(existing ? 'השינויים נשמרו' : { want: `"${book.title}" נוסף לרשימת "רוצה לקרוא"`, reading: `"${book.title}" נוסף ל"קורא עכשיו". קריאה נעימה!` }[status] || `"${book.title}" נשמר בספרייה`);
+    notify(existing ? 'השינויים נשמרו' : { want: `"${book.title}" נוסף לרשימת "רוצה לקרוא"`, reading: `"${book.title}" נוסף ל"${STATUSES[1][1]}". קריאה נעימה!` }[status] || `"${book.title}" נשמר בספרייה`);
     const onSaved = pending.onSaved;
     setPending(null);
     if (onSaved) onSaved(existing || book);
@@ -4905,11 +5314,12 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
           </button>
         </div>
         <InstallPrompt />
+        <SummaryBanner db={db} update={update} onOpen={() => setSummaryOpen(true)} />
         <DigestBanner db={db} update={update} onOpen={setDigestOpen} />
         <FollowUpBanner db={db} update={update} onPick={pick} />
         {showStarter && <Starter db={db} update={update} onBegin={() => setStarterOpen(true)} onClose={() => setStarterOpen(false)}
           goQueue={() => { setStarterOpen(false); try { sessionStorage.setItem('vrt_add_mode', 'bulk'); } catch (e) { /* */ } setTab('add'); }} />}
-        {tab === 'library' && !showStarter && <LibraryTab db={db} onEdit={(b) => setPending({ book: b, existing: b, status: ['want', 'reading'].includes(statusOf(b)) ? 'read' : undefined })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id), tombstones: { ...d.tombstones, books: { ...d.tombstones.books, [id]: Date.now() } } })); notify('הספר נמחק'); }}
+        {tab === 'library' && !showStarter && <LibraryTab db={db} onSummary={() => setSummaryOpen(true)} onEdit={(b) => setPending({ book: b, existing: b, status: ['want', 'reading'].includes(statusOf(b)) ? 'read' : undefined })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id), tombstones: { ...d.tombstones, books: { ...d.tombstones.books, [id]: Date.now() } } })); notify('הספר נמחק'); }}
           onUpdateBook={(id, patch) => update(d => ({ ...d, books: d.books.map(b => b.id === id ? sanitizeBook({ ...b, ...patch, editedAt: Date.now() }) : b) }))} goAdd={() => setTab('add')} notify={notify} />}
         {tab === 'add' && <AddTab db={db} onPick={pick} goSettings={() => setTab('backup')} />}
         {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} onOpenDigest={setDigestOpen} />}
@@ -4932,6 +5342,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
         </ul>
       </nav>
 
+      {summaryOpen && <SummaryStory db={db} notify={notify} onClose={() => setSummaryOpen(false)} onOpenDigest={setDigestOpen} />}
       {celebrate && <PickCard pick={celebrate} onClose={() => setCelebrate(null)} />}
       {digestOpen && <DigestSheet digest={digestOpen} db={db} update={update} onPick={pick} notify={notify} onClose={() => setDigestOpen(null)} />}
       {pending && <RateSheet book={pending.book} existing={pending.existing} initialStatus={pending.status} tagLibrary={db.tagLibrary} onSave={save} onClose={() => setPending(null)} />}
@@ -4989,7 +5400,7 @@ function WhoAreYou({ profiles, onPick, onCreate }) {
           <Logo size={56} />
           <div>
             <div className="wordmark text-[34px] leading-none">מה שנקרא</div>
-            <div className="text-muted text-[14px] mt-1">מה קראת, מה תקרא, ומה החברים אוהבים</div>
+            <div className="text-muted text-[14px] mt-1">{T('מה קראת, מה תקרא, ומה החברים אוהבים')}</div>
           </div>
         </div>
         <h1 className="font-display font-medium text-[26px] leading-snug mb-1">של מי הספרייה?</h1>

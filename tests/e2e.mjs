@@ -24,7 +24,8 @@ const BOOKS = [
   vol('m1', 'מיכאל שלי', ['עמוס עוז'], '9789650000011'), vol('y1', 'יש ואין', ['ארנסט המינגוויי'], '9789650000028'),
   vol('k1', 'קפקא על החוף', ['הרוקי מורקמי'], '9789650000035'), vol('s1', 'סיפור פשוט', ['עגנון'], '9789650000042'),
   vol('he1', 'יער נורווגי', ['הרוקי מורקמי'], '9789650712345', { description: 'טורו ואטאנבה נזכר בימי הסטודנט שלו בטוקיו.' }),
-  vol('en1', 'Norwegian Wood', ['Haruki Murakami'], '9780375704024', { language: 'en', description: LONGEN + '...' })
+  vol('en1', 'Norwegian Wood', ['Haruki Murakami'], '9780375704024', { language: 'en', description: LONGEN + '...' }),
+  vol('en2', 'The Remains of the Day', ['Kazuo Ishiguro'], '9780679731726', { language: 'en', description: 'A butler looks back.' })
 ];
 let store = { rev: 0, data: null };
 const aiCalls = [], aiScript = [], errors = [];
@@ -425,6 +426,89 @@ try {
     await A.click('[role=dialog] [aria-label="4 כוכבים"]'); await A.click('[role=dialog] button:has-text("שמירת שינויים")');
     await A.click('button[role=tab]:has-text("קראתי")');
     await A.waitForSelector('main li:has-text("עשרה סיפורים")');
+  });
+  await step('address form: every UI text follows the chosen gender', async () => {
+    const pick = async (label) => { await A.click('nav >> text=הגדרות'); await A.click(`button:has-text("${label}")`); await A.click('nav >> text=גלה ספר חדש'); };
+    if (await A.locator('button:has-text("שאלון חדש")').count()) await A.click('button:has-text("שאלון חדש")');
+    await pick('לשון נקבה');
+    await A.waitForSelector('text=ספרי מה בא לך, בחרי מיקוד');
+    await A.click('nav >> text=ספרים שלי'); await A.waitForSelector('button[role=tab]:has-text("קוראת עכשיו")');
+    await pick('לשון זכר');
+    await A.waitForSelector('text=ספר מה בא לך, בחר מיקוד');
+    await A.click('nav >> text=ספרים שלי'); await A.waitForSelector('button[role=tab]:has-text("קורא עכשיו")');
+    await pick('לשון רבים');
+    await A.waitForSelector('text=ספרו מה בא לכם, בחרו מיקוד');
+    // המודל מקבל את לשון הפנייה, ובעברית מבקשים רק ספרים עם מהדורה עברית
+    assert.ok(jobBodies.some(j => j.system.includes('ONLY books that have a published Hebrew edition')), 'Hebrew-only rule reaches the model');
+  });
+  await step('gift mode: no taste profile, saved with a gift tag', async () => {
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 'g1', name: 'submit_questions', input: { questions: [] } }], stop: 'tool_use' });
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 'g2', name: 'submit_recommendations', input: { interpretation: 'מתנה לאבא.', recommendations: [] } }], stop: 'tool_use' });
+    if (await A.locator('button:has-text("שאלון חדש")').count()) await A.click('button:has-text("שאלון חדש")');
+    try { await A.click('button[role=tab]:has-text("בשביל מישהו אחר")', { timeout: 5000 }); } catch (e) { await A.screenshot({ path: '/tmp/claude-0/-home-user-Books/edc6a1f8-fcb8-5818-9816-3054e7d2cd52/scratchpad/gift.png', fullPage: true }); throw e; }
+    await A.fill('#ai-request', 'לאבא שלי, אוהב היסטוריה'); await A.click('button:has-text("המלצה חכמה")');
+    await A.waitForSelector('text=מתנה לאבא.', { timeout: 30000 });
+    const jp = jobBodies.at(-1).messages[0].content;
+    assert.ok(jp.includes('GIFT MODE') && !jp.includes("READER'S LIBRARY") && !jp.includes('READER PROFILE'), 'gift request does not carry my taste');
+  });
+  await step('biweekly Wrapped summary: banner, story, seen', async () => {
+    await A.click('nav >> text=ספרים שלי');
+    await A.click('button:has-text("הסיכום הדו-שבועי שלך מוכן")');
+    const story = A.locator('[role=dialog][aria-label="הסיכום הדו-שבועי"]');
+    await story.waitFor();
+    await story.locator('button:has-text("הבא")').click();
+    await story.locator('text=/ספרים? (הסתיים|הסתיימו)/').waitFor();
+    await story.locator('button:has-text("הבא")').click();
+    await story.locator('text=הספר של התקופה').waitFor();
+    for (let i = 0; i < 6 && await story.locator('button:has-text("הבא")').count(); i++) await story.locator('button:has-text("הבא")').click();
+    await story.locator('text=סוג הקריאה שלך').or(story.locator('button:has-text("שיתוף כתמונה")')).first().waitFor();
+    await story.locator('button[aria-label="סגירה"]').click();
+    assert.equal(await A.locator('button:has-text("הסיכום הדו-שבועי שלך מוכן")').count(), 0, 'banner hidden after seen');
+  });
+  await step('export CSV for other apps, import from Goodreads', async () => {
+    await A.click('nav >> text=הגדרות');
+    // ההורדה נתפסת בדף (קישור blob), וקוראים את התוכן שלה
+    await A.evaluate(() => { const orig = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { if (this.download) { window.__dl = { name: this.download, p: fetch(this.href).then(r => r.text()) }; return; } return orig.call(this); }; });
+    await A.click('button:has-text("ייצוא CSV")');
+    const csv = await A.evaluate(() => window.__dl.p);
+    assert.ok(csv.includes('Exclusive Shelf') && csv.includes('עשרה סיפורים'), 'Goodreads CSV');
+    const gr = 'Book Id,Title,Author,ISBN,ISBN13,My Rating,Date Read,Date Added,Bookshelves,Exclusive Shelf,My Review\n1,"ספר שלא קיים, בכלל",אף אחד,,,4,2026/09/20,2026/09/01,,read,"טוב מאוד"\n2,עשרה סיפורים,x,,,5,2026/09/20,2026/09/01,,read,\n';
+    await A.setInputFiles('#import-apps', { name: 'goodreads_library_export.csv', mimeType: 'text/csv', buffer: Buffer.from(gr) });
+    await A.waitForSelector('text=/Goodreads: 2\\/2 .*הסתיים/', { timeout: 30000 });
+    const line = await A.locator('text=/Goodreads: 2\\/2/').textContent();
+    assert.ok(/לאימות 1/.test(line) && /כבר היו 1/.test(line), line);
+  });
+  await step('what the app knows about me: delete items one by one', async () => {
+    await A.click('button:has-text("מה האפליקציה יודעת עליי")');
+    const rows = A.locator('button[aria-label^="מחיקה: "]');
+    const n = await rows.count();
+    assert.ok(n >= 2, 'feedback and rejections listed');
+    await A.click('button[aria-label="מחיקה: פחות עצוב בבקשה"]');
+    await A.click('button[aria-label="מחיקה: יש ואין"]');
+    assert.equal(await rows.count(), n - 2);
+    await A.evaluate(() => window.__vrtSync()); await A.waitForTimeout(700);
+    assert.equal(await A.locator('button[aria-label="מחיקה: יש ואין"]').count(), 0, 'deleted rejection does not come back after sync');
+  });
+  await step('Hebrew recommendations: a book with only a foreign edition is dropped (kept with "any language")', async () => {
+    const fmt = { print: 'yes', ebook: 'unknown', audiobook: 'unknown', notes: '' };
+    const run = async (label) => {
+      aiScript.push({ blocks: [{ type: 'tool_use', id: 'hq', name: 'submit_questions', input: { questions: [] } }], stop: 'tool_use' });
+      aiScript.push({ blocks: [{ type: 'tool_use', id: 'hr', name: 'submit_recommendations', input: { interpretation: label, recommendations: [
+        { title_he: '', title_original: 'The Remains of the Day', author: 'Kazuo Ishiguro', isbn: '9780679731726', why: 'x', synopsis_he: '', genres: [], formats: fmt, sources: [] }] } }], stop: 'tool_use' });
+      await A.click('nav >> text=גלה ספר חדש');
+      if (await A.locator('button:has-text("שאלון חדש")').count()) await A.click('button:has-text("שאלון חדש")');
+      await A.click('button[role=tab]:has-text("בשבילי")');
+      await A.fill('#ai-request', 'משהו בריטי'); await A.click('button:has-text("המלצה חכמה")');
+      await A.waitForSelector(`text=${label}`, { timeout: 30000 });
+      await A.waitForFunction(() => !document.querySelector('[aria-label^="שלב "]'), null, { timeout: 30000 });
+    };
+    await run('עברית בלבד.');
+    await A.waitForSelector('text=/אין מהדורה עברית/');
+    assert.equal(await A.locator('section li:has-text("The Remains of the Day")').count(), 0, 'foreign-only edition dropped');
+    await A.click('button:has-text("כל שפה")');
+    await run('כל שפה.');
+    await A.waitForSelector('section li:has-text("The Remains of the Day")');
+    await A.click('button:has-text("אוטומטי")');
   });
   await step('Google Books goes through the family server (shared key + cache)', async () => {
     assert.ok(viaProxy > 0, 'no proxied Google requests');
