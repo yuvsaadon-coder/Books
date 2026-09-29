@@ -157,7 +157,7 @@ try {
     await p.click(`[aria-label="${stars} כוכבים"]`); await p.fill('#book-note', 'אהבתי את הכתיבה'); await p.click('button:has-text("שמירה לספרייה")');
     await p.waitForSelector('h1:has-text("הספרים שלי")');
   };
-  const syncBoth = async () => { for (const p of [A, B, A]) { await p.click('nav >> text=הגדרות'); await p.click('text=סנכרון עכשיו'); await p.waitForTimeout(700); } };
+  const syncBoth = async () => { for (const p of [A, B, A]) { await p.evaluate(() => window.__vrtSync()); await p.waitForTimeout(700); } };
 
   await step('two phones create users and books, auto-connected, no setup', async () => {
     await A.fill('#new-profile', 'יובל'); await A.click('button:has-text("כניסה")'); await addBook(A, 'מיכאל שלי');
@@ -180,7 +180,7 @@ try {
     await card.locator('text=לתקציר המלא').click(); await A.waitForTimeout(300);
     assert.ok((await card.locator('p[dir=auto]').textContent()).includes('FULL-TEXT-ENDING'));
     aiScript.push({ blocks: [{ type: 'tool_use', id: 't1', name: 'submit_translation', input: { hebrew: 'טורו נזכר בימיו בטוקיו.' } }], stop: 'tool_use' });
-    await card.locator('text=תרגום לעברית').click(); await A.waitForSelector('text=הצגת המקור');
+    await card.locator('text=תרגום מכונה לעברית').click(); await A.waitForSelector('text=הצגת המקור');
     await card.locator('button:has-text("זה הספר שלי")').click(); await A.click('[aria-label="4 כוכבים"]'); await A.click('button:has-text("שמירה לספרייה")');
     await A.click('main ul li button >> nth=0');
     assert.equal(await A.locator('[role=dialog] p[dir=auto]').textContent(), 'טורו נזכר בימיו בטוקיו.');
@@ -245,6 +245,12 @@ try {
     await A.click('nav >> text=גלה ספר חדש'); await A.fill('#ai-request', 'משהו קלאסי');
     await A.click('[role=group][aria-label="מקור"] button:has-text("ספרות מתורגמת")');
     await A.click('button:has-text("המלצה חכמה")');
+    // החלפת שאלה: השאלה הראשונה מתחלפת, התשובות נשמרות
+    await A.waitForSelector('text=כמה עצוב מותר?');
+    aiScript.unshift({ blocks: [{ type: 'tool_use', id: 'q9', name: 'submit_questions', input: { questions: [{ question: 'כמה עצוב מותר לספר להיות?', options: ['קליל', 'אפשר לבכות'] }] } }], stop: 'tool_use' });
+    await A.click('button:has-text("שאלה אחרת")');
+    await A.waitForSelector('text=כמה עצוב מותר לספר להיות?');
+    assert.ok(aiCalls.at(-1).messages[0].content.includes('ALREADY ASKED: כמה עצוב מותר?'));
     await A.click('button:has-text("אפשר לבכות")');
     await A.fill('#clarify-other', 'בעיקר קלאסיקה אמריקאית'); await A.click('button:has-text("שליחה")');
     await A.waitForSelector('text=ההמלצות שלך', { timeout: 20000 });
@@ -257,7 +263,7 @@ try {
     const job = jobBodies.at(-1);
     assert.equal(job.submit, 'submit_recommendations'); assert.equal(job.model, 'claude-sonnet-4-6'); assert.equal(job.tools.length, 1, 'no web tools in the recommendation job');
     const jp = job.messages[0].content;
-    assert.ok(jp.includes('מקור: ספרות מתורגמת') && jp.includes('כמה עצוב מותר? → אפשר לבכות') && jp.includes('בעיקר קלאסיקה אמריקאית'), 'focus and follow-up answers reach the model');
+    assert.ok(jp.includes('מקור: ספרות מתורגמת') && jp.includes('כמה עצוב מותר לספר להיות? → אפשר לבכות') && jp.includes('בעיקר קלאסיקה אמריקאית'), 'focus and follow-up answers reach the model');
     assert.ok(await A.locator('section li >> text=זמינות').count() > 0);
     await A.waitForSelector('section li a:has-text("לדף הספר בסטימצקי")');
     await A.click('nav >> text=ספרים שלי'); await A.click('nav >> text=גלה ספר חדש');
