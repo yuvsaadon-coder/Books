@@ -63,6 +63,12 @@
 - **"מה האפליקציה יודעת עליי":** `KnowsAboutMe`. מחיקות נשמרות ב-`tombstones.misc`, כדי שהסנכרון לא יחזיר אותן.
 - **ייבוא וייצוא:** `readImportRows` (Goodreads, StoryGraph, CSV כללי) ו-`toGoodreadsCSV`. מה שלא אומת עובר לתור של "הוספה ← רשימה".
 
+- **עיצוב:** `PageHero` (אריח צבעוני לכל מסך), `SettingsGroup` (קבוצות בהגדרות), `ChatLog` (הודעות התקדמות מקובצות), `SyncDot` (חיווי סנכרון), `MySummaryCard` (כרטיס קבוע לסיכום בספרייה). צילומי מסך: `SHOTS=<תיקייה> node e2e.mjs`.
+- **חנויות:** `STORE_SEARCH` — דפי החיפוש האמיתיים: סטימצקי `catalogsearch/result/?q=`, צומת ספרים `/חיפוש?q=`, עברית `/Search/<שם>`.
+- **ביקורות:** `findReviews` בשרת — Haiku עם חיפוש רק ב-`REVIEW_SITES`, סיכום בעברית, וכל קישור נבדק מול תוצאות החיפוש. "לא נמצא" נשמר רק ליומיים.
+- **משוב:** `/feedback` שומר ב-KV תחת `app-feedback` (Cloudflare ← KV ← LIBRARY).
+- **רשימת ההיכרות:** `settings.starterDone` מסתנכרן (האפליקציה שעל מסך הבית באייפון לא רואה את האחסון של Safari).
+
 ## נתונים (לכל משתמש)
 - **ספר:** `status` ('read' או 'want'), דירוג, תגיות, הערה.
 - **שלילות:** `rejections` — לחודש או לתמיד, עם הערה.

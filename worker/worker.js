@@ -251,7 +251,7 @@ export const STORE_SITES = ['e-vrit.co.il', 'steimatzky.co.il', 'booknet.co.il',
   '9livespress.com', 'abayit-books.com', 'pardes.co.il', 'resling.co.il'];
 const STORE_SEARCH_URLS = [
   (q) => 'https://www.steimatzky.co.il/catalogsearch/result/?q=' + encodeURIComponent(q),
-  (q) => 'https://www.booknet.co.il/search?q=' + encodeURIComponent(q),
+  (q) => 'https://www.booknet.co.il/' + encodeURIComponent('חיפוש') + '?q=' + encodeURIComponent(q),
   (q) => 'https://www.e-vrit.co.il/Search/' + encodeURIComponent(q)
 ];
 const STORE_DAILY_LIMIT = 400;
@@ -371,26 +371,71 @@ export function ratingFromHtml(html) {
   }
   return null;
 }
+// ביקורות: Claude (המודל המהיר) מחפש רק באתרי ביקורת מוכרים, ומסכם בעברית מה כתוב בתוצאות, עם קישור.
+// כל קישור נבדק מול תוצאות החיפוש עצמן (אין קישור מומצא). נשמר 30 יום; "לא נמצא" נשמר רק ליומיים.
+const REVIEW_TOOL = {
+  name: 'submit_reviews', description: 'Return the reviews found in the search results.',
+  input_schema: { type: 'object', additionalProperties: false, required: ['reviews'], properties: {
+    reviews: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['url', 'summary_he'], properties: {
+      url: { type: 'string', description: 'exact URL of a search result' }, summary_he: { type: 'string', description: 'one sentence in Hebrew: what this review says about the book, only from the result text' } } } },
+    rating: { type: 'number', description: 'average reader rating out of 5, only if a result states it' },
+    rating_count: { type: 'integer' }, rating_url: { type: 'string' } } }
+};
+export async function findReviews(env, { title, author, original }) {
+  if (!env.ANTHROPIC_API_KEY) return { reviews: [], rating: null };
+  const blocked = (await env.LIBRARY.get('blocked-domains', 'json')) || [];
+  const sites = REVIEW_SITES.filter(d => !blocked.includes(d));
+  const messages = [{ role: 'user', content: `Find critics' or readers' reviews of the book "${title}"${original && original !== title ? ` (original title "${original}")` : ''}${author ? ` by ${author}` : ''}. Search at most twice (try the original title too). Then call submit_reviews with up to 3 relevant reviews from the search results: the exact result URL and one Hebrew sentence on what the reviewer says (only what the result text says, never invent). If a result states an average reader rating (e.g. Goodreads), include it. If nothing relevant was found, submit an empty list.` }];
+  let input = null; const urls = new Set();
+  for (let turn = 0; turn < 3 && !input; turn++) {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1500, messages,
+        tools: [{ type: 'web_search_20250305', name: 'web_search', allowed_domains: sites, max_uses: 2 }, REVIEW_TOOL] })
+    });
+    if (!r.ok) break;
+    const msg = await r.json();
+    for (const b of msg.content || []) {
+      if (b.type === 'web_search_tool_result' && Array.isArray(b.content)) b.content.forEach(x => x && x.url && urls.add(x.url));
+      if (b.type === 'tool_use' && b.name === 'submit_reviews') input = b.input;
+    }
+    if (input || msg.stop_reason !== 'pause_turn') break;
+    messages.push({ role: 'assistant', content: msg.content });
+  }
+  if (!input) return { reviews: [], rating: null };
+  const siteOf = (u) => { try { const h = new URL(u).hostname.replace(/^www\./, ''); return REVIEW_SITES.find(d => h === d || h.endsWith('.' + d)) || ''; } catch (e) { return ''; } };
+  const reviews = (input.reviews || []).filter(x => x && urls.has(x.url) && siteOf(x.url) && x.summary_he)
+    .slice(0, 3).map(x => ({ site: siteOf(x.url), url: x.url, title: '', quote: String(x.summary_he).slice(0, 260) }));
+  const rv = Number(input.rating);
+  const rating = rv > 0 && rv <= 5 ? { value: rv, best: 5, count: Number(input.rating_count) || 0, site: siteOf(input.rating_url || '') || (reviews[0] || {}).site || '', url: urls.has(input.rating_url) ? input.rating_url : '' } : null;
+  return { reviews, rating };
+}
+// משוב מהאפליקציה: נשמר ב-KV תחת המפתח app-feedback (אפשר לקרוא ב-Cloudflare ← KV ← LIBRARY)
+export async function handleFeedback(req, env, cors) {
+  let b; try { b = await req.json(); } catch (e) { return json({ error: 'bad_json' }, 400, cors); }
+  const text = String(b.text || '').trim().slice(0, 2000);
+  if (!text) return json({ error: 'empty' }, 400, cors);
+  const item = { at: Date.now(), text, name: String(b.name || '').slice(0, 40), screen: String(b.screen || '').slice(0, 40), version: String(b.version || '').slice(0, 10) };
+  const list = (await env.LIBRARY.get('app-feedback', 'json')) || [];
+  await env.LIBRARY.put('app-feedback', JSON.stringify([item, ...list].slice(0, 300)));
+  return json({ ok: true }, 200, cors);
+}
 async function handleReviews(req, env, cors, ctx) {
   const p = new URL(req.url).searchParams;
   const title = (p.get('title') || '').slice(0, 150).trim(), author = (p.get('author') || '').slice(0, 80).trim(), original = (p.get('original') || '').slice(0, 150).trim();
   if (!title) return json({ error: 'missing' }, 400, cors);
-  const key = 'reviews:' + `${title}|${author}`.toLowerCase();
+  const key = 'reviews2:' + `${title}|${author}`.toLowerCase();
   const cached = await env.LIBRARY.get(key, 'json');
   if (cached) return json({ ...cached, cached: true }, 200, cors);
-  const q = [`"${title}"`, original && original !== title ? `"${original}"` : '', author, 'ביקורת review'].filter(Boolean).join(' ');
-  const hits = (await storeSearchViaClaude(env, q, REVIEW_SITES)).filter(x => titleHas(x.title, title) || (original && titleHas(x.title, original)));
-  const reviews = []; let rating = null;
-  await Promise.all(hits.slice(0, 4).map(async (h) => {
-    const html = await fetchHtml(h.url, ctx);
-    const page = html ? checkPage(html, '', '') : {};
-    const r = html ? ratingFromHtml(html) : null;
-    if (r && (!rating || r.count > rating.count)) rating = { ...r, site: h.site, url: h.url };
-    const quote = (page.description || '').replace(/\s+/g, ' ').trim().slice(0, 240);
-    reviews.push({ site: h.site, url: h.url, title: cleanStoreTitle(h.title || page.title || ''), quote });
-  }));
-  const out = { reviews: reviews.slice(0, 3), rating, checked_at: Date.now() };
-  ctx.waitUntil(env.LIBRARY.put(key, JSON.stringify(out), { expirationTtl: 30 * 86400 }));
+  const day = new Date().toISOString().slice(0, 10), counterKey = 'store-count:' + day;
+  const used = parseInt((await env.LIBRARY.get(counterKey)) || '0', 10);
+  if (used >= STORE_DAILY_LIMIT) return json({ reviews: [], rating: null, limited: true }, 200, cors);
+  await env.LIBRARY.put(counterKey, String(used + 1), { expirationTtl: 60 * 60 * 48 });
+  let out;
+  try { out = { ...(await findReviews(env, { title, author, original })), checked_at: Date.now() }; }
+  catch (e) { return json({ reviews: [], rating: null, error: String(e.message || e) }, 200, cors); }
+  const found = out.reviews.length || out.rating;
+  ctx.waitUntil(env.LIBRARY.put(key, JSON.stringify(out), { expirationTtl: (found ? 30 : 2) * 86400 }));
   return json(out, 200, cors);
 }
 
@@ -508,7 +553,7 @@ const BOOKINFO_TTL = 4 * 86400;
 const ISBN_STORES = ['steimatzky.co.il', 'booknet.co.il'];
 const ISBN_SEARCH_URLS = [
   (isbn) => 'https://www.steimatzky.co.il/catalogsearch/result/?q=' + isbn,
-  (isbn) => 'https://www.booknet.co.il/search?q=' + isbn
+  (isbn) => 'https://www.booknet.co.il/' + encodeURIComponent('חיפוש') + '?q=' + isbn
 ];
 const hasHeb = (s) => /[֐-׿]/.test(s || '');
 const digits = (s) => String(s || '').replace(/[^\dXx]/g, '').toUpperCase();
@@ -828,6 +873,7 @@ export default {
       if (path === '/digest' || path.startsWith('/push/')) return await handleDigest(req, env, cors, path);
       if (path === '/jobs' || path.startsWith('/jobs/')) return await handleJobs(req, env, cors, path);
       if (path === '/reviews' && req.method === 'GET') return await handleReviews(req, env, cors, ctx);
+      if (path === '/feedback' && req.method === 'POST') return await handleFeedback(req, env, cors);
       if (path === '/bookinfo' && req.method === 'GET') return await handleBookInfo(req, env, cors, ctx);
       if (path === '/stores' && req.method === 'GET') return await handleStores(req, env, cors, ctx);
       if (path === '/nli' && req.method === 'GET') return await handleNli(req, env, cors, ctx);

@@ -28,7 +28,7 @@ const BOOKS = [
   vol('en2', 'The Remains of the Day', ['Kazuo Ishiguro'], '9780679731726', { language: 'en', description: 'A butler looks back.' })
 ];
 let store = { rev: 0, data: null };
-const aiCalls = [], aiScript = [], errors = [];
+const aiCalls = [], aiScript = [], errors = [], feedbacks = [];
 const digestFor = new Map();
 let stallNext = false;
 const jobs = new Map(), jobBodies = [], jobHold = new Set(), profileCalls = [];
@@ -66,6 +66,7 @@ async function phone(browser, name) {
     if (u.origin === WORKER) {
       if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
       if (u.pathname === '/ping') return route.fulfill({ headers: cors, json: { ok: true, ai: true, sync: true, gbooks: true, nli: true, jobs: true } });
+      if (u.pathname === '/feedback') { feedbacks.push(JSON.parse(req.postData())); return route.fulfill({ headers: cors, json: { ok: true } }); }
       if (u.pathname === '/reviews') {
         const t = u.searchParams.get('title') || '';
         return route.fulfill({ headers: cors, json: t === 'יש ואין'
@@ -159,6 +160,8 @@ function googleMock(route, u) {
 }
 const step = async (name, fn) => { process.stdout.write(`• ${name} … `); await fn(); console.log('ok'); };
 const texts = (loc) => loc.allTextContents();
+// SHOTS=<תיקייה>: צילומי מסך של המסכים העיקריים (לבדיקת עיצוב)
+const shot = async (p, name, full = true) => { if (process.env.SHOTS) await p.screenshot({ path: `${process.env.SHOTS}/${name}.png`, fullPage: full }); };
 
 const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
 try {
@@ -267,6 +270,7 @@ try {
     await A.click('button:has-text("אפשר לבכות")');
     await A.fill('#clarify-other', 'בעיקר קלאסיקה אמריקאית'); await A.click('button:has-text("שליחה")');
     await A.waitForSelector('text=ההמלצות שלך', { timeout: 20000 });
+    await A.waitForSelector('section li a:has-text("לקנייה בסטימצקי")'); await shot(A, 'recs');
     assert.deepEqual(await texts(A.locator('section li .font-display.text-\\[18px\\]')), ['יש ואין']);
     // משימות פשוטות על המודל הזול, ההמלצה עצמה על המודל הגדול
     const clarify = aiCalls.find(c => (c.tools || []).some(t => t.name === 'submit_questions'));
@@ -282,6 +286,10 @@ try {
     await A.waitForSelector('section li >> text=רומן קשוח ויפה על הישרדות.');
     await A.waitForSelector('section li >> text=3.8');
     assert.ok(await A.locator('section li a:has-text("חיפוש בצומת ספרים")').count() > 0, 'store search link when no direct page');
+    // קישורי החיפוש הולכים לדף החיפוש של החנות עצמה, לא ל-Google
+    const tz = await A.locator('section li a:has-text("חיפוש בצומת ספרים")').first().getAttribute('href');
+    assert.ok(tz.startsWith('https://www.booknet.co.il/' + encodeURIComponent('חיפוש') + '?q='), tz);
+    assert.ok(await A.locator('section li a:has-text("ביקורות ב-Goodreads")').count() > 0, 'review search links');
     await A.click('nav >> text=ספרים שלי'); await A.click('nav >> text=גלה ספר חדש');
     assert.deepEqual(await texts(A.locator('section li .font-display.text-\\[18px\\]')), ['יש ואין']);
     // שלילה לתמיד עם הערה: נעלם מהרשימה, וההערה מגיעה להמלצה הבאה
@@ -345,7 +353,9 @@ try {
     assert.ok(jobBodies.length > before && jp.includes('Feedback on the previous suggestions (קפקא על החוף') && jp.includes('פחות עצוב בבקשה'));
   });
   await step('privacy: a friend who hides their read books', async () => {
-    await B.click('nav >> text=חברים'); await B.click('label:has-text("הספרים שקראתי והדירוגים") input');
+    // ההגדרה נמצאת בלשונית ההגדרות; בלשונית החברים יש קישור אליה
+    await B.click('nav >> text=חברים'); await B.click('button:has-text("מה החברים רואים עליי")');
+    await B.click('label:has-text("הספרים שקראתי והדירוגים") input');
     await syncBoth();
     await A.click('nav >> text=חברים'); await A.click('main button:has-text("יעל")');
     await A.waitForSelector('text=אין כאן ספרים עדיין.');
@@ -418,6 +428,7 @@ try {
   await step('reading now → finished (statuses)', async () => {
     await A.click('nav >> text=הוספת ספר'); await A.click('button[role=tab]:has-text("ספר אחד")'); await A.fill('#book-q', 'עשרה סיפורים'); await A.click('form button[type=submit]');
     await A.locator('main ul > li').first().locator('button:has-text("זה הספר שלי")').click();
+    await shot(A, 'rate-sheet', false);
     await A.click('[role=dialog] button[role=tab]:has-text("קורא עכשיו")');
     await A.click('[role=dialog] button:has-text("הוספה ל")');
     await A.click('nav >> text=ספרים שלי'); await A.click('button[role=tab]:has-text("קורא עכשיו")');
@@ -426,6 +437,8 @@ try {
     await A.click('[role=dialog] [aria-label="4 כוכבים"]'); await A.click('[role=dialog] button:has-text("שמירת שינויים")');
     await A.click('button[role=tab]:has-text("קראתי")');
     await A.waitForSelector('main li:has-text("עשרה סיפורים")');
+    await shot(A, 'library'); await A.click('nav >> text=הגדרות'); await shot(A, 'settings'); await A.click('nav >> text=חברים'); await shot(A, 'friends');
+    await A.click('nav >> text=הוספת ספר'); await shot(A, 'add'); await A.click('nav >> text=ספרים שלי');
   });
   await step('address form: every UI text follows the chosen gender', async () => {
     const pick = async (label) => { await A.click('nav >> text=הגדרות'); await A.click(`button:has-text("${label}")`); await A.click('nav >> text=גלה ספר חדש'); };
@@ -453,7 +466,10 @@ try {
   });
   await step('biweekly Wrapped summary: banner, story, seen', async () => {
     await A.click('nav >> text=ספרים שלי');
-    await A.click('button:has-text("הסיכום הדו-שבועי שלך מוכן")');
+    // כרטיס קבוע בראש הספרייה, עם תג "חדש" כשיש סיכום שלא נצפה
+    const card = A.locator('button.summary-card');
+    await card.locator('text=חדש').waitFor();
+    await card.click();
     const story = A.locator('[role=dialog][aria-label="הסיכום הדו-שבועי"]');
     await story.waitFor();
     await story.locator('button:has-text("הבא")').click();
@@ -463,7 +479,11 @@ try {
     for (let i = 0; i < 6 && await story.locator('button:has-text("הבא")').count(); i++) await story.locator('button:has-text("הבא")').click();
     await story.locator('text=סוג הקריאה שלך').or(story.locator('button:has-text("שיתוף כתמונה")')).first().waitFor();
     await story.locator('button[aria-label="סגירה"]').click();
-    assert.equal(await A.locator('button:has-text("הסיכום הדו-שבועי שלך מוכן")').count(), 0, 'banner hidden after seen');
+    assert.equal(await card.locator('text=חדש').count(), 0, 'no "new" badge after seen');
+    // בחירת תקופה: השנה
+    await card.click(); await story.locator('button:has-text("השנה")').click();
+    await story.locator('text=השנה שלך בספרים').waitFor();
+    await story.locator('button[aria-label="סגירה"]').click();
   });
   await step('export CSV for other apps, import from Goodreads', async () => {
     await A.click('nav >> text=הגדרות');
@@ -509,6 +529,19 @@ try {
     await run('כל שפה.');
     await A.waitForSelector('section li:has-text("The Remains of the Day")');
     await A.click('button:has-text("אוטומטי")');
+  });
+  await step('feedback button and starter list hidden once done', async () => {
+    await A.click('nav >> text=הגדרות');
+    await A.fill('#app-feedback', 'הכפתור של הסיכום קטן מדי'); await A.click('button:has-text("שליחת משוב")');
+    await A.waitForSelector('text=המשוב נשלח');
+    assert.equal(feedbacks.at(-1).text, 'הכפתור של הסיכום קטן מדי'); assert.equal(feedbacks.at(-1).name, 'יובל');
+    // מי שסיים את הרשימה בדפדפן, לא רואה אותה גם באפליקציה שעל מסך הבית (נשמר בחשבון ומסתנכרן)
+    await A.evaluate(() => { const k = Object.keys(localStorage).find(x => x.startsWith('vrt-starter2-')) || 'vrt-starter2-x'; });
+    assert.ok(await A.locator('h2:has-text("היכרות עם הטעם שלך")').count() > 0);
+    await A.click('button:has-text("סיימתי עם הרשימה")');
+    assert.equal(await A.locator('h2:has-text("היכרות עם הטעם שלך")').count(), 0);
+    await syncBoth(); await A.reload(); await A.click('nav >> text=הגדרות');
+    assert.equal(await A.locator('h2:has-text("היכרות עם הטעם שלך")').count(), 0, 'stays hidden after sync + reload');
   });
   await step('Google Books goes through the family server (shared key + cache)', async () => {
     assert.ok(viaProxy > 0, 'no proxied Google requests');

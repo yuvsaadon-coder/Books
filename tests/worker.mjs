@@ -8,6 +8,23 @@ import assert from 'node:assert/strict';
   assert.equal((await endpointKey('https://fcm.googleapis.com/fcm/send/abc')).length, 32);
   console.log('worker reviews rating + notice key: ok');
 }
+{
+  // ביקורות: רק קישורים שהופיעו בתוצאות החיפוש נשמרים; קישור מומצא נזרק
+  const { findReviews } = await import('../worker/worker.js');
+  const orig = globalThis.fetch; let body = null;
+  globalThis.fetch = async (u, o) => { body = JSON.parse(o.body); return new Response(JSON.stringify({ stop_reason: 'tool_use', content: [
+    { type: 'web_search_tool_result', content: [{ url: 'https://www.goodreads.com/book/show/1', title: 'x' }, { url: 'https://www.haaretz.co.il/literature/2', title: 'y' }] },
+    { type: 'tool_use', name: 'submit_reviews', input: { reviews: [
+      { url: 'https://www.haaretz.co.il/literature/2', summary_he: 'המבקר משבח את הכתיבה.' }, { url: 'https://www.haaretz.co.il/invented', summary_he: 'מומצא' }],
+      rating: 4.1, rating_count: 900, rating_url: 'https://www.goodreads.com/book/show/1' } }] }), { status: 200 }); };
+  const env = { ANTHROPIC_API_KEY: 'k', LIBRARY: { get: async () => null } };
+  const out = await findReviews(env, { title: 'יש ואין', author: 'המינגוויי', original: 'To Have and Have Not' });
+  globalThis.fetch = orig;
+  assert.deepEqual(out.reviews.map(r => r.url), ['https://www.haaretz.co.il/literature/2']);
+  assert.equal(out.rating.value, 4.1); assert.equal(out.rating.site, 'goodreads.com');
+  assert.ok(body.tools.some(t => t.name === 'submit_reviews') && body.messages[0].content.includes('To Have and Have Not'));
+  console.log('worker reviews search: ok');
+}
 import { sanitizeTools } from '../worker/worker.js';
 const tools = sanitizeTools([
   { type: 'web_search_20260209', name: 'web_search' }, { type: 'web_fetch_20260209', name: 'web_fetch' },

@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '28';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '29';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -76,6 +76,8 @@ const fmtDate = (ts) => { try { return new Date(ts).toLocaleDateString(DEFAULT_L
 // סטטוסים של ספר: קראתי / קורא עכשיו / רוצה לקרוא / קראתי חלקית
 const STATUSES = [['read', 'קראתי', 'BookCheck'], ['reading', 'קורא עכשיו', 'BookOpen'], ['want', 'רוצה לקרוא', 'Bookmark'], ['partial', 'קראתי חלקית', 'BookX']];
 // צבע לכל סטטוס (תג בכרטיס הספר)
+const STATUS_COLOR = { read: 'var(--accent)', reading: 'var(--teal)', want: 'var(--brass)', partial: 'var(--rose)' };
+const STATUS_HINT = { read: 'סיימתי, עם דירוג', reading: 'באמצע הספר', want: 'לקרוא בהמשך', partial: 'הפסקתי באמצע' };
 const STATUS_TONE = { reading: 'bg-tealSoft text-teal', want: 'bg-brassSoft text-brass', partial: 'bg-roseSoft text-rose' };
 const statusOf = (b) => (b && ['want', 'reading', 'partial'].includes(b.status)) ? b.status : 'read';
 // ספר שיש בו אות על הטעם (קראתי, או קראתי חלקית עם דירוג)
@@ -1609,7 +1611,7 @@ async function finishRecs({ input, cost, books, exclude, want = 5, onProgress, c
     const c = checked[i];
     if (recs.length >= want) return;
     if (!c || (heOnly && !isHebrewOrIsraeli(c)) || findInLibrary(c, books) || exclude.includes(c.key) || recs.some(x => x.key === c.key)) { rejected++; return; }
-    recs.push({ ...c, reasons: [r.why], genres: r.genres, verifiedAt: Date.now(), verifiedVia: c.verifiedVia || (c.source === 'google' ? 'Google Books' : 'Open Library') });
+    recs.push({ ...c, original: r.title_original && r.title_original !== c.title ? r.title_original : (c.subtitle || ''), reasons: [r.why], genres: r.genres, verifiedAt: Date.now(), verifiedVia: c.verifiedVia || (c.source === 'google' ? 'Google Books' : 'Open Library') });
   });
   // הזמינות והתקציר מהחנויות נטענים אחר כך בכל כרטיס, כדי שההמלצות יופיעו מיד
   onProgress && onProgress(`אומתו ${recs.length} ספרים${rejected ? `; ${rejected} נפסלו (לא נמצאו במאגרים${heOnly ? ', אין מהדורה עברית' : ''}, או כבר אצלך)` : ''}. עלות משוערת: $${cost.toFixed(2)}`);
@@ -1634,7 +1636,7 @@ async function fetchBookInfo(book) {
 async function fetchReviews(book) {
   const c = loadCloud();
   if (!c) return null;
-  return fetchJSON(c.url + '/reviews?' + new URLSearchParams({ title: book.title || '', author: (book.authors || [])[0] || '', original: book.subtitle || '' }), 40000);
+  return fetchJSON(c.url + '/reviews?' + new URLSearchParams({ title: book.title || '', author: (book.authors || [])[0] || '', original: book.original || book.subtitle || '' }), 40000);
 }
 async function enrichRec(rec) {
   const [info, rv] = await Promise.all([fetchBookInfo(rec).catch(() => null), fetchReviews(rec).catch(() => null)]);
@@ -1650,7 +1652,7 @@ async function enrichRec(rec) {
     if (!out.cover && info.cover) out.cover = info.cover;
     if (info.isbn && !(out.isbns || []).length) out.isbns = [info.isbn];
   }
-  return { ...out, offers, availability: info ? info.available : null, reviews: rv ? { list: (rv.reviews || []).filter(x => x.quote), rating: rv.rating || null } : null };
+  return { ...out, offers, availability: info ? info.available : null, reviews: rv ? { list: (rv.reviews || []).filter(x => x.quote), rating: rv.rating || null } : { list: [], rating: null } };
 }
 
 /* ============================================================
@@ -1886,14 +1888,14 @@ async function recommend({ books, answers, lang, exclude, dismissed, want = 5, o
    רכיבי ממשק בסיסיים
    ============================================================ */
 const toCamel = (k) => k.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-function Icon({ name, size = 20, className = '', strokeWidth = 2 }) {
+function Icon({ name, size = 20, className = '', strokeWidth = 2, style }) {
   const lib = window.lucide && window.lucide.icons;
   const node = lib && lib[name];
   if (!node) return <span aria-hidden="true" className={'inline-block ' + className} style={{ width: size, height: size }} />;
   const children = node[0] === 'svg' ? node[2] : node;
   return (
     <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className} style={style} aria-hidden="true">
       {(children || []).map(([tag, attrs], i) => {
         const p = { key: i };
         Object.entries(attrs || {}).forEach(([k, v]) => { if (k !== 'key') p[toCamel(k)] = v; });
@@ -2066,11 +2068,20 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose, initialStatus 
           <div className="mt-1"><SourceBadge book={book} /></div>
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2 mb-4" role="tablist" aria-label="סטטוס">
-        {STATUSES.map(([k, l, ic]) => (
-          <button key={k} type="button" role="tab" aria-selected={status === k} onClick={() => setStatus(k)}
-            className={`min-h-[44px] rounded-xl font-semibold text-[15px] inline-flex items-center justify-center gap-1.5 ${status === k ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}><Icon name={ic} size={17} />{l}</button>
-        ))}
+      <div className="text-[13px] font-semibold tracking-wide text-muted mb-1.5">איפה הספר אצלך?</div>
+      <div className="grid grid-cols-2 gap-2 mb-4" role="tablist" aria-label="סטטוס">
+        {STATUSES.map(([k, l, ic]) => {
+          const on = status === k, c = STATUS_COLOR[k];
+          return (
+            <button key={k} type="button" role="tab" aria-selected={on} onClick={() => setStatus(k)}
+              className={`min-h-[64px] rounded-xl border-2 text-right px-3 py-2 flex items-center gap-2.5 transition-all ${on ? 'shadow-md' : 'border-line bg-surface'}`}
+              style={on ? { borderColor: c, background: `color-mix(in srgb, ${c} 12%, var(--surface))` } : undefined}>
+              <span className="w-9 h-9 rounded-xl grid place-items-center shrink-0" style={{ color: on ? '#fff' : c, background: on ? c : `color-mix(in srgb, ${c} 13%, transparent)` }}><Icon name={ic} size={18} /></span>
+              <span className="min-w-0"><span className="block font-bold text-[15px] leading-tight">{l}</span>
+                <span className="block text-[12px] text-muted leading-tight mt-0.5">{STATUS_HINT[k]}</span></span>
+            </button>
+          );
+        })}
       </div>
       {(status === 'read' || status === 'partial') && (
         <div className="mb-4 flex items-center gap-2 flex-wrap" role="group" aria-label={status === 'partial' ? 'מתי הפסקתי?' : 'מתי סיימתי?'}>
@@ -2219,9 +2230,15 @@ function StarterCover({ b, className }) {
 }
 
 /* ---------- היכרות ראשונה: סוויפ ימינה "קראתי", שמאלה "לא קראתי", ואז דירוג אם רוצים ---------- */
-function starterFinished(books) {
-  if (loadStarterState().pos >= STARTER_DECK.length) return true;
-  return STARTER_DECK.every(([b]) => findInLibrary({ title: b[0], authors: [b[1]] }, books) || (b[2] && findInLibrary({ title: b[2], authors: [b[1]] }, books)));
+// הרשימה הושלמה: נשמר בהגדרות של המשתמש (מסתנכרן בין מכשירים, וגם בין הדפדפן לאפליקציה שעל מסך הבית)
+function starterLocalDone(books) {
+  const st = loadStarterState();
+  if (st.pos >= STARTER_DECK.length) return true;
+  const seen = new Set([...(st.no || []), ...Object.keys(st.picks || {})]);
+  return STARTER_DECK.every(([b]) => seen.has(STARTER_KEY(b)) || findInLibrary({ title: b[0], authors: [b[1]] }, books) || (b[2] && findInLibrary({ title: b[2], authors: [b[1]] }, books)));
+}
+function starterFinished(books, settings = {}) {
+  return !!settings.starterDone || starterLocalDone(books);
 }
 function loadStarterState() {
   try { const s = JSON.parse(localStorage.getItem('vrt-starter2-' + ACTIVE.id) || 'null'); if (s && typeof s.pos === 'number' && s.picks) return s; } catch (e) { /* */ }
@@ -2290,6 +2307,7 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
   let idx2 = idx + 1;
   while (idx2 < STARTER_DECK.length && !visible(STARTER_DECK[idx2])) idx2++;
   const cur = STARTER_DECK[idx], next = STARTER_DECK[idx2];
+  useEffect(() => { if (!cur && !db.settings.starterDone) update(d => ({ ...d, settings: { ...d.settings, starterDone: true } })); }, [!cur]);
   useEffect(() => { [idx2, idx2 + 1, idx2 + 2].forEach(i => STARTER_DECK[i] && starterCover(STARTER_DECK[i][0])); }, [idx2]);
   const count = Object.values(picks).filter(p => !owned(p.b)).length;
   const wantCount = Object.values(picks).filter(p => p.want && !owned(p.b)).length;
@@ -2555,6 +2573,8 @@ function genreMixText(books) {
   if (total < 5) return '';
   return st.slice(0, 6).map(x => `${GENRE_OF_TAG[x.tag] || x.tag} ${Math.round(x.count * 100 / total)}% (avg ${(x.sum / x.count).toFixed(1)}★)`).join(', ');
 }
+// פס צבע בצד כרטיס הספר: לפי הז'אנר (כמו בסטטיסטיקות)
+const spineColor = (b) => { const [g] = classifyBook(b); const i = STARTER.findIndex(x => x.tag === g); return i >= 0 ? GENRE_HUES[i % GENRE_HUES.length] : 'var(--line)'; };
 function LibraryStats({ books, onSummary }) {
   const read = books.filter(isRated);
   const gs = genreStats(read);
@@ -2612,6 +2632,7 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify, onSumma
   }, [books, q, tag, sort]);
   const avg = readBooks.length ? (readBooks.reduce((s, b) => s + b.rating, 0) / readBooks.length).toFixed(1) : '–';
   const loved = readBooks.filter(b => b.rating >= 4).length;
+  const thisYear = readBooks.filter(b => new Date(b.readAt || b.addedAt).getFullYear() === new Date().getFullYear()).length;
   const current = open ? db.books.find(b => b.id === open) : null;
 
   if (!db.books.length) {
@@ -2634,17 +2655,27 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify, onSumma
 
   return (
     <div className="fade-in">
-      <header className="pt-4 pb-3">
-        <h1 className="font-display font-medium text-[26px] leading-snug">הספרים שלי</h1>
-        <p className="text-muted text-[15px] tabular">{readBooks.length} ספרים · ממוצע {avg}★ · {loved} אהובים (4★+)
-          {readBooks.length > 0 && <button type="button" className="text-accent font-semibold text-[14px] mr-2 min-h-[36px] inline-flex items-center gap-1" aria-expanded={showStats} onClick={() => setShowStats(!showStats)}>סטטיסטיקות{showStats ? ' ▴' : ' ▾'}</button>}
-        </p>
-      </header>
+      <PageHero tab="library" title="הספרים שלי" />
+      <div className="grid grid-cols-4 gap-2 mb-3" aria-label="במספרים">
+        {[['BookCheck', readBooks.length, 'קראתי', 'var(--accent)'], ['Star', avg, 'ממוצע', 'var(--brass)'], ['Heart', loved, 'אהובים', 'var(--rose)'], ['CalendarDays', thisYear, 'השנה', 'var(--teal)']].map(([ic, n, l, c]) => (
+          <div key={l} className="stat-tile bg-surface border border-line rounded-xl py-2.5 px-1 text-center">
+            <Icon name={ic} size={17} style={{ color: c }} className="block mx-auto" />
+            <div className="font-display font-bold text-[21px] leading-tight tabular mt-0.5">{n}</div>
+            <div className="text-[12px] text-muted font-semibold">{l}</div>
+          </div>
+        ))}
+      </div>
+      {readBooks.length > 0 && <MySummaryCard books={db.books} onOpen={onSummary} fresh={db.settings.summarySeen !== summaryPeriod()} />}
+      {readBooks.length > 0 && <button type="button" className="text-accent font-semibold text-[14px] mb-2 min-h-[36px] inline-flex items-center gap-1" aria-expanded={showStats} onClick={() => setShowStats(!showStats)}><Icon name="ChartBar" size={16} />סטטיסטיקות לפי ז'אנר{showStats ? ' ▴' : ' ▾'}</button>}
       {showStats && <LibraryStats books={db.books} onSummary={onSummary} />}
-      <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2 mb-3" role="tablist" aria-label="מדף">
+      <div className="grid grid-cols-2 gap-2 mb-3" role="tablist" aria-label="מדף">
         {STATUSES.map(([k, l, ic]) => (
           <button key={k} type="button" role="tab" aria-selected={shelf === k} onClick={() => { setShelf(k); setTag(''); }}
-            className={`min-h-[42px] rounded-xl font-semibold text-[14px] inline-flex items-center justify-center gap-1.5 ${shelf === k ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}><Icon name={ic} size={16} />{l} ({byShelf(k).length})</button>
+            className={`shelf-tab min-h-[46px] rounded-xl font-semibold text-[14px] inline-flex items-center justify-start gap-2 px-3 border transition-all ${shelf === k ? 'is-on border-transparent text-white' : 'bg-surface border-line text-ink'}`}
+            style={shelf === k ? { background: `linear-gradient(135deg, ${STATUS_COLOR[k]}, color-mix(in srgb, ${STATUS_COLOR[k]} 70%, #000))` } : undefined}>
+            <span className={`w-7 h-7 rounded-lg grid place-items-center shrink-0 ${shelf === k ? 'bg-white/20' : ''}`} style={shelf === k ? undefined : { color: STATUS_COLOR[k], background: `color-mix(in srgb, ${STATUS_COLOR[k]} 13%, transparent)` }}><Icon name={ic} size={16} /></span>
+            <span className="flex-1 text-right truncate">{l}</span><span className={`tabular text-[13px] ${shelf === k ? 'opacity-90' : 'text-muted'}`}>{byShelf(k).length}</span>
+          </button>
         ))}
       </div>
       <div className="flex gap-2 mb-3">
@@ -2697,7 +2728,8 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify, onSumma
         {list.map(b => (
           <li key={b.id} className="relative">
             <button type="button" onClick={() => { setOpen(b.id); setConfirmDel(false); }}
-              className="w-full text-right flex gap-3 p-3 bg-surface border border-line rounded-xl active:bg-surface2 transition-colors">
+              className="w-full text-right flex gap-3 p-3 bg-surface border border-line rounded-xl active:bg-surface2 transition-colors overflow-hidden relative">
+              <span aria-hidden="true" className="absolute right-0 inset-y-0 w-1" style={{ background: spineColor(b) }} />
               <Cover book={b} className="w-14 h-20" />
               <div className="min-w-0 flex-1">
                 <div className="font-display font-medium text-[17px] leading-snug clamp-2">{b.title}</div>
@@ -3425,10 +3457,7 @@ function AddTab({ db, onPick, goSettings }) {
   useEffect(() => { try { sessionStorage.setItem('vrt_add_mode', mode); } catch (e) { /* */ } }, [mode]);
   return (
     <div className="fade-in">
-      <header className="pt-4 pb-3">
-        <h1 className="font-display font-medium text-[26px] leading-snug">הוספת ספר</h1>
-        <p className="text-muted text-[15px]">שם ספר בעברית או באנגלית, ISBN או קישור. רק תוצאות שחזרו מהמאגרים יוצגו.</p>
-      </header>
+      <PageHero tab="add" title="הוספת ספר" sub="שם ספר בעברית או באנגלית, ISBN או קישור. רק תוצאות שחזרו מהמאגרים יוצגו." />
       <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-surface2 mb-4" role="tablist" aria-label="אופן ההוספה">
         {[['single', 'ספר אחד', 'Search'], ['bulk', 'רשימה', 'ListChecks'], ['text', 'טקסט חופשי', 'PenLine']].map(([k, l, ic]) => (
           <button key={k} type="button" role="tab" aria-selected={mode === k} onClick={() => setMode(k)}
@@ -3454,24 +3483,52 @@ const QUESTIONS = [
   { id: 'length', text: 'ומה לגבי האורך?', options: Object.entries(LENGTHS).map(([k, v]) => ({ k, label: v.label })) }
 ];
 
+// יומן השיחה: הודעות התקדמות רצופות מתקבצות לשורה אחת קטנה (האחרונה גלויה, השאר בלחיצה); הודעות חשובות תמיד גלויות
+const IMPORTANT_PROGRESS = /שגיאה|ממשיך|לא נמצאו|לא נשארו|נפסלו|אין חיבור|מגבלת|הספרייה ריקה/;
+function ChatLog({ log }) {
+  const out = [];
+  let group = [];
+  const flush = (k) => {
+    if (!group.length) return;
+    const g = group; group = [];
+    const shown = g.filter((m, i) => i === g.length - 1 || IMPORTANT_PROGRESS.test(m.text));
+    const hidden = g.filter(m => !shown.includes(m));
+    out.push(
+      <div key={'g' + k} className="fade-in rounded-xl bg-surface2 px-3 py-2 text-[13.5px] text-muted grid gap-1">
+        {hidden.length > 0 && <details><summary className="cursor-pointer text-[12.5px] font-semibold min-h-[28px] flex items-center">{hidden.length} שלבים קודמים</summary>
+          <div className="grid gap-1 mt-1">{hidden.map((m, i) => <div key={i} className="step-line">{m.text}</div>)}</div></details>}
+        {shown.map((m, i) => <div key={i} className="step-line">{m.text}</div>)}
+      </div>);
+  };
+  log.forEach((m, i) => { if (m.progress) group.push(m); else { flush(i); out.push(<Bubble key={i} from={m.from}>{m.text}</Bubble>); } });
+  flush('end');
+  return <>{out}</>;
+}
 function Bubble({ from, children }) {
   const bot = from === 'bot';
   return (
-    <div className={`fade-in flex ${bot ? 'justify-start' : 'justify-end'}`}>
-      <div className={`max-w-[85%] min-w-0 break-words [overflow-wrap:anywhere] px-3.5 py-2.5 font-reading ${bot ? 'bg-surface border border-line rounded-xl rounded-tr-sm' : 'bg-accentSoft text-ink rounded-xl rounded-tl-sm'}`}>{children}</div>
+    <div className={`fade-in flex items-end gap-2 ${bot ? 'justify-start' : 'justify-end'}`}>
+      {bot && <span className="shrink-0 mb-0.5"><Logo size={26} /></span>}
+      <div className={`max-w-[82%] min-w-0 break-words [overflow-wrap:anywhere] px-3.5 py-2.5 font-reading ${bot ? 'bg-surface border border-line rounded-2xl rounded-br-md' : 'btn-primary text-accentInk rounded-2xl rounded-bl-md'}`}>{children}</div>
     </div>
   );
 }
 
 /* זמינות בפורמטים: מציגים כעובדה רק מה שה-API אישר; לחנויות הישראליות יש קישורי חיפוש (לא טענה) */
 const STORES = [
-  { name: 'e-vrit', site: 'e-vrit.co.il', kind: 'דיגיטלי וקולי' },
-  { name: 'Storytel', site: 'storytel.com', kind: 'קולי' },
-  { name: 'עברית', site: 'ivrit.co.il', kind: 'דיגיטלי' },
+  { name: 'עברית (e-vrit)', site: 'e-vrit.co.il', kind: 'דיגיטלי, קולי ומודפס' },
   { name: 'סטימצקי', site: 'steimatzky.co.il', kind: 'מודפס ודיגיטלי' },
   { name: 'צומת ספרים', site: 'booknet.co.il', kind: 'מודפס' },
   { name: 'Audible', site: 'audible.com', kind: 'קולי, אנגלית' }
 ];
+// דפי החיפוש של החנויות עצמן (לא דרך Google): נבדקו מול כתובות תוצאות אמיתיות של כל אתר
+const STORE_SEARCH = {
+  'e-vrit.co.il': (q) => 'https://www.e-vrit.co.il/Search/' + encodeURIComponent(q),
+  'steimatzky.co.il': (q) => 'https://www.steimatzky.co.il/catalogsearch/result/?q=' + encodeURIComponent(q),
+  'booknet.co.il': (q) => 'https://www.booknet.co.il/' + encodeURIComponent('חיפוש') + '?q=' + encodeURIComponent(q),
+  'audible.com': (q) => 'https://www.audible.com/search?keywords=' + encodeURIComponent(q)
+};
+const storeSearchUrl = (site, q) => (STORE_SEARCH[site] || ((x) => `https://www.google.com/search?q=${encodeURIComponent(`site:${site} ${x}`)}`))(q);
 function FormatInfo({ book }) {
   const q = `"${book.title}" ${(book.authors || [])[0] || ''}`.trim();
   const facts = [];
@@ -3511,7 +3568,7 @@ function FormatInfo({ book }) {
       <div className="text-[12px] text-muted mb-1">כל קישור פותח חיפוש באתר עצמו. זו בדיקה ידנית, לא אימות.</div>
       <div className="flex flex-wrap gap-1.5">
         {STORES.map(st => (
-          <a key={st.site} href={`https://www.google.com/search?q=${encodeURIComponent(`site:${st.site} ${q}`)}`} target="_blank" rel="noopener noreferrer"
+          <a key={st.site} href={storeSearchUrl(st.site, book.title || q)} target="_blank" rel="noopener noreferrer"
             className="min-h-[36px] px-2.5 rounded-full border border-line text-[13px] font-semibold inline-flex items-center gap-1">
             {st.name}<span className="text-muted font-normal">· {st.kind}</span>
           </a>
@@ -3621,7 +3678,7 @@ function BuyLinks({ book, offers = [] }) {
           const d = direct(site);
           return d
             ? <a key={site} href={d.url} target="_blank" rel="noopener noreferrer" className="min-h-[40px] px-3 rounded-full btn-primary text-accentInk text-[14px] font-semibold inline-flex items-center gap-1"><Icon name="ExternalLink" size={14} />לקנייה ב{name}</a>
-            : <a key={site} href={`https://www.google.com/search?q=${encodeURIComponent(`site:${site} ${q}`)}`} target="_blank" rel="noopener noreferrer" className="min-h-[40px] px-3 rounded-full border border-line text-[14px] inline-flex items-center gap-1"><Icon name="Search" size={14} />חיפוש ב{name}</a>;
+            : <a key={site} href={storeSearchUrl(site, book.title || q)} target="_blank" rel="noopener noreferrer" className="min-h-[40px] px-3 rounded-full border border-line text-[14px] inline-flex items-center gap-1"><Icon name="Search" size={14} />חיפוש ב{name}</a>;
         })}
         {publishers.slice(0, 2).map(o => <a key={o.url} href={o.url} target="_blank" rel="noopener noreferrer" className="min-h-[40px] px-3 rounded-full btn-primary text-accentInk text-[14px] font-semibold inline-flex items-center gap-1"><Icon name="ExternalLink" size={14} />בהוצאה ({STORE_NAMES[o.site] || o.site})</a>)}
       </div>
@@ -3659,6 +3716,31 @@ function RejectSheet({ book, onDone, onClose }) {
   );
 }
 
+// ביקורות: תמיד יש מקום בכרטיס. בזמן טעינה "מחפש", ואם לא נמצאו: קישורי חיפוש ב-Goodreads ובסימניה
+function RecReviews({ r, loading }) {
+  const rv = r.reviews;
+  const q = r.original || r.title;
+  const links = (
+    <div className="flex flex-wrap gap-1.5">
+      <a href={'https://simania.co.il/searchBooks.php?searchType=tabAll&query=' + encodeURIComponent(r.title)} target="_blank" rel="noopener noreferrer" className="min-h-[34px] px-2.5 rounded-full border border-line text-[13px] font-semibold inline-flex items-center gap-1"><Icon name="Search" size={13} />ביקורות בסימניה</a>
+      <a href={'https://www.goodreads.com/search?q=' + encodeURIComponent(`${q} ${(r.authors || [])[0] || ''}`.trim())} target="_blank" rel="noopener noreferrer" className="min-h-[34px] px-2.5 rounded-full border border-line text-[13px] font-semibold inline-flex items-center gap-1"><Icon name="Search" size={13} />ביקורות ב-Goodreads</a>
+    </div>
+  );
+  const has = rv && (rv.rating || rv.list.length > 0);
+  if (!rv && !loading) return null;
+  return (
+    <div className="mt-2.5 border border-line rounded-xl p-2.5 grid gap-1.5" aria-label="ביקורות">
+      <div className="text-[13px] font-semibold text-muted flex items-center gap-1"><Icon name="MessageCircle" size={14} />מה אומרים עליו</div>
+      {!rv && loading && <div className="text-[13px] text-muted inline-flex items-center gap-1.5"><Spinner size={14} />מחפש ביקורות באתרים מוכרים…</div>}
+      {rv && rv.rating && <div className="text-[14px] inline-flex items-center gap-1"><Icon name="Star" size={14} className="text-brass fill-current" /><span className="font-semibold tabular">{rv.rating.value.toFixed(1)}</span><span className="text-muted">/ {rv.rating.best || 5}{rv.rating.count ? ` · ${rv.rating.count.toLocaleString(DEFAULT_LOCALE)} דירוגים` : ''}{rv.rating.site ? ` · ${REVIEW_NAMES[rv.rating.site] || rv.rating.site}` : ''}</span></div>}
+      {rv && rv.list.slice(0, 3).map(x => (
+        <blockquote key={x.url} className="text-[14px] font-reading border-r-2 border-brass pr-2" dir="auto">{x.quote} <a href={x.url} target="_blank" rel="noopener noreferrer" className="text-[12px] text-muted underline whitespace-nowrap">— {REVIEW_NAMES[x.site] || x.site}</a></blockquote>
+      ))}
+      {rv && !has && <div className="text-[13px] text-muted">לא מצאתי ביקורות באתרים המוכרים. אפשר לחפש ישירות:</div>}
+      {rv && links}
+    </div>
+  );
+}
 function RecCard({ r, onRead, onWant, onDismiss, inLib, onEnrich }) {
   const [extra, setExtra] = useState({});
   const [enriching, setEnriching] = useState(false);
@@ -3685,25 +3767,20 @@ function RecCard({ r, onRead, onWant, onDismiss, inLib, onEnrich }) {
         <ul className="text-[14px] grid gap-0.5 list-disc pr-5">{r.reasons.map((x, i) => <li key={i}>{x}</li>)}</ul>
       </div>
       <Synopsis book={r} className="mt-2.5" onChange={(patch) => setExtra(x => ({ ...x, ...patch }))} />
-      {r.reviews && (r.reviews.rating || r.reviews.list.length > 0) && (
-        <div className="mt-2.5 border border-line rounded-xl p-2.5 grid gap-1.5">
-          <div className="text-[13px] font-semibold text-muted flex items-center gap-1"><Icon name="MessageCircle" size={14} />מה אומרים עליו</div>
-          {r.reviews.rating && <div className="text-[14px] inline-flex items-center gap-1"><Icon name="Star" size={14} className="text-brass fill-current" /><span className="font-semibold tabular">{r.reviews.rating.value.toFixed(1)}</span><span className="text-muted">/ {r.reviews.rating.best || 5}{r.reviews.rating.count ? ` · ${r.reviews.rating.count.toLocaleString('he-IL')} מדרגים` : ''} · <a href={r.reviews.rating.url} target="_blank" rel="noopener noreferrer" className="underline">{STORE_NAMES[r.reviews.rating.site] || r.reviews.rating.site}</a></span></div>}
-          {r.reviews.list.slice(0, 2).map(x => (
-            <blockquote key={x.url} className="text-[14px] font-reading border-r-2 border-brass pr-2" dir="auto">"{x.quote}" <a href={x.url} target="_blank" rel="noopener noreferrer" className="text-[12px] text-muted underline whitespace-nowrap">— {REVIEW_NAMES[x.site] || x.site}</a></blockquote>
-          ))}
-        </div>
-      )}
+      <RecReviews r={r} loading={enriching && !r.offers} />
       {r.offers ? <RecAvailability r={r} /> : enriching ? <div className="mt-2.5 text-[13px] text-muted inline-flex items-center gap-1.5"><Spinner size={14} />בודק זמינות בחנויות…</div> : <FormatInfo book={r} />}
-      <div className="grid grid-cols-[1fr_auto_auto] gap-2 mt-2">
+      <div className="grid gap-2 mt-3">
         {inLib
           ? <div className="min-h-[48px] rounded-xl bg-surface2 text-ok font-semibold grid place-items-center text-[14px]">{libLabel(inLib)}</div>
-          : <div className="grid grid-cols-2 gap-2">
-              <Btn variant="soft" onClick={() => onWant({ ...r, ...extra })}><Icon name="Bookmark" size={18} />רוצה לקרוא</Btn>
-              <Btn variant="ghost" onClick={() => onRead({ ...r, ...extra })}><Icon name="BookCheck" size={18} />קראתי</Btn>
+          : <div className="grid grid-cols-3 gap-1.5">
+              <Btn variant="soft" className="!px-1 !text-[13px] whitespace-nowrap" onClick={() => onWant({ ...r, ...extra })}><Icon name="Bookmark" size={17} />רוצה לקרוא</Btn>
+              <Btn variant="ghost" className="!px-1 !text-[13px] whitespace-nowrap" onClick={() => onWant({ ...r, ...extra }, 'reading')}><Icon name="BookOpen" size={17} />{STATUSES[1][1]}</Btn>
+              <Btn variant="ghost" className="!px-1 !text-[13px] whitespace-nowrap" onClick={() => onRead({ ...r, ...extra })}><Icon name="BookCheck" size={17} />קראתי</Btn>
             </div>}
-        <button type="button" onClick={() => onDismiss(r)} aria-label="לא מעניין אותי" className="min-h-[48px] w-12 grid place-items-center rounded-xl border border-line text-muted"><Icon name="ThumbsDown" size={18} /></button>
-        <a href={(r.offers && r.offers[0] && r.offers[0].url) || r.link} target="_blank" rel="noopener noreferrer" aria-label="לדף הספר" className="min-h-[48px] w-12 grid place-items-center rounded-xl border border-line text-muted"><Icon name="ExternalLink" size={18} /></a>
+        <div className="flex gap-2">
+          <button type="button" onClick={() => onDismiss(r)} aria-label="לא מעניין אותי" className="flex-1 min-h-[42px] rounded-xl border border-line text-muted text-[14px] font-semibold inline-flex items-center justify-center gap-1.5"><Icon name="ThumbsDown" size={16} />לא בשבילי</button>
+          <a href={(r.offers && r.offers[0] && r.offers[0].url) || r.link} target="_blank" rel="noopener noreferrer" aria-label="לדף הספר" className="flex-1 min-h-[42px] rounded-xl border border-line text-muted text-[14px] font-semibold inline-flex items-center justify-center gap-1.5"><Icon name="ExternalLink" size={16} />לדף הספר</a>
+        </div>
       </div>
     </li>
   );
@@ -3735,13 +3812,13 @@ function HistoryView({ db, update, onPick, notify, openId, setOpenId }) {
         <details className="bg-surface border border-line rounded-xl p-3">
           <summary className="font-semibold text-[15px] cursor-pointer min-h-[32px]">השיחה המלאה ({open.log.length} הודעות)</summary>
           <div className="grid gap-2 mt-2">
-            {open.log.map((m, i) => <Bubble key={i} from={m.from}>{m.progress ? <span className="text-muted text-[14px]">{m.text}</span> : m.text}</Bubble>)}
+            <ChatLog log={open.log} />
           </div>
         </details>
         <h2 className="font-display font-medium text-[20px]">{open.recs.length} המלצות</h2>
         <ul className="grid gap-3">
           {open.recs.map(r => (
-            <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)} onRead={(b) => onPick(b)} onWant={(b) => onPick(open.answers && open.answers.gift ? { ...b, presetTags: ['מתנה'] } : b, { status: 'want', fromRec: !(open.answers && open.answers.gift) })}
+            <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)} onRead={(b) => onPick(b)} onWant={(b, stt = 'want') => onPick(open.answers && open.answers.gift ? { ...b, presetTags: ['מתנה'] } : b, { status: stt, fromRec: !(open.answers && open.answers.gift) })}
               onDismiss={(b) => setRejecting(b)} />
           ))}
         </ul>
@@ -3847,7 +3924,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
     language: r.language, isbns: (r.isbns || []).slice(0, 3), link: r.link, publisher: r.publisher || '', reasons: r.reasons || [],
     verifiedAt: r.verifiedAt, verifiedVia: r.verifiedVia || '', ebook: !!r.ebook, ebookLink: r.ebookLink || '', olEbook: !!r.olEbook,
     sources: r.sources || [], aiFormats: r.aiFormats || null, genres: r.genres || [], descSource: r.descSource || '', descriptionHe: (r.descriptionHe || '').slice(0, 1500),
-    offers: (r.offers || []).slice(0, 8), availability: r.availability || null, reviews: r.reviews || null
+    offers: (r.offers || []).slice(0, 8), availability: r.availability || null, reviews: r.reviews || null, original: r.original || ''
   });
   const saveSession = (ans, usedLang, allRecs) => {
     if (!st.session.id) st.session = { id: uid(), at: Date.now() };
@@ -3975,10 +4052,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
 
   return (
     <div className="fade-in">
-      <header className="pt-4 pb-3">
-        <h1 className="font-display font-medium text-[26px] leading-snug">גלה ספר חדש</h1>
-        <p className="text-muted text-[15px]">{hasAi ? T('ספרו מה בא לכם, בחרו מיקוד, ו-Claude ישאל 2–4 שאלות לדיוק. כל המלצה נבדקת מול המאגרים והחנויות.') : '4 שאלות קצרות. כל המלצה נבדקת מחדש מול המאגר לפני שהיא מוצגת.'}</p>
-      </header>
+      <PageHero tab="discover" title="גלה ספר חדש" sub={hasAi ? T('ספרו מה בא לכם, בחרו מיקוד, ו-Claude ישאל 2–4 שאלות לדיוק. כל המלצה נבדקת מול המאגרים והחנויות.') : '4 שאלות קצרות. כל המלצה נבדקת מחדש מול המאגר לפני שהיא מוצגת.'} />
       <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2 mb-4" role="tablist" aria-label="תצוגה">
         {[['chat', 'שיחה', 'MessageCircle'], ['history', `היסטוריה (${(db.history || []).length})`, 'History']].map(([k, l, ic]) => {
           const on = k === 'chat' ? view === 'chat' : view !== 'chat';
@@ -4052,7 +4126,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
 
       <div className="grid gap-2.5 mb-3" aria-live="polite">
         <Bubble from="bot">{T('היי! בואו נמצא את הספר הבא שלך.')} אני משתמש רק בספרים שקיימים באמת ב-Google Books או ב-Open Library.</Bubble>
-        {log.map((m, i) => <Bubble key={i} from={m.from}>{m.progress ? <span className="text-muted text-[14px]">{m.text}</span> : m.text}</Bubble>)}
+        <ChatLog log={log} />
         {!done && q && (
           <>
             <Bubble from="bot">{q.text}</Bubble>
@@ -4106,7 +4180,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
           <ul className="grid gap-3">
             {recs.map(r => (
               <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)}
-                onRead={(b) => onPick(b)} onWant={(b) => onPick(st.answers.gift ? { ...b, presetTags: ['מתנה'] } : b, { status: 'want', fromRec: !st.answers.gift })}
+                onRead={(b) => onPick(b)} onWant={(b, stt = 'want') => onPick(st.answers.gift ? { ...b, presetTags: ['מתנה'] } : b, { status: stt, fromRec: !st.answers.gift })}
                 onEnrich={(e) => { const all = st.recs.map(x => x.key === e.key ? e : x); recSet(st, { recs: all }); if (st.session.id) saveSession(st.answers, lang, all); }}
                 onDismiss={(b) => setRejecting(b)} />
             ))}
@@ -4372,9 +4446,40 @@ function AppImport({ db, update, notify, onExport }) {
   );
 }
 
+// 💬 משוב על האפליקציה: נשלח לשרת עם שם המשתמש, המסך והגרסה
+function FeedbackBox({ profile, notify }) {
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const send = async () => {
+    const c = loadCloud();
+    if (!c || !text.trim()) return;
+    setBusy(true);
+    try {
+      const r = await fetch(c.url + '/feedback', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: text.trim(), name: profile.name, screen: 'settings', version: APP_VERSION }) });
+      if (!r.ok) throw new Error();
+      setText(''); notify('המשוב נשלח. תודה! ✓');
+    } catch (e) { notify('שליחת המשוב נכשלה. נסו שוב.'); }
+    setBusy(false);
+  };
+  return (
+    <div className="grid gap-2">
+      <label htmlFor="app-feedback" className="text-[14px] text-muted">{T('משהו לא עובד, חסר או מבלבל? כתבו כאן, זה מגיע ישר ליובל.')}</label>
+      <textarea id="app-feedback" value={text} onChange={e => setText(e.target.value)} rows={3} maxLength={2000} className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px]" />
+      <Btn variant="soft" disabled={!text.trim() || busy} onClick={send}>{busy ? <Spinner /> : <Icon name="Send" size={18} />}שליחת משוב</Btn>
+    </div>
+  );
+}
+function SettingsGroup({ icon, title, color, children }) {
+  return (
+    <section className="settings-group bg-surface border border-line rounded-2xl p-3.5 grid gap-3">
+      <h2 className="font-bold text-[17px]"><span className="w-8 h-8 rounded-xl grid place-items-center shrink-0 text-white" style={{ background: color }}><Icon name={icon} size={17} /></span>{title}</h2>
+      {children}
+    </section>
+  );
+}
 function BackupTab({ db, update, replace, status, notify, profile, onRenameProfile, onDeleteProfile, onOpenStarter }) {
   // רשימת ההיכרות הושלמה (עברו על כל 400 הספרים, או שכולם כבר בספרייה): לא מציגים אותה בהגדרות
-  const starterDone = useMemo(() => starterFinished(db.books), [db.books]);
+  const starterDone = useMemo(() => starterFinished(db.books, db.settings), [db.books, db.settings.starterDone]);
   const [nameDraft, setNameDraft] = useState(profile.name);
   const [confirmProfileDel, setConfirmProfileDel] = useState(false);
   const [paste, setPaste] = useState('');
@@ -4452,9 +4557,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
 
   return (
     <div className="fade-in grid gap-4">
-      <header className="pt-4">
-        <h1 className="font-display font-medium text-[26px] leading-snug">הגדרות</h1>
-      </header>
+      <PageHero tab="backup" title="הגדרות" sub="החשבון, ההמלצות, התצוגה, הפרטיות והנתונים שלך." />
 
       <SyncPanel />
 
@@ -4462,10 +4565,10 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
         <h2 className="font-semibold text-[17px]">היכרות עם הטעם שלך</h2>
         <p className="text-[14px] text-muted">סימון מהיר של ספרים מוכרים מתוך 400 ספרים לפי ז'אנרים. ספרים שכבר בספרייה לא יתווספו שוב.</p>
         <Btn variant="soft" onClick={onOpenStarter}><Icon name="ListChecks" size={18} />בחירה מרשימת ספרים מוכרים</Btn>
+        <button type="button" className="text-[13px] text-muted underline justify-self-start min-h-[32px]" onClick={() => { update(d => ({ ...d, settings: { ...d.settings, starterDone: true } })); notify('הרשימה הוסתרה'); }}>סיימתי עם הרשימה, אפשר להסתיר</button>
       </section>}
 
-      <section className="bg-surface border border-line rounded-xl p-3 grid gap-2">
-        <h2 className="font-semibold text-[17px]">המשתמש שלך</h2>
+      <SettingsGroup icon="UserRound" title="החשבון שלי" color="var(--accent)">
         <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (nameDraft.trim()) { onRenameProfile(nameDraft.trim()); notify('השם עודכן'); } }}>
           <label htmlFor="profile-name" className="sr-only">שם המשתמש</label>
           <input id="profile-name" value={nameDraft} onChange={e => setNameDraft(e.target.value)} maxLength={24}
@@ -4475,18 +4578,6 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
         <Btn variant="danger" onClick={() => { if (!confirmProfileDel) { setConfirmProfileDel(true); return; } onDeleteProfile(); }}>
           {confirmProfileDel ? T(`לחצו שוב: מחיקת "${profile.name}" וכל הספרים שלו`) : 'מחיקת המשתמש מהמכשיר'}
         </Btn>
-      </section>
-
-      <section className="bg-surface border border-line rounded-xl p-3 grid gap-3">
-        <h2 className="font-semibold text-[17px]">הגדרות</h2>
-        <div>
-          <div className="text-[14px] text-muted mb-1.5">שפת ברירת מחדל להמלצות ({profile.name})</div>
-          <div className="flex gap-2 flex-wrap">
-            {REC_LANGS.map(([k, l]) => (
-              <Chip key={k} active={db.settings.recLang === k} onClick={() => update(d => ({ ...d, settings: { ...d.settings, recLang: k } }))}>{l}</Chip>
-            ))}
-          </div>
-        </div>
         <div>
           <div className="text-[14px] text-muted mb-1.5">איך לפנות אליך?</div>
           <div className="flex gap-2 flex-wrap" role="group" aria-label="לשון פנייה">
@@ -4495,17 +4586,13 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
             ))}
           </div>
         </div>
+      </SettingsGroup>
+      <SettingsGroup icon="Sparkles" title="המלצות" color="var(--rose)">
         <div>
-          <div className="text-[15px] font-semibold">הצעות כל שבועיים</div>
-          <div className="text-[13px] text-muted mb-1.5">כל שבועיים נבחרים בשבילך 10 ספרים חדשים לפי מה שקראת. אפשר לקבל על זה התראה לטלפון.</div>
-          <PushButton notify={notify} />
-        </div>
-        <EinkToggle />
-        <div>
-          <div className="text-[14px] text-muted mb-1.5">ערכת צבעים</div>
+          <div className="text-[14px] text-muted mb-1.5">שפת ברירת מחדל להמלצות ({profile.name})</div>
           <div className="flex gap-2 flex-wrap">
-            {[['system', 'לפי המכשיר', 'Monitor'], ['light', 'בהירה', 'Sun'], ['dark', 'כהה', 'Moon']].map(([k, l, ic]) => (
-              <Chip key={k} active={db.settings.theme === k} onClick={() => update(d => ({ ...d, settings: { ...d.settings, theme: k } }))}><span className="inline-flex items-center gap-1.5"><Icon name={ic} size={16} />{l}</span></Chip>
+            {REC_LANGS.map(([k, l]) => (
+              <Chip key={k} active={db.settings.recLang === k} onClick={() => update(d => ({ ...d, settings: { ...d.settings, recLang: k } }))}>{l}</Chip>
             ))}
           </div>
         </div>
@@ -4538,8 +4625,34 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
             איפוס {Math.ceil(db.dismissed.length / 2)} ספרים שסומנו "לא מעניין"
           </Btn>
         )}
-      </section>
+      </SettingsGroup>
+      <SettingsGroup icon="Bell" title="התראות" color="var(--brass)">
+        <div>
+          <div className="text-[15px] font-semibold">הצעות כל שבועיים</div>
+          <div className="text-[13px] text-muted mb-1.5">כל שבועיים נבחרים בשבילך 10 ספרים חדשים לפי מה שקראת. אפשר לקבל על זה התראה לטלפון.</div>
+          <PushButton notify={notify} />
+        </div>
+      </SettingsGroup>
+      <SettingsGroup icon="Palette" title="תצוגה" color="var(--teal)">
+        <EinkToggle />
+        <div>
+          <div className="text-[14px] text-muted mb-1.5">ערכת צבעים</div>
+          <div className="flex gap-2 flex-wrap">
+            {[['system', 'לפי המכשיר', 'Monitor'], ['light', 'בהירה', 'Sun'], ['dark', 'כהה', 'Moon']].map(([k, l, ic]) => (
+              <Chip key={k} active={db.settings.theme === k} onClick={() => update(d => ({ ...d, settings: { ...d.settings, theme: k } }))}><span className="inline-flex items-center gap-1.5"><Icon name={ic} size={16} />{l}</span></Chip>
+            ))}
+          </div>
+        </div>
+      </SettingsGroup>
+      <SettingsGroup icon="MessageSquareHeart" title="💬 משוב" color="var(--rose)">
+        <FeedbackBox profile={profile} notify={notify} />
+      </SettingsGroup>
+      <SettingsGroup icon="Shield" title="פרטיות וחברים" color="var(--accent-2)">
+        <PrivacySettings db={db} update={update} />
+      </SettingsGroup>
 
+
+      <h2 className="font-bold text-[17px] mt-2 -mb-2 flex items-center gap-2"><span className="w-8 h-8 rounded-xl grid place-items-center text-white" style={{ background: 'var(--brass)' }}><Icon name="Database" size={17} /></span>הנתונים שלי</h2>
       <KnowsAboutMe db={db} update={update} notify={notify} />
       <AppImport db={db} update={update} notify={notify} onExport={() => { downloadFile(`my-books-${profile.name}-${stamp}.csv`, toGoodreadsCSV(db), 'text/csv;charset=utf-8'); notify('קובץ ה-CSV נוצר'); }} />
       <details className="bg-surface border border-line rounded-xl p-3">
@@ -4671,6 +4784,22 @@ function useProfilesList() {
   useEffect(() => { const f = () => setP(loadProfiles().profiles); window.addEventListener('vrt-profiles-changed', f); return () => window.removeEventListener('vrt-profiles-changed', f); }, []);
   return p;
 }
+// מה חברים רואים עליי: בלשונית ההגדרות
+const SHARE_ITEMS = [['read', 'הספרים שקראתי והדירוגים'], ['want', 'רשימת "רוצה לקרוא"'], ['notes', 'ההערות שכתבתי על ספרים'], ['community', 'להיכלל (בלי שם) ב"אהובים בקהילה"']];
+function PrivacySettings({ db, update }) {
+  const sh = shareOf(db);
+  const setShare = (k) => update(d => ({ ...d, settings: { ...d.settings, share: { ...shareOf(d), [k]: !shareOf(d)[k] } } }));
+  return (
+    <div className="grid gap-1">
+      <p className="text-[13px] text-muted">מה חברים שאישרת יכולים לראות. ההגדרה מסתנכרנת לכל המכשירים.</p>
+      {SHARE_ITEMS.map(([k, l]) =>
+        <label key={k} className="flex items-center justify-between gap-3 min-h-[44px] border-b border-line last:border-0">
+          <span className="text-[15px]">{l}</span>
+          <input type="checkbox" checked={!!sh[k]} onChange={() => setShare(k)} className="w-5 h-5 accent-[var(--accent)]" aria-label={l} />
+        </label>)}
+    </div>
+  );
+}
 // מה חברים רואים עליי (הגדרה של כל משתמש, מסתנכרנת): ספרים שקראתי, רשימת "רוצה לקרוא", הערות, והופעה ב"אהובים בקהילה"
 const shareOf = (d) => ({ read: true, want: true, notes: true, community: true, ...((d && d.settings && d.settings.share) || {}) });
 function visibleBooks(d) {
@@ -4715,7 +4844,7 @@ function friendsLovedTitles(myBooks) {
   return lovedBy(accepted, myBooks).filter(x => x.fans.length).slice(0, 20).map(x => `${x.book.title} — ${(x.book.authors || [])[0] || ''}`);
 }
 
-function FriendsTab({ db, update, onPick, notify }) {
+function FriendsTab({ db, update, onPick, notify, onGoSettings }) {
   const profiles = useProfilesList();
   const { me, rel, accepted, incoming, outgoing, inbox } = useFriends();
   const [view, setView] = useState(null);   // מזהה חבר שהמדף שלו פתוח
@@ -4751,16 +4880,14 @@ function FriendsTab({ db, update, onPick, notify }) {
     return (
       <div className="flex gap-1.5 mt-2 flex-wrap">
         <Chip onClick={() => onPick(book, { status: 'want' })}><Icon name="Bookmark" size={14} />רוצה לקרוא</Chip>
+        <Chip onClick={() => onPick(book, { status: 'reading' })}><Icon name="BookOpen" size={14} />{STATUSES[1][1]}</Chip>
         <Chip onClick={() => onPick(book)}><Icon name="BookCheck" size={14} />קראתי</Chip>
       </div>
     );
   };
   return (
     <div className="fade-in">
-      <header className="pt-4 pb-3">
-        <h1 className="font-display font-medium text-[26px] leading-snug">חברים</h1>
-        <p className="text-muted text-[15px]">רואים מה החברים קוראים ואוהבים, ממליצים אחד לשני, ומגלים ספרים דרכם.</p>
-      </header>
+      <PageHero tab="friends" title="חברים" sub="רואים מה החברים קוראים ואוהבים, ממליצים אחד לשני, ומגלים ספרים דרכם." />
 
       {incoming.length > 0 && (
         <section className="mb-5">
@@ -4833,15 +4960,9 @@ function FriendsTab({ db, update, onPick, notify }) {
         </section>
       )}
 
-      <section className="mb-5 bg-surface border border-line rounded-2xl p-3 grid gap-2">
-        <h2 className="font-semibold text-[15px]">מה החברים רואים עליי</h2>
-        {[['read', 'הספרים שקראתי והדירוגים'], ['want', 'רשימת "רוצה לקרוא"'], ['notes', 'ההערות שכתבתי על ספרים'], ['community', 'להיכלל (בלי שם) ב"אהובים בקהילה"']].map(([k, l]) => (
-          <label key={k} className="flex items-center justify-between gap-3 min-h-[40px]">
-            <span className="text-[14px]">{l}</span>
-            <input type="checkbox" checked={!!sh[k]} onChange={() => setShare(k)} className="w-5 h-5 accent-[var(--accent)]" aria-label={l} />
-          </label>
-        ))}
-      </section>
+      {onGoSettings && <button type="button" onClick={onGoSettings} className="mb-5 w-full text-right bg-surface border border-line rounded-2xl p-3 flex items-center gap-2 min-h-[52px]">
+        <Icon name="Shield" size={18} className="text-accent" /><span className="flex-1 text-[14px] font-semibold">מה החברים רואים עליי</span><span className="text-[13px] text-muted">בהגדרות</span><Icon name="ChevronLeft" size={18} className="text-muted" />
+      </button>}
 
       <section className="mb-5">
         <h2 className="font-semibold text-[15px] mb-2">להוסיף חברים</h2>
@@ -4886,7 +5007,7 @@ function FriendShelf({ pid, profile, myBooks, onBack, onPick }) {
                 {statusOf(b) === 'reading' ? <div className="text-[12px] text-teal font-semibold">קורא/ת עכשיו</div> : b.rating > 0 && <Stars value={b.rating} size={13} />}
                 {b.note && <div className="text-[13px] font-reading clamp-2 mt-0.5">"{b.note}"</div>}
                 {inLib ? <div className="text-[12px] text-muted mt-1">{libLabel(inLib)}</div>
-                  : <div className="flex gap-1.5 mt-1.5"><Chip onClick={() => onPick(b, { status: 'want' })}><Icon name="Bookmark" size={14} />רוצה לקרוא</Chip><Chip onClick={() => onPick(b)}>קראתי</Chip></div>}
+                  : <div className="flex gap-1.5 mt-1.5"><Chip onClick={() => onPick(b, { status: 'want' })}><Icon name="Bookmark" size={14} />רוצה לקרוא</Chip><Chip onClick={() => onPick(b, { status: 'reading' })}><Icon name="BookOpen" size={14} />{STATUSES[1][1]}</Chip><Chip onClick={() => onPick(b)}>קראתי</Chip></div>}
               </div>
             </li>
           );
@@ -5032,9 +5153,18 @@ function readerType(s) {
   if (s.avg && s.avg <= 2.5 && s.rated >= 2) return T3('המבקר החריף', 'המבקרת החריפה', 'עין ביקורתית', 'רף גבוה. הספר הבא יצטרך להתאמץ.');
   return T3('הקורא המתמיד', 'הקוראת המתמידה', 'קריאה בקצב קבוע', 'קצב יציב, ספר טוב אחרי ספר טוב.');
 }
-function summaryStats(books, now = Date.now()) {
-  const from = now - 14 * DAY_MS;
-  const inWin = (t) => t >= from && t <= now + DAY_MS;
+// תקופות לסיכום: שבועיים אחרונים, החודש, החודש שעבר, השנה
+const SUMMARY_PERIODS = [['14', 'שבועיים'], ['month', 'החודש'], ['prev', 'החודש שעבר'], ['year', 'השנה']];
+function periodRange(k, now = Date.now()) {
+  const d = new Date(now);
+  if (k === 'month') return [new Date(d.getFullYear(), d.getMonth(), 1).getTime(), now];
+  if (k === 'prev') return [new Date(d.getFullYear(), d.getMonth() - 1, 1).getTime(), new Date(d.getFullYear(), d.getMonth(), 1).getTime() - 1];
+  if (k === 'year') return [new Date(d.getFullYear(), 0, 1).getTime(), now];
+  return [now - 14 * DAY_MS, now];
+}
+function summaryStats(books, now = Date.now(), period = '14') {
+  const [from, to] = periodRange(period, now);
+  const inWin = (t) => t >= from && t <= to + DAY_MS;
   // רק ספרים עם תאריך סיום (לא ספרים שסומנו בבת אחת מרשימת ההיכרות)
   const finished = books.filter(b => ['read', 'partial'].includes(statusOf(b)) && b.readAt && inWin(b.readAt)).sort((a, b) => (b.rating || 0) - (a.rating || 0) || b.readAt - a.readAt);
   const started = books.filter(b => statusOf(b) === 'reading' && inWin(b.startedAt || b.addedAt));
@@ -5043,7 +5173,7 @@ function summaryStats(books, now = Date.now()) {
   const gm = new Map();
   finished.forEach(b => { const [g] = classifyBook(b); if (g) gm.set(g, (gm.get(g) || 0) + 1); });
   const genres = [...gm.entries()].sort((a, b) => b[1] - a[1]).map(([t, n]) => ({ tag: t, name: GENRE_OF_TAG[t] || t, n }));
-  const s = { from, to: now, finished, started, wanted, partial: finished.filter(b => statusOf(b) === 'partial').length,
+  const s = { from, to, period, finished, started, wanted, partial: finished.filter(b => statusOf(b) === 'partial').length,
     pages: finished.filter(b => statusOf(b) === 'read').reduce((a, b) => a + (b.pageCount || 0), 0), rated: ratedL.length,
     avg: ratedL.length ? ratedL.reduce((a, b) => a + b.rating, 0) / ratedL.length : 0, top: ratedL[0] || finished[0] || null, genres,
     total: books.filter(isRated).length, year: books.filter(b => isRated(b) && b.readAt && new Date(b.readAt).getFullYear() === new Date(now).getFullYear()).length };
@@ -5061,7 +5191,8 @@ async function summaryImage(s) {
   x.direction = 'rtl'; x.textAlign = 'center'; x.fillStyle = '#fff';
   const font = (px, w = 700) => `${w} ${px}px "Assistant", "Frank Ruhl Libre", sans-serif`;
   const line = (t, y, px, w, a = 1) => { x.globalAlpha = a; x.font = font(px, w); x.fillText(t, 540, y, 960); x.globalAlpha = 1; };
-  line('השבועיים שלי בספרים', 200, 64, 700, .9);
+  try { await Promise.all(['700 64px Assistant', '800 96px Assistant', '400 44px Assistant'].map(f => document.fonts.load(f))); } catch (e) { /* גופן ברירת מחדל */ }
+  line({ '14': 'השבועיים שלי בספרים', month: 'החודש שלי בספרים', prev: 'החודש שלי בספרים', year: 'השנה שלי בספרים' }[s.period] || 'הסיכום שלי', 200, 64, 700, .9);
   line(`${fmtShort(s.from)} – ${fmtShort(s.to)}`, 280, 44, 400, .8);
   line(String(s.finished.length), 640, 300, 800);
   line(s.finished.length === 1 ? 'ספר שהסתיים' : 'ספרים שהסתיימו', 740, 64, 600);
@@ -5081,6 +5212,22 @@ async function shareSummary(s, notify) {
     notify && notify('התמונה נשמרה');
   } catch (e) { /* ביטול שיתוף */ }
 }
+// כרטיס קבוע בראש הספרייה: תמיד אפשר להגיע לסיכום
+function MySummaryCard({ books, onOpen, fresh }) {
+  const s = useMemo(() => summaryStats(books), [books]);
+  const y = useMemo(() => summaryStats(books, Date.now(), 'year'), [books]);
+  return (
+    <button type="button" onClick={onOpen} className="summary-card w-full text-right rounded-2xl p-3.5 mb-3 text-white flex items-center gap-3 shadow-md active:scale-[.99] transition-transform">
+      <span className="w-12 h-12 rounded-2xl bg-white/20 grid place-items-center shrink-0"><Icon name="Trophy" size={24} /></span>
+      <span className="flex-1 min-w-0">
+        <span className="block text-[12px] font-bold tracking-[.12em] opacity-90">הסיכום שלי{fresh && s.active ? <span className="ms-2 px-1.5 py-0.5 rounded-full bg-white text-[#1B1A28] text-[11px] tracking-normal">חדש</span> : null}</span>
+        <span className="block font-display font-bold text-[18px] leading-tight">{s.finished.length ? `${s.finished.length} ספרים בשבועיים · ${s.type.name}` : `השנה: ${y.finished.length} ספרים · ${y.type.name}`}</span>
+        <span className="block text-[13px] opacity-90">שבועיים, חודש או שנה, בסגנון Wrapped</span>
+      </span>
+      <Icon name="ChevronLeft" size={22} />
+    </button>
+  );
+}
 function SummaryBanner({ db, update, onOpen }) {
   const s = useMemo(() => summaryStats(db.books), [db.books]);
   const p = summaryPeriod();
@@ -5098,16 +5245,21 @@ function SummaryBanner({ db, update, onOpen }) {
   );
 }
 function SummaryStory({ db, onClose, onOpenDigest, notify }) {
-  const s = useMemo(() => summaryStats(db.books), [db.books]);
+  const [period, setPeriod] = useState('14');
+  const s = useMemo(() => summaryStats(db.books, Date.now(), period), [db.books, period]);
+  const pLabel = { '14': 'השבועיים שלך בספרים', month: 'החודש שלך בספרים', prev: 'החודש שעבר בספרים', year: 'השנה שלך בספרים' }[period];
   const { digests } = useDigest();
   const [i, setI] = useState(0);
   const card = (key, body) => ({ key, body });
   const big = 'font-display font-bold leading-none';
   const slides = [
-    card('intro', <><div className="text-[15px] font-bold tracking-[.2em] opacity-90">הסיכום הדו-שבועי</div>
-      <div className={`${big} text-[44px] mt-4`}>השבועיים שלך בספרים</div>
+    card('intro', <><div className="text-[15px] font-bold tracking-[.2em] opacity-90">הסיכום שלי</div>
+      <div className={`${big} text-[44px] mt-4`}>{pLabel}</div>
       <div className="text-[18px] opacity-90 mt-3">{fmtShort(s.from)} – {fmtShort(s.to)}</div></>),
-    card('count', <><div className={`${big} text-[120px]`}>{s.finished.length}</div>
+    !s.finished.length && card('empty', <><div className={`${big} text-[34px]`}>{T('עוד לא הסתיים ספר בתקופה הזו')}</div>
+      <p className="text-[18px] opacity-95 mt-4 leading-relaxed">{s.started.length ? `יש ${s.started.length} ספרים בקריאה עכשיו. ` : ''}{s.wanted.length ? `${s.wanted.length} ספרים חדשים ברשימת "רוצה לקרוא". ` : ''}הספר הבא כבר מחכה 📖</p>
+      <p className="text-[15px] opacity-85 mt-3">אפשר לבחור תקופה אחרת למעלה.</p></>),
+    s.finished.length > 0 && card('count', <><div className={`${big} text-[120px]`}>{s.finished.length}</div>
       <div className="text-[24px] font-semibold mt-2">{s.finished.length === 1 ? 'ספר הסתיים' : 'ספרים הסתיימו'}</div>
       {s.pages > 0 && <div className="text-[18px] opacity-90 mt-2">{s.pages.toLocaleString(DEFAULT_LOCALE)} עמודים</div>}
       {(s.started.length > 0 || s.wanted.length > 0) && <div className="text-[16px] opacity-90 mt-4">{[s.started.length ? `${s.started.length} בקריאה עכשיו` : '', s.wanted.length ? `${s.wanted.length} נוספו לרשימה` : ''].filter(Boolean).join(' · ')}</div>}
@@ -5125,9 +5277,9 @@ function SummaryStory({ db, onClose, onOpenDigest, notify }) {
     card('type', <><div className="text-[15px] font-bold tracking-[.2em] opacity-90">סוג הקריאה שלך</div>
       <div className={`${big} text-[46px] mt-4`}>{s.type.name}</div>
       <p className="text-[18px] opacity-95 mt-4 leading-relaxed">{s.type.desc}</p></>),
-    card('end', <><div className={`${big} text-[34px]`}>נתראה בעוד שבועיים 📚</div>
+    card('end', <><div className={`${big} text-[34px]`}>{period === 'year' ? 'שנה של ספרים 📚' : 'נתראה בסיכום הבא 📚'}</div>
       <div className="grid gap-2 mt-6 w-full">
-        <button type="button" onClick={(e) => { e.stopPropagation(); shareSummary(s, notify); }} className="min-h-[48px] rounded-xl bg-white text-[#1B1A28] font-bold inline-flex items-center justify-center gap-2"><Icon name="Share2" size={18} />שיתוף כתמונה</button>
+        {s.finished.length > 0 && <button type="button" onClick={(e) => { e.stopPropagation(); shareSummary(s, notify); }} className="min-h-[48px] rounded-xl bg-white text-[#1B1A28] font-bold inline-flex items-center justify-center gap-2"><Icon name="Share2" size={18} />שיתוף כתמונה</button>}
         {digests[0] && digests[0].books.length > 0 && <button type="button" onClick={(e) => { e.stopPropagation(); onClose(); onOpenDigest(digests[0]); }} className="min-h-[48px] rounded-xl bg-white/20 font-bold">{digests[0].books.length} ספרים חדשים בשבילך ←</button>}
       </div></>)
   ].filter(Boolean);
@@ -5141,6 +5293,10 @@ function SummaryStory({ db, onClose, onOpenDigest, notify }) {
       onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setI(n => e.clientX - r.left < r.width / 2 ? Math.min(last, n + 1) : Math.max(0, n - 1)); }}>
       <div className="absolute z-10 inset-x-0 top-0 px-3 pt-[calc(env(safe-area-inset-top,0px)+10px)] flex gap-1.5" dir="rtl">
         {slides.map((sl, j) => <span key={sl.key} className="story-bar flex-1"><i className={j < i ? 'full' : j === i ? 'run' : ''} key={j === i ? 'r' + i : 'x'} /></span>)}
+      </div>
+      <div className="absolute z-10 inset-x-0 top-[calc(env(safe-area-inset-top,0px)+72px)] flex justify-center gap-1.5 px-3" role="group" aria-label="תקופה">
+        {SUMMARY_PERIODS.map(([k, l]) => <button key={k} type="button" aria-pressed={period === k} onClick={(e) => { e.stopPropagation(); setPeriod(k); setI(0); }}
+          className={`min-h-[34px] px-3 rounded-full text-[13px] font-bold ${period === k ? 'bg-white text-[#1B1A28]' : 'bg-white/20'}`}>{l}</button>)}
       </div>
       <button type="button" aria-label="סגירה" onClick={(e) => { e.stopPropagation(); onClose(); }} className="absolute z-10 left-3 top-[calc(env(safe-area-inset-top,0px)+22px)] w-11 h-11 rounded-full bg-white/20 grid place-items-center"><Icon name="X" size={22} /></button>
       <div key={slides[i].key} className="sheet-in h-full max-w-md mx-auto px-7 flex flex-col items-center justify-center text-center">{slides[i].body}</div>
@@ -5192,6 +5348,7 @@ function DigestSheet({ digest, db, update, onPick, notify, onClose }) {
               {inLib ? <div className="text-[13px] text-muted mt-2">{libLabel(inLib)}</div> : (
                 <div className="flex gap-1.5 mt-2 flex-wrap">
                   <Chip onClick={() => onPick(b, { status: 'want', fromRec: true })}><Icon name="Bookmark" size={14} />רוצה לקרוא</Chip>
+                  <Chip onClick={() => onPick(b, { status: 'reading', fromRec: true })}><Icon name="BookOpen" size={14} />{STATUSES[1][1]}</Chip>
                   <Chip onClick={() => onPick(b)}><Icon name="BookCheck" size={14} />קראתי</Chip>
                   <Chip onClick={() => setRejecting(b)}><Icon name="ThumbsDown" size={14} />לא בשבילי</Chip>
                 </div>
@@ -5206,6 +5363,22 @@ function DigestSheet({ digest, db, update, onPick, notify, onClose }) {
   );
 }
 
+// כותרת לכל מסך: אריח צבעוני עם האייקון של הלשונית, כותרת ותת-כותרת
+const HERO_TONES = { library: ['var(--accent)', 'var(--rose)'], add: ['var(--teal)', 'var(--accent)'], discover: ['var(--rose)', 'var(--brass)'], friends: ['var(--brass)', 'var(--teal)'], backup: ['var(--accent-2)', 'var(--teal)'] };
+function PageHero({ tab, title, sub, children }) {
+  const t = TABS.find(x => x.id === tab) || TABS[0];
+  const [a, b] = HERO_TONES[tab] || HERO_TONES.library;
+  return (
+    <header className="pt-5 pb-4 flex items-start gap-3">
+      <span className="hero-tile shrink-0" style={{ background: `linear-gradient(140deg, ${a}, ${b})` }} aria-hidden="true"><Icon name={t.icon} size={24} /></span>
+      <div className="min-w-0 flex-1">
+        <h1 className="font-display font-bold text-[26px] leading-tight">{title}</h1>
+        {sub && <p className="text-muted text-[14.5px] mt-1 leading-snug">{sub}</p>}
+        {children}
+      </div>
+    </header>
+  );
+}
 const TABS = [
   { id: 'library', label: 'הספרים שלי', icon: 'Library' },
   { id: 'add', label: 'הוספת ספר', icon: 'BookPlus' },
@@ -5237,6 +5410,8 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
 
   CONFIG.apiKey = db.settings.apiKey || '';
   setAddr(db.settings.address);
+  // מי שסיים את רשימת ההיכרות במכשיר הזה לפני שזה נשמר בחשבון
+  useEffect(() => { if (!db.settings.starterDone && db.books.length && starterLocalDone(db.books)) update(d => ({ ...d, settings: { ...d.settings, starterDone: true } })); }, [db.books.length]);
 
   useEffect(() => { try { sessionStorage.setItem('vrt_tab', tab); } catch (e) { /* */ } window.scrollTo({ top: 0 }); }, [tab]);
   useEffect(() => {
@@ -5310,25 +5485,25 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
           </div>
           <button type="button" onClick={onSwitch} aria-label="החלפת משתמש" title="החלפת משתמש"
             className="shrink-0 min-h-[40px] ps-1 pe-2.5 rounded-full border border-line bg-surface inline-flex items-center gap-1.5 text-[14px] font-semibold">
-            <Avatar profile={profile} size={30} /><span className="truncate max-w-[110px]">{profile.name}</span><Icon name="ChevronsUpDown" size={15} className="text-muted" />
+            <Avatar profile={profile} size={30} /><span className="truncate max-w-[110px]">{profile.name}</span><SyncDot /><Icon name="ChevronsUpDown" size={15} className="text-muted" />
           </button>
         </div>
         <InstallPrompt />
-        <SummaryBanner db={db} update={update} onOpen={() => setSummaryOpen(true)} />
+        {tab !== 'library' && <SummaryBanner db={db} update={update} onOpen={() => setSummaryOpen(true)} />}
         <DigestBanner db={db} update={update} onOpen={setDigestOpen} />
         <FollowUpBanner db={db} update={update} onPick={pick} />
         {showStarter && <Starter db={db} update={update} onBegin={() => setStarterOpen(true)} onClose={() => setStarterOpen(false)}
           goQueue={() => { setStarterOpen(false); try { sessionStorage.setItem('vrt_add_mode', 'bulk'); } catch (e) { /* */ } setTab('add'); }} />}
-        {tab === 'library' && !showStarter && <LibraryTab db={db} onSummary={() => setSummaryOpen(true)} onEdit={(b) => setPending({ book: b, existing: b, status: ['want', 'reading'].includes(statusOf(b)) ? 'read' : undefined })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id), tombstones: { ...d.tombstones, books: { ...d.tombstones.books, [id]: Date.now() } } })); notify('הספר נמחק'); }}
+        {tab === 'library' && !showStarter && <LibraryTab db={db} onSummary={() => { setSummaryOpen(true); if (db.settings.summarySeen !== summaryPeriod()) update(d => ({ ...d, settings: { ...d.settings, summarySeen: summaryPeriod() } })); }} onEdit={(b) => setPending({ book: b, existing: b, status: ['want', 'reading'].includes(statusOf(b)) ? 'read' : undefined })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id), tombstones: { ...d.tombstones, books: { ...d.tombstones.books, [id]: Date.now() } } })); notify('הספר נמחק'); }}
           onUpdateBook={(id, patch) => update(d => ({ ...d, books: d.books.map(b => b.id === id ? sanitizeBook({ ...b, ...patch, editedAt: Date.now() }) : b) }))} goAdd={() => setTab('add')} notify={notify} />}
         {tab === 'add' && <AddTab db={db} onPick={pick} goSettings={() => setTab('backup')} />}
         {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} onOpenDigest={setDigestOpen} />}
-        {tab === 'friends' && <FriendsTab db={db} update={update} onPick={pick} notify={notify} />}
+        {tab === 'friends' && <FriendsTab db={db} update={update} onPick={pick} notify={notify} onGoSettings={() => setTab('backup')} />}
         {tab === 'backup' && <BackupTab onOpenStarter={() => { setStarterOpen(true); setTab('library'); }} db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
       </main>
 
-      <nav className="fixed bottom-0 inset-x-0 z-30 glass border-t border-line safe-bottom" aria-label="ניווט ראשי">
-        <ul className="mx-auto max-w-xl grid grid-cols-5">
+      <nav className="fixed bottom-0 inset-x-0 z-30" aria-label="ניווט ראשי">
+        <ul className="mx-auto max-w-xl grid grid-cols-5 glass nav-float">
           {TABS.map(t => (
             <li key={t.id}>
               <button type="button" onClick={() => setTab(t.id)} aria-current={tab === t.id ? 'page' : undefined}
@@ -5367,6 +5542,13 @@ function Logo({ size = 32 }) {
       <path d="M256 70 L 270 112 L 312 126 L 270 140 L 256 182 L 242 140 L 200 126 L 242 112 Z" fill="#E4AA5C" />
     </svg>
   );
+}
+// חיווי סנכרון ליד שם המשתמש: ירוק = מסונכרן, מהבהב = מסתנכרן, כתום = אין חיבור (הנתונים שמורים בטלפון)
+function SyncDot() {
+  const s = useSyncStatus();
+  const st = s.status === 'ok' ? ['var(--ok)', 'מסונכרן'] : s.status === 'syncing' ? ['var(--accent)', 'מסתנכרן…'] : s.status === 'error' ? ['var(--warn)', 'אין חיבור, נשמר בטלפון'] : null;
+  if (!st) return null;
+  return <span className={`sync-dot ${s.status === 'syncing' ? 'animate-pulse' : ''}`} style={{ background: st[0] }} role="img" aria-label={st[1]} title={st[1]} />;
 }
 function Avatar({ profile, size = 40 }) {
   return (
