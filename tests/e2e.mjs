@@ -176,8 +176,11 @@ try {
   const syncBoth = async () => { for (const p of [A, B, A]) { await p.evaluate(() => window.__vrtSync()); await p.waitForTimeout(700); } };
 
   await step('two phones create users and books, auto-connected, no setup', async () => {
-    await A.fill('#new-profile', 'יובל'); await A.click('button:has-text("כניסה")'); await addBook(A, 'מיכאל שלי');
-    await B.fill('#new-profile', 'יעל'); await B.click('button:has-text("כניסה")'); await addBook(B, 'קפקא על החוף');
+    // משתמש חדש: רשימת הספרים המוכרים נפתחת בחלון מלא; מדלגים עליה
+    await A.fill('#new-profile', 'יובל'); await A.click('button:has-text("כניסה")');
+    await A.locator('[role=dialog][aria-label="היכרות עם הטעם שלך"]').waitFor(); await A.waitForTimeout(600); await shot(A, 'first-entry', false);
+    await A.click('button:has-text("דילוג על ההיכרות")'); await addBook(A, 'מיכאל שלי');
+    await B.fill('#new-profile', 'יעל'); await B.click('button:has-text("כניסה")'); await B.click('button:has-text("דילוג על ההיכרות")'); await addBook(B, 'קפקא על החוף');
     await syncBoth();
     await A.click('[aria-label="החלפת משתמש"]'); assert.equal((await A.locator('main li').count()), 2);
     await B.click('[aria-label="החלפת משתמש"]'); assert.equal((await B.locator('main li').count()), 2);
@@ -535,13 +538,15 @@ try {
     await A.fill('#app-feedback', 'הכפתור של הסיכום קטן מדי'); await A.click('button:has-text("שליחת משוב")');
     await A.waitForSelector('text=המשוב נשלח');
     assert.equal(feedbacks.at(-1).text, 'הכפתור של הסיכום קטן מדי'); assert.equal(feedbacks.at(-1).name, 'יובל');
-    // מי שסיים את הרשימה בדפדפן, לא רואה אותה גם באפליקציה שעל מסך הבית (נשמר בחשבון ומסתנכרן)
-    await A.evaluate(() => { const k = Object.keys(localStorage).find(x => x.startsWith('vrt-starter2-')) || 'vrt-starter2-x'; });
-    assert.ok(await A.locator('h2:has-text("היכרות עם הטעם שלך")').count() > 0);
-    await A.click('button:has-text("סיימתי עם הרשימה")');
-    assert.equal(await A.locator('h2:has-text("היכרות עם הטעם שלך")').count(), 0);
-    await syncBoth(); await A.reload(); await A.click('nav >> text=הגדרות');
-    assert.equal(await A.locator('h2:has-text("היכרות עם הטעם שלך")').count(), 0, 'stays hidden after sync + reload');
+    // הרשימה כבר לא בהגדרות; בספרייה יש כרטיס עד "לא צריך יותר", וזה נשמר גם אחרי סנכרון ורענון
+    assert.equal(await A.locator('main h2:has-text("היכרות")').count(), 0, 'no starter section in settings');
+    await A.click('nav >> text=ספרים שלי');
+    await A.waitForSelector('main h2:has-text("היכרות מהירה עם הטעם שלך")');
+    await A.click('nav >> text=הוספת ספר'); await A.waitForSelector('main h2:has-text("היכרות מהירה עם הטעם שלך")');
+    await A.click('button:has-text("לא צריך יותר")');
+    assert.equal(await A.locator('main h2:has-text("היכרות מהירה")').count(), 0);
+    await syncBoth(); await A.reload(); await A.click('nav >> text=ספרים שלי');
+    assert.equal(await A.locator('main h2:has-text("היכרות מהירה")').count(), 0, 'stays hidden after sync + reload');
   });
   await step('Google Books goes through the family server (shared key + cache)', async () => {
     assert.ok(viaProxy > 0, 'no proxied Google requests');
@@ -578,8 +583,10 @@ try {
     await C.fill('#starter-q', '');
     await C.click('button:has-text("הוספת 4 ספרים")');
     await C.waitForSelector('text=הספרייה מוכנה', { timeout: 20000 });
-    assert.ok((await C.locator('main p.tabular').textContent()).includes('נוספו 2'));
+    assert.ok((await C.locator('[role=dialog] p.tabular').textContent()).includes('נוספו 2'));
     await C.click('button:has-text("לספרייה שלי")');
+    // אחרי הכניסה הראשונה: כרטיס בראש הספרייה ובלשונית ההוספה, עד "לא צריך יותר"
+    await C.waitForSelector('main h2:has-text("היכרות מהירה עם הטעם שלך")'); await C.waitForTimeout(400); await shot(C, 'starter-card', false);
     assert.deepEqual((await texts(C.locator('main ul li .font-display.text-\\[17px\\]'))).sort(), ['יער נורווגי', 'מיכאל שלי']);
     await C.click('nav >> text=הוספת ספר'); await C.click('button[role=tab]:has-text("רשימה")');
     await C.waitForSelector('text=ספר 1 מתוך 2');

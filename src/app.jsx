@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '29';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '30';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -2604,7 +2604,27 @@ function LibraryStats({ books, onSummary }) {
   );
 }
 
-function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify, onSummary }) {
+// כרטיס בראש "הספרים שלי" ו"הוספת ספר": בחירה מרשימת הספרים המוכרים, עד שמסיימים או לוחצים "לא צריך יותר"
+function StarterPrompt({ db, update, onOpen }) {
+  const done = useMemo(() => starterFinished(db.books, db.settings), [db.books, db.settings.starterDone]);
+  if (done || !onOpen) return null;
+  return (
+    <section className="bg-surface border border-line rounded-2xl p-3.5 mb-3 grid gap-2.5" aria-label="בחירה מרשימת ספרים מוכרים">
+      <div className="flex items-start gap-3">
+        <span className="w-10 h-10 rounded-xl grid place-items-center shrink-0 text-white" style={{ background: 'linear-gradient(140deg, var(--brass), var(--rose))' }}><Icon name="ListChecks" size={20} /></span>
+        <div className="min-w-0">
+          <h2 className="font-bold text-[16px] leading-tight">היכרות מהירה עם הטעם שלך</h2>
+          <p className="text-[13.5px] text-muted mt-0.5">{T('סימון מהיר של ספרים מוכרים מתוך 400, לפי ז\'אנרים. כך ההמלצות מדויקות יותר כבר מההתחלה.')}</p>
+        </div>
+      </div>
+      <div className="grid grid-cols-[1fr_auto] gap-2">
+        <Btn variant="soft" onClick={onOpen}><Icon name="ListChecks" size={18} />בחירה מהרשימה</Btn>
+        <Btn variant="ghost" onClick={() => update(d => ({ ...d, settings: { ...d.settings, starterDone: true } }))}>לא צריך יותר</Btn>
+      </div>
+    </section>
+  );
+}
+function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify, onSummary, onOpenStarter }) {
   const [q, setQ] = useState('');
   const [tag, setTag] = useState('');
   const [sort, setSort] = useState('recent');
@@ -2632,12 +2652,13 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify, onSumma
   }, [books, q, tag, sort]);
   const avg = readBooks.length ? (readBooks.reduce((s, b) => s + b.rating, 0) / readBooks.length).toFixed(1) : '–';
   const loved = readBooks.filter(b => b.rating >= 4).length;
-  const thisYear = readBooks.filter(b => new Date(b.readAt || b.addedAt).getFullYear() === new Date().getFullYear()).length;
+  const thisYear = readBooks.filter(b => b.readAt && new Date(b.readAt).getFullYear() === new Date().getFullYear()).length;   // רק ספרים עם תאריך סיום (כמו בסיכום)
   const current = open ? db.books.find(b => b.id === open) : null;
 
   if (!db.books.length) {
     return (
       <div className="fade-in pt-6">
+        <StarterPrompt db={db} update={update} onOpen={onOpenStarter} />
         <h1 className="font-display font-medium text-[26px] leading-snug mb-2">הספרייה שלך מחכה לספר הראשון</h1>
         <p className="text-muted text-[16px] mb-5 max-w-prose">כל ספר נכנס לכאן רק אחרי שאומת מול Google Books או Open Library: כריכה, מחבר ותקציר אמיתיים. אחרי כמה ספרים מדורגים, מנוע ההמלצות יתחיל לעבוד בשבילך.</p>
         <ol className="grid gap-3 mb-6 text-[15px]">
@@ -2656,6 +2677,7 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify, onSumma
   return (
     <div className="fade-in">
       <PageHero tab="library" title="הספרים שלי" />
+      <StarterPrompt db={db} update={update} onOpen={onOpenStarter} />
       <div className="grid grid-cols-4 gap-2 mb-3" aria-label="במספרים">
         {[['BookCheck', readBooks.length, 'קראתי', 'var(--accent)'], ['Star', avg, 'ממוצע', 'var(--brass)'], ['Heart', loved, 'אהובים', 'var(--rose)'], ['CalendarDays', thisYear, 'השנה', 'var(--teal)']].map(([ic, n, l, c]) => (
           <div key={l} className="stat-tile bg-surface border border-line rounded-xl py-2.5 px-1 text-center">
@@ -3452,12 +3474,13 @@ function FreeTextIntake({ goBulk, goSettings }) {
   );
 }
 
-function AddTab({ db, onPick, goSettings }) {
+function AddTab({ db, update, onPick, goSettings, onOpenStarter }) {
   const [mode, setMode] = useState(() => { try { return sessionStorage.getItem('vrt_add_mode') || (loadQueue() ? 'bulk' : 'single'); } catch (e) { return 'single'; } });
   useEffect(() => { try { sessionStorage.setItem('vrt_add_mode', mode); } catch (e) { /* */ } }, [mode]);
   return (
     <div className="fade-in">
       <PageHero tab="add" title="הוספת ספר" sub="שם ספר בעברית או באנגלית, ISBN או קישור. רק תוצאות שחזרו מהמאגרים יוצגו." />
+      <StarterPrompt db={db} update={update} onOpen={onOpenStarter} />
       <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-surface2 mb-4" role="tablist" aria-label="אופן ההוספה">
         {[['single', 'ספר אחד', 'Search'], ['bulk', 'רשימה', 'ListChecks'], ['text', 'טקסט חופשי', 'PenLine']].map(([k, l, ic]) => (
           <button key={k} type="button" role="tab" aria-selected={mode === k} onClick={() => setMode(k)}
@@ -4479,7 +4502,6 @@ function SettingsGroup({ icon, title, color, children }) {
 }
 function BackupTab({ db, update, replace, status, notify, profile, onRenameProfile, onDeleteProfile, onOpenStarter }) {
   // רשימת ההיכרות הושלמה (עברו על כל 400 הספרים, או שכולם כבר בספרייה): לא מציגים אותה בהגדרות
-  const starterDone = useMemo(() => starterFinished(db.books, db.settings), [db.books, db.settings.starterDone]);
   const [nameDraft, setNameDraft] = useState(profile.name);
   const [confirmProfileDel, setConfirmProfileDel] = useState(false);
   const [paste, setPaste] = useState('');
@@ -4561,12 +4583,6 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
 
       <SyncPanel />
 
-      {!starterDone && <section className="bg-surface border border-line rounded-xl p-3 grid gap-2">
-        <h2 className="font-semibold text-[17px]">היכרות עם הטעם שלך</h2>
-        <p className="text-[14px] text-muted">סימון מהיר של ספרים מוכרים מתוך 400 ספרים לפי ז'אנרים. ספרים שכבר בספרייה לא יתווספו שוב.</p>
-        <Btn variant="soft" onClick={onOpenStarter}><Icon name="ListChecks" size={18} />בחירה מרשימת ספרים מוכרים</Btn>
-        <button type="button" className="text-[13px] text-muted underline justify-self-start min-h-[32px]" onClick={() => { update(d => ({ ...d, settings: { ...d.settings, starterDone: true } })); notify('הרשימה הוסתרה'); }}>סיימתי עם הרשימה, אפשר להסתיר</button>
-      </section>}
 
       <SettingsGroup icon="UserRound" title="החשבון שלי" color="var(--accent)">
         <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (nameDraft.trim()) { onRenameProfile(nameDraft.trim()); notify('השם עודכן'); } }}>
@@ -5221,7 +5237,7 @@ function MySummaryCard({ books, onOpen, fresh }) {
       <span className="w-12 h-12 rounded-2xl bg-white/20 grid place-items-center shrink-0"><Icon name="Trophy" size={24} /></span>
       <span className="flex-1 min-w-0">
         <span className="block text-[12px] font-bold tracking-[.12em] opacity-90">הסיכום שלי{fresh && s.active ? <span className="ms-2 px-1.5 py-0.5 rounded-full bg-white text-[#1B1A28] text-[11px] tracking-normal">חדש</span> : null}</span>
-        <span className="block font-display font-bold text-[18px] leading-tight">{s.finished.length ? `${s.finished.length} ספרים בשבועיים · ${s.type.name}` : `השנה: ${y.finished.length} ספרים · ${y.type.name}`}</span>
+        <span className="block font-display font-bold text-[18px] leading-tight">{s.finished.length ? `${s.finished.length} ספרים בשבועיים · ${s.type.name}` : y.finished.length ? `השנה: ${y.finished.length} ספרים · ${y.type.name}` : 'סיכום הקריאה שלך'}</span>
         <span className="block text-[13px] opacity-90">שבועיים, חודש או שנה, בסגנון Wrapped</span>
       </span>
       <Icon name="ChevronLeft" size={22} />
@@ -5403,7 +5419,8 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
   }, []);
   const [tab, setTab] = useState(() => { try { return sessionStorage.getItem('vrt_tab') || 'library'; } catch (e) { return 'library'; } });
   const [starterOpen, setStarterOpen] = useState(false);
-  const showStarter = tab === 'library' && (starterOpen || (!db.books.length && !db.settings.onboarded));
+  // בכניסה הראשונה: חלון מלא של רשימת הספרים המוכרים, מעל כל לשונית
+  const showStarter = starterOpen || (!db.books.length && !db.settings.onboarded && !db.settings.starterDone);
   const [pending, setPending] = useState(null);   // { book, existing }
   const [toast, setToast] = useState('');
   const toastTimer = useRef(null);
@@ -5492,14 +5509,22 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
         {tab !== 'library' && <SummaryBanner db={db} update={update} onOpen={() => setSummaryOpen(true)} />}
         <DigestBanner db={db} update={update} onOpen={setDigestOpen} />
         <FollowUpBanner db={db} update={update} onPick={pick} />
-        {showStarter && <Starter db={db} update={update} onBegin={() => setStarterOpen(true)} onClose={() => setStarterOpen(false)}
-          goQueue={() => { setStarterOpen(false); try { sessionStorage.setItem('vrt_add_mode', 'bulk'); } catch (e) { /* */ } setTab('add'); }} />}
-        {tab === 'library' && !showStarter && <LibraryTab db={db} onSummary={() => { setSummaryOpen(true); if (db.settings.summarySeen !== summaryPeriod()) update(d => ({ ...d, settings: { ...d.settings, summarySeen: summaryPeriod() } })); }} onEdit={(b) => setPending({ book: b, existing: b, status: ['want', 'reading'].includes(statusOf(b)) ? 'read' : undefined })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id), tombstones: { ...d.tombstones, books: { ...d.tombstones.books, [id]: Date.now() } } })); notify('הספר נמחק'); }}
+        {showStarter && ReactDOM.createPortal((
+          <div className="fixed inset-0 z-40 overflow-y-auto" style={{ background: 'var(--bg)' }} role="dialog" aria-modal="true" aria-label="היכרות עם הטעם שלך">
+            <div className="mx-auto max-w-xl px-4 pb-10 safe-top relative">
+              <button type="button" aria-label="סגירה" onClick={() => { update(d => ({ ...d, settings: { ...d.settings, onboarded: true } })); setStarterOpen(false); }}
+                className="absolute left-3 top-[calc(env(safe-area-inset-top,0px)+12px)] z-10 w-10 h-10 rounded-full bg-surface border border-line grid place-items-center text-muted"><Icon name="X" size={20} /></button>
+              <Starter db={db} update={update} onBegin={() => setStarterOpen(true)} onClose={() => { setStarterOpen(false); setTab('library'); }}
+                goQueue={() => { setStarterOpen(false); try { sessionStorage.setItem('vrt_add_mode', 'bulk'); } catch (e) { /* */ } setTab('add'); }} />
+            </div>
+          </div>
+        ), document.body)}
+        {tab === 'library' && <LibraryTab db={db} update={update} onOpenStarter={() => setStarterOpen(true)} onSummary={() => { setSummaryOpen(true); if (db.settings.summarySeen !== summaryPeriod()) update(d => ({ ...d, settings: { ...d.settings, summarySeen: summaryPeriod() } })); }} onEdit={(b) => setPending({ book: b, existing: b, status: ['want', 'reading'].includes(statusOf(b)) ? 'read' : undefined })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id), tombstones: { ...d.tombstones, books: { ...d.tombstones.books, [id]: Date.now() } } })); notify('הספר נמחק'); }}
           onUpdateBook={(id, patch) => update(d => ({ ...d, books: d.books.map(b => b.id === id ? sanitizeBook({ ...b, ...patch, editedAt: Date.now() }) : b) }))} goAdd={() => setTab('add')} notify={notify} />}
-        {tab === 'add' && <AddTab db={db} onPick={pick} goSettings={() => setTab('backup')} />}
+        {tab === 'add' && <AddTab db={db} update={update} onPick={pick} goSettings={() => setTab('backup')} onOpenStarter={() => setStarterOpen(true)} />}
         {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} onOpenDigest={setDigestOpen} />}
         {tab === 'friends' && <FriendsTab db={db} update={update} onPick={pick} notify={notify} onGoSettings={() => setTab('backup')} />}
-        {tab === 'backup' && <BackupTab onOpenStarter={() => { setStarterOpen(true); setTab('library'); }} db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
+        {tab === 'backup' && <BackupTab db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
       </main>
 
       <nav className="fixed bottom-0 inset-x-0 z-30" aria-label="ניווט ראשי">
@@ -5585,8 +5610,7 @@ function WhoAreYou({ profiles, onPick, onCreate }) {
             <div className="text-muted text-[14px] mt-1">{T('מה קראת, מה תקרא, ומה החברים אוהבים')}</div>
           </div>
         </div>
-        <h1 className="font-display font-medium text-[26px] leading-snug mb-1">של מי הספרייה?</h1>
-        <p className="text-muted text-[15px] mb-6">כל משתמש מקבל ספרייה, דירוגים והמלצות משלו. אין סיסמה, רק בוחרים שם.</p>
+        <h1 className="font-display font-medium text-[26px] leading-snug mb-5">של מי הספרייה?</h1>
         {profiles.length > 0 && (
           <ul className="grid gap-2 mb-4">
             {profiles.map(p => (
@@ -5619,7 +5643,6 @@ function WhoAreYou({ profiles, onPick, onCreate }) {
         ) : (
           <Btn variant="ghost" className="w-full" onClick={() => setAdding(true)}><Icon name="UserPlus" size={20} />הוספת משתמש</Btn>
         )}
-        <p className="text-[13px] text-muted mt-6">{loadCloud() ? 'המשתמשים והספרים מסתנכרנים בין כל הטלפונים.' : 'הנתונים נשמרים במכשיר הזה.'}</p>
       </main>
     </div>
   );
