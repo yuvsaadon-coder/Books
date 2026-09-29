@@ -28,7 +28,7 @@ const BOOKS = [
 ];
 let store = { rev: 0, data: null };
 const aiCalls = [], aiScript = [], errors = [];
-const jobs = new Map(), jobBodies = [], jobHold = new Set();
+const jobs = new Map(), jobBodies = [], jobHold = new Set(), profileCalls = [];
 let viaProxy = 0, direct = 0;
 
 function sse(blocks, stop) {
@@ -97,7 +97,13 @@ async function phone(browser, name) {
         return route.fulfill({ headers: cors, json: jobHold.has(id) ? { status: 'running', turns: 1 } : (jobs.get(id) || { status: 'missing' }) });
       }
       if (u.pathname.startsWith('/v1/messages')) {
-        aiCalls.push(JSON.parse(req.postData()));
+        const reqBody = JSON.parse(req.postData());
+        // בניית הפרופיל הספרותי רצה ברקע: עונים עליה לבד, בלי לצרוך את התסריט של הבדיקה
+        if ((reqBody.tools || []).some(t => t.name === 'submit_profile')) {
+          profileCalls.push(reqBody);
+          return route.fulfill({ headers: { ...cors, 'content-type': 'text/event-stream' }, body: sse([{ type: 'tool_use', id: 'p1', name: 'submit_profile', input: { profile_he: 'אוהב/ת: ספרות ישראלית וקלאסיקות.', brief_en: 'Likes Israeli literary fiction and classics.' } }], 'tool_use') });
+        }
+        aiCalls.push(reqBody);
         const step = aiScript.shift();
         assert.ok(step, 'unexpected AI call');
         if (step.error) return route.fulfill({ status: step.error, headers: cors, json: { type: 'error', error: { type: 'invalid_request_error', message: 'tools.0.web_search_20260209: something_very_long_without_spaces_'.repeat(4) } } });
@@ -244,6 +250,11 @@ try {
     assert.ok(await A.locator('section li >> text=זמינות').count() > 0);
     await A.click('nav >> text=ספרים שלי'); await A.click('nav >> text=גלה ספר חדש');
     assert.deepEqual(await texts(A.locator('section li .font-display.text-\\[18px\\]')), ['יש ואין']);
+    // שלילה לתמיד עם הערה: נעלם מהרשימה, וההערה מגיעה להמלצה הבאה
+    await A.click('section li [aria-label="לא מעניין אותי"]');
+    await A.click('[role=dialog] button:has-text("לעולם לא")'); await A.fill('#reject-note', 'כבר קראתי מספיק המינגוויי');
+    await A.click('[role=dialog] button:has-text("לא להציג יותר")');
+    assert.equal(await A.locator('section li .font-display.text-\\[18px\\]').count(), 0);
   });
   await step('recommendation keeps going after the app is closed (resumes from the server)', async () => {
     aiScript.push({ blocks: [{ type: 'tool_use', id: 'q2', name: 'submit_questions', input: { questions: [] } }], stop: 'tool_use' });
@@ -261,6 +272,28 @@ try {
     await A.click('nav >> text=גלה ספר חדש');
     await A.waitForSelector('text=ממשיך את ההמלצה שהתחילה קודם');
     await A.waitForSelector('section li >> text=קפקא על החוף', { timeout: 20000 });
+    const jp = jobBodies.at(-1).messages[0].content;
+    assert.ok(jp.includes('יש ואין (כבר קראתי מספיק המינגוויי)'), 'rejection reason reaches the model');
+    if (profileCalls.length) assert.ok(jp.includes('READER PROFILE'), 'the profile replaces the full library');
+  });
+  await step('friends: request, accept, see the shelf, wishlist from a friend, recommend to a friend', async () => {
+    await A.click('nav >> text=חברים'); await A.locator('li:has-text("יעל")').locator('button:has-text("בקשת חברות")').click();
+    await B.click('text=החלפת משתמש'); await B.click('main li:has-text("יעל")');
+    await syncBoth();
+    await B.click('nav >> text=חברים'); await B.click('button:has-text("אישור")');
+    await syncBoth();
+    await A.click('nav >> text=חברים'); await A.click('main button:has-text("יעל")');
+    await A.waitForSelector('text=המדף של יעל'); await A.waitForSelector('main li:has-text("קפקא על החוף")');
+    await A.locator('main li:has-text("קפקא על החוף")').locator('button:has-text("רוצה לקרוא")').click();
+    await A.click('[role=dialog] button:has-text("הוספה לרשימת")');
+    await A.click('nav >> text=ספרים שלי'); await A.click('button[role=tab]:has-text("רוצה לקרוא")');
+    await A.waitForSelector('main li:has-text("קפקא על החוף")');
+    await B.click('nav >> text=ספרים שלי'); await B.click('main ul li button >> nth=0');
+    await B.click('[role=dialog] button:has-text("להמליץ לחבר")'); await B.click('[role=dialog] button:has-text("יובל")');
+    await B.fill('#rec-note', 'חובה לקרוא!'); await B.click('[role=dialog] button:has-text("שליחה")'); await B.keyboard.press('Escape');
+    await syncBoth();
+    await A.click('nav >> text=חברים'); await A.waitForSelector('text=חברים המליצו לך'); await A.waitForSelector('text=חובה לקרוא!');
+    await A.click('nav >> text=גלה ספר חדש');
   });
   await step('service error is shown briefly and stays on screen', async () => {
     aiScript.push({ error: 400 }); aiScript.push({ error: 400 });
@@ -299,13 +332,13 @@ try {
     const second = (await C.locator('[role=group][aria-label*=","]').last().getAttribute('aria-label')).split(',')[0];
     assert.notEqual(second, first);
     await C.click('button:has-text("לא קראתי")');
-    await C.click('[aria-label="חזרה לספר הקודם"]');
+    await C.click('button:has-text("חזרה לספר הקודם")');
     assert.equal((await C.locator('[role=group][aria-label*=","]').last().getAttribute('aria-label')).split(',')[0], second);
     await C.waitForSelector('button:has-text("הוספת 1 ספרים")');
     const g1 = await C.locator('text=/· \\d+ מתוך \\d+/').textContent();
     await C.click('button:has-text("ז\'אנר הבא")');
     assert.notEqual(await C.locator('text=/· \\d+ מתוך \\d+/').textContent(), g1);
-    await C.click('[aria-label="חזרה לספר הקודם"]');
+    await C.click('button:has-text("חזרה לספר הקודם")');
     const rate = async (title, label) => { await C.fill('#starter-q', title); await C.locator(`li:has-text("${title}")`).first().locator(`button:has-text("${label}")`).click(); };
     await rate('מיכאל שלי', 'אהבתי'); await rate('יער נורווגי', 'בסדר'); await rate('חסמבה', 'אהבתי');
     await C.fill('#starter-q', '');

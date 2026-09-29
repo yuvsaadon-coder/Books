@@ -680,7 +680,8 @@ function sanitizeBook(b) {
     title: str(b.title), subtitle: str(b.subtitle), authors: arr(b.authors), year: str(b.year),
     description: str(b.description), categories: arr(b.categories), cover: str(b.cover),
     pageCount: Number(b.pageCount) || 0, language: str(b.language), isbns: arr(b.isbns), link: str(b.link),
-    publisher: str(b.publisher), rating: Math.min(5, Math.max(1, Number(b.rating) || 1)), tags: arr(b.tags),
+    publisher: str(b.publisher), status: b.status === 'want' ? 'want' : 'read',
+    rating: b.status === 'want' ? Math.min(5, Math.max(0, Number(b.rating) || 0)) : Math.min(5, Math.max(1, Number(b.rating) || 1)), tags: arr(b.tags),
     addedAt: Number(b.addedAt) || Date.now(), verifiedAt: Number(b.verifiedAt) || 0,
     verifiedVia: str(b.verifiedVia), descSource: str(b.descSource),
     ebook: !!b.ebook, ebookLink: str(b.ebookLink), olEbook: !!b.olEbook,
@@ -704,6 +705,12 @@ function sanitizeDB(raw) {
       books: raw.tombstones && raw.tombstones.books && typeof raw.tombstones.books === 'object' ? raw.tombstones.books : {},
       history: raw.tombstones && raw.tombstones.history && typeof raw.tombstones.history === 'object' ? raw.tombstones.history : {}
     },
+    // ספרים ששללתי מההמלצות: לחודש או לתמיד, עם הערה שמדייקת את הפרופיל
+    rejections: Array.isArray(raw.rejections) ? raw.rejections.filter(x => x && x.id && x.title).slice(0, 500) : [],
+    // הפרופיל הספרותי: סיכום הטעם שנבנה מהספרים, ומתעדכן רק עם מה שהשתנה
+    litProfile: raw.litProfile && typeof raw.litProfile === 'object' && raw.litProfile.text ? raw.litProfile : null,
+    profileNote: typeof raw.profileNote === 'string' ? raw.profileNote.slice(0, 1500) : '',
+    profileNoteAt: Number(raw.profileNoteAt) || 0,
     updatedAt: Number(raw.updatedAt) || 0,
     lastBackupAt: Number(raw.lastBackupAt) || 0
   };
@@ -847,6 +854,31 @@ function mergeTomb(a, b) {
   return o;
 }
 // מיזוג ספרייה: איחוד ספרים לפי מזהה (הגרסה שנערכה אחרונה גוברת), מחיקות נשמרות כ"מצבות"
+/* ---------- חברים: בקשות חברות והמלצות בין משתמשים, משותפים לכל המשתמשים בשרת ---------- */
+const SOCIAL_KEY = 'vrt-social';
+function loadSocial() { try { const s = JSON.parse(localStorage.getItem(SOCIAL_KEY) || 'null'); return s && Array.isArray(s.items) ? s : { items: [] }; } catch (e) { return { items: [] }; } }
+function socialChange(fn) {
+  const cur = loadSocial();
+  const next = { items: fn(cur.items) };
+  try { localStorage.setItem(SOCIAL_KEY, JSON.stringify(next)); } catch (e) { /* */ }
+  window.dispatchEvent(new Event('vrt-social-changed'));
+  scheduleSync(600);
+}
+function useSocial() {
+  const [s, setS] = useState(loadSocial);
+  useEffect(() => { const f = () => setS(loadSocial()); window.addEventListener('vrt-social-changed', f); return () => window.removeEventListener('vrt-social-changed', f); }, []);
+  return s;
+}
+function loadDBOf(pid) { try { const raw = localStorage.getItem(dbKeyFor(pid)); return raw ? sanitizeDB(JSON.parse(raw)) : null; } catch (e) { return null; } }
+function friendsOf(items, me) {
+  const out = new Map();
+  items.filter(x => x.type === 'friend').sort((a, b) => (a.editedAt || a.at) - (b.editedAt || b.at)).forEach(x => {
+    const other = x.from === me ? x.to : x.to === me ? x.from : null;
+    if (!other) return;
+    out.set(other, x);
+  });
+  return out;   // מזהה משתמש → הרשומה האחרונה ביניהם
+}
 function mergeDB(a, b) {
   if (!a) return b; if (!b) return a;
   const prune = (t) => { const cut = Date.now() - 180 * 86400000; const o = {}; Object.entries(t).forEach(([k, v]) => { if (v > cut) o[k] = v; }); return o; };
@@ -859,6 +891,8 @@ function mergeDB(a, b) {
     ...newer, books, history, tombstones: tomb,
     tagLibrary: uniq([...(a.tagLibrary || []), ...(b.tagLibrary || [])]),
     dismissed: uniq([...(a.dismissed || []), ...(b.dismissed || [])]),
+    rejections: mergeByIdNewest(a.rejections, b.rejections, x => x.editedAt || x.at || 0).sort((x, y) => (y.at || 0) - (x.at || 0)),
+    litProfile: ((a.litProfile && a.litProfile.at) || 0) >= ((b.litProfile && b.litProfile.at) || 0) ? a.litProfile || null : b.litProfile || null,
     lastBackupAt: Math.max(a.lastBackupAt || 0, b.lastBackupAt || 0),
     updatedAt: Math.max(a.updatedAt || 0, b.updatedAt || 0)
   };
@@ -869,7 +903,7 @@ function collectLocal() {
   p.profiles.forEach(pr => {
     try { const raw = localStorage.getItem(dbKeyFor(pr.id)); const d = raw ? sanitizeDB(JSON.parse(raw)) : null; if (d) dbs[pr.id] = d; } catch (e) { /* */ }
   });
-  return { profiles: p.profiles, deleted: p.deleted || {}, dbs };
+  return { profiles: p.profiles, deleted: p.deleted || {}, dbs, social: loadSocial() };
 }
 function mergeState(l, r) {
   if (!r || !Array.isArray(r.profiles)) return l;
@@ -881,9 +915,16 @@ function mergeState(l, r) {
     const m = mergeDB(l.dbs[p.id] || null, r.dbs && r.dbs[p.id] ? sanitizeDB(r.dbs[p.id]) : null);
     if (m) dbs[p.id] = m;
   });
-  return { profiles, deleted, dbs };
+  const cut = Date.now() - 365 * 86400000;
+  const social = { items: mergeByIdNewest((l.social || {}).items, (r.social || {}).items, x => x.editedAt || x.at || 0)
+    .filter(x => (x.editedAt || x.at || 0) > cut && !deleted[x.from] && !deleted[x.to]).sort((x, y) => (y.at || 0) - (x.at || 0)).slice(0, 2000) };
+  return { profiles, deleted, dbs, social };
 }
 function applyLocal(state) {
+  if (state.social) {
+    const cur = JSON.stringify(loadSocial()), next = JSON.stringify(state.social);
+    if (cur !== next) { try { localStorage.setItem(SOCIAL_KEY, next); } catch (e) { /* */ } window.dispatchEvent(new Event('vrt-social-changed')); }
+  }
   const cur = loadProfiles();
   const active = state.profiles.some(p => p.id === cur.active) ? cur.active : null;
   saveProfiles({ profiles: state.profiles, deleted: state.deleted, active });
@@ -1236,8 +1277,8 @@ async function aiTranslate(text) {
 }
 
 // 4. המלצות: המודל קורא את הספרייה, מחפש ביקורות וניתוחים באתרים המאושרים, וחושב
-function libraryForPrompt(books) {
-  const list = books.slice().sort((a, b) => b.rating - a.rating || (b.addedAt || 0) - (a.addedAt || 0)).slice(0, 80);
+function libraryForPrompt(books, n = 80) {
+  const list = books.filter(b => b.status !== 'want').sort((a, b) => b.rating - a.rating || (b.addedAt || 0) - (a.addedAt || 0)).slice(0, n);
   return list.map(b => `- ${b.title} — ${(b.authors || [])[0] || '?'} | ${b.rating}${b.tags.length ? ' | ' + b.tags.slice(0, 3).join(', ') : ''}${b.note ? ' | ' + b.note.replace(/\s+/g, ' ').slice(0, 160) : ''}`).join('\n');
 }
 function historyForPrompt(history, books) {
@@ -1268,11 +1309,11 @@ function focusSummary(focus) {
 }
 
 // שאלות המשך קצרות לדיוק הבקשה (2–4), לפני ההמלצה
-async function aiClarify({ books, request, focus }) {
+async function aiClarify({ books, request, focus, profile }) {
   const { input } = await aiRun({
     effort: 'low', web: false,
     system: 'You help a reader find their next book. Before recommending, ask 2 to 4 short follow-up questions that would most change which books you pick, given their library and request. Do not ask what they already answered. Each question gets 2–5 short answer options. ' + HEBREW_OUT,
-    prompt: `READER'S LIBRARY (title — author | rating 1-5 | tags | notes):\n${libraryForPrompt(books).split('\n').slice(0, 40).join('\n') || '(empty)'}\n\nREQUEST: ${request || '(none)'}\nPREFERENCES: ${focusSummary(focus).join('; ') || '(none)'}`,
+    prompt: `${profile && profile.text ? `READER PROFILE:\n${profile.brief || profile.text}` : `READER'S LIBRARY (title — author | rating 1-5 | tags | notes):\n${libraryForPrompt(books).split('\n').slice(0, 40).join('\n') || '(empty)'}`}\n\nREQUEST: ${request || '(none)'}\nPREFERENCES: ${focusSummary(focus).join('; ') || '(none)'}`,
     submitTool: {
       name: 'submit_questions', description: 'Return 2 to 4 follow-up questions.',
       input_schema: { type: 'object', additionalProperties: false, required: ['questions'], properties: {
@@ -1293,10 +1334,49 @@ const REC_TOOL = {
         title_original: { type: 'string' }, author: { type: 'string' }, isbn: { type: 'string', description: 'only if sure, else empty' },
         why: { type: 'string' }, genres: { type: 'array', items: { type: 'string' } } } } } } }
 };
-function recRequest({ books, request, focus, qa, lang, exclude, dismissed, history, want }) {
+/* ---------- הפרופיל הספרותי: נבנה פעם אחת מכל הספרייה, ואחר כך מתעדכן רק עם מה שהשתנה ----------
+   ההמלצה שולחת את הפרופיל המתומצת + רק הספרים שנוספו מאז, במקום את כל הספרייה עם כל ההערות בכל פעם */
+const PROFILE_TOOL = {
+  name: 'submit_profile', description: 'Return the literary profile.',
+  input_schema: { type: 'object', additionalProperties: false, required: ['profile_he', 'brief_en'], properties: {
+    profile_he: { type: 'string', description: 'the reader\'s literary profile in Hebrew, 120-220 words, as short labelled lines: אוהב/ת, פחות מתחבר/ת, סופרים, נושאים ורגש, סגנון וקצב, מה לא להציע' },
+    brief_en: { type: 'string', description: 'the same profile compressed for another model, in English, at most 120 words, dense and specific' } } }
+};
+const changedSince = (db, at) => db.books.filter(b => (b.editedAt || b.addedAt || 0) > at);
+function profileStale(db) {
+  const read = db.books.filter(b => b.status !== 'want');
+  if (read.length < 3) return false;
+  const p = db.litProfile;
+  if (!p) return true;
+  return changedSince(db, p.at).length + (db.rejections || []).filter(x => (x.at || 0) > p.at && x.note).length + ((db.profileNoteAt || 0) > p.at ? 3 : 0) >= 3;
+}
+async function aiBuildProfile(db) {
+  const p = db.litProfile;
+  const wish = db.books.filter(b => b.status === 'want').slice(0, 40).map(b => b.title).join('; ');
+  const rej = (db.rejections || []).filter(x => x.note).slice(0, 30).map(x => `${x.title} (${x.note})`).join('; ');
+  const note = db.profileNote ? `\nREADER'S OWN NOTE ABOUT THEIR TASTE: ${db.profileNote}` : '';
+  const prompt = p && p.text
+    ? `CURRENT PROFILE:\n${p.text}${note}\n\nCHANGES SINCE IT WAS WRITTEN (title — author | rating | tags | notes):\n${libraryForPrompt(changedSince(db, p.at), 60) || '(none)'}${wish ? `\nWISHLIST NOW: ${wish}` : ''}${rej ? `\nREJECTED RECOMMENDATIONS WITH REASONS: ${rej}` : ''}\n\nUpdate the profile: keep what still holds, add what the changes show.`
+    : `READER'S LIBRARY (title — author | rating 1-5 | tags | notes):\n${libraryForPrompt(db.books, 200)}${note}${wish ? `\nWISHLIST: ${wish}` : ''}${rej ? `\nREJECTED RECOMMENDATIONS WITH REASONS: ${rej}` : ''}\n\nWrite the profile.`;
+  const { input, cost } = await aiRun({
+    effort: 'low', web: false, prompt, submitTool: PROFILE_TOOL,
+    system: 'You are a literary advisor. Build a concise, specific literary taste profile of this reader from what they read, how they rated it, their notes, their wishlist and the recommendations they rejected (with reasons). Name authors, themes, qualities of writing, emotional register and pace. profile_he is written in Hebrew for the reader; brief_en is in English for another model.'
+  });
+  return { text: input.profile_he, brief: input.brief_en, at: Date.now(), count: db.books.length, cost };
+}
+
+function recRequest({ books, request, focus, qa, lang, exclude, dismissed, history, want, profile, profileNote, rejections = [], friendsLoved = [] }) {
   const langText = { he: 'Hebrew only (books available in a Hebrew edition)', en: 'English only', both: 'Hebrew or English editions', any: 'any language', auto: 'Hebrew or English' }[lang] || 'Hebrew or English';
   const excludeTitles = uniq([...books.map(b => b.title), ...exclude, ...(history || []).flatMap(h => (h.recs || []).map(r => r.title))]).slice(0, 300);
   const prefs = focusSummary(focus);
+  const read = books.filter(b => b.status !== 'want'), wish = books.filter(b => b.status === 'want');
+  const recent = profile ? libraryForPrompt(read.filter(b => (b.editedAt || b.addedAt || 0) > profile.at), 25) : '';
+  const readerBlock = profile && profile.text
+    ? `READER PROFILE (built from their whole library):\n${profile.brief || profile.text}${recent ? `\n\nADDED OR CHANGED SINCE THE PROFILE (title — author | rating | tags | notes):\n${recent}` : ''}`
+    : `READER'S LIBRARY (title — author | rating 1-5 | tags | notes):\n${libraryForPrompt(read) || '(empty)'}`;
+  const wishBlock = wish.length ? `\nWISHLIST (they already plan to read these; do not recommend them, but they show current interests): ${wish.slice(0, 40).map(b => b.title).join('; ')}` : '';
+  const rejBlock = rejections.length ? `\nREJECTED RECOMMENDATIONS (do not recommend; learn from the reasons): ${rejections.slice(0, 30).map(x => `${x.title}${x.note ? ` (${x.note})` : ''}`).join('; ')}` : '';
+  const friendsBlock = friendsLoved.length ? `\nLOVED BY THEIR FRIENDS (optional signal, not a must): ${friendsLoved.join('; ')}` : '';
   return {
     system: [
       'You are a literary advisor with deep knowledge of world and Israeli literature. Recommend books this specific reader will love.',
@@ -1307,7 +1387,7 @@ function recRequest({ books, request, focus, qa, lang, exclude, dismissed, histo
       '`why` must connect the book to specific books and notes from the reader\'s library, to their answers, and to how critics describe it, in 2–4 sentences.',
       `Language: ${langText}. ` + HEBREW_OUT
     ].join('\n'),
-    prompt: `READER'S LIBRARY (title — author | rating 1-5 | tags | notes):\n${libraryForPrompt(books) || '(empty)'}\n\nALREADY SEEN OR NOT WANTED (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 300).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history, books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs.length ? `\nPREFERENCES: ${prefs.join('; ')}` : ''}${qa && qa.length ? `\nFOLLOW-UP ANSWERS:\n${qa.map(x => `- ${x.q} → ${x.a}`).join('\n')}` : ''}\n\nRecommend ${want + 3} books.`
+    prompt: `${readerBlock}${profileNote ? `\nREADER'S NOTE ABOUT THEIR TASTE: ${profileNote}` : ''}${wishBlock}${rejBlock}${friendsBlock}\n\nALREADY READ, OWNED OR SEEN (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 450).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history.slice(0, profile ? 3 : 6), books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs.length ? `\nPREFERENCES: ${prefs.join('; ')}` : ''}${qa && qa.length ? `\nFOLLOW-UP ANSWERS:\n${qa.map(x => `- ${x.q} → ${x.a}`).join('\n')}` : ''}\n\nRecommend ${want + 3} books.`
   };
 }
 
@@ -1407,7 +1487,8 @@ async function enrichRec(rec) {
 /* ============================================================
    מנוע ההמלצות הדטרמיניסטי
    ============================================================ */
-function buildProfile(books) {
+function buildProfile(allBooks) {
+  const books = allBooks.filter(b => b.status !== 'want');
   const authors = new Map(), cats = new Map(), tags = new Map();
   const negAuthors = new Set();
   const add = (map, name, w, book) => {
@@ -1772,7 +1853,8 @@ function Sheet({ open, onClose, title, children }) {
 /* ============================================================
    גיליון דירוג ותיוג
    ============================================================ */
-function RateSheet({ book, existing, tagLibrary, onSave, onClose }) {
+function RateSheet({ book, existing, tagLibrary, onSave, onClose, initialStatus }) {
+  const [status, setStatus] = useState(initialStatus || (existing ? existing.status || 'read' : 'read'));
   const [rating, setRating] = useState(existing ? existing.rating : (book.presetRating || 0));
   const [tags, setTags] = useState(existing ? existing.tags : []);
   const [note, setNote] = useState(existing ? existing.note || '' : (book.note || ''));
@@ -1802,13 +1884,21 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose }) {
           <div className="mt-1"><SourceBadge book={book} /></div>
         </div>
       </div>
-      <fieldset className="mb-4">
-        <legend className="text-[13px] font-semibold tracking-wide text-muted mb-1">דירוג (חובה)</legend>
-        <div className="flex items-center gap-3 flex-wrap">
-          <Stars value={rating} onChange={setRating} size={28} label="דירוג הספר" />
-          <span className="text-[15px] font-semibold text-muted min-h-[1.5em]">{ratingText}</span>
-        </div>
-      </fieldset>
+      <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2 mb-4" role="tablist" aria-label="סטטוס">
+        {[['read', 'קראתי', 'BookCheck'], ['want', 'רוצה לקרוא', 'Bookmark']].map(([k, l, ic]) => (
+          <button key={k} type="button" role="tab" aria-selected={status === k} onClick={() => setStatus(k)}
+            className={`min-h-[44px] rounded-xl font-semibold text-[15px] inline-flex items-center justify-center gap-1.5 ${status === k ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}><Icon name={ic} size={17} />{l}</button>
+        ))}
+      </div>
+      {status === 'read' && (
+        <fieldset className="mb-4">
+          <legend className="text-[13px] font-semibold tracking-wide text-muted mb-1">דירוג (חובה)</legend>
+          <div className="flex items-center gap-3 flex-wrap">
+            <Stars value={rating} onChange={setRating} size={28} label="דירוג הספר" />
+            <span className="text-[15px] font-semibold text-muted min-h-[1.5em]">{ratingText}</span>
+          </div>
+        </fieldset>
+      )}
       <fieldset className="mb-4">
         <legend className="text-[13px] font-semibold tracking-wide text-muted mb-2">תגיות</legend>
         <div className="flex flex-wrap gap-2 mb-3">
@@ -1823,15 +1913,15 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose }) {
         </form>
       </fieldset>
       <div className="mb-4">
-        <label htmlFor="book-note" className="block text-[13px] font-semibold tracking-wide text-muted mb-1.5">מה חשבת על הספר? (רשות)</label>
+        <label htmlFor="book-note" className="block text-[13px] font-semibold tracking-wide text-muted mb-1.5">{status === 'want' ? 'למה בא לך לקרוא אותו? (רשות)' : 'מה חשבת על הספר? (רשות)'}</label>
         <textarea id="book-note" value={note} onChange={e => setNote(e.target.value)} rows={3} maxLength={4000}
           placeholder="מה אהבת, מה פחות, למי היית ממליץ… ההמלצות החכמות משתמשות בזה."
           className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px] leading-relaxed" />
       </div>
-      <Btn className="w-full" disabled={!rating} onClick={() => onSave({ rating, tags, note: note.trim() })}>
-        <Icon name="Check" size={20} />{existing ? 'שמירת שינויים' : 'שמירה לספרייה'}
+      <Btn className="w-full" disabled={status === 'read' && !rating} onClick={() => onSave({ status, rating: status === 'want' ? 0 : rating, tags, note: note.trim() })}>
+        <Icon name="Check" size={20} />{existing ? 'שמירת שינויים' : status === 'want' ? 'הוספה לרשימת "רוצה לקרוא"' : 'שמירה לספרייה'}
       </Btn>
-      {!rating && <p className="text-center text-muted text-[13px] mt-2">בחרו דירוג כדי לשמור</p>}
+      {status === 'read' && !rating && <p className="text-center text-muted text-[13px] mt-2">בחרו דירוג כדי לשמור</p>}
     </Sheet>
   );
 }
@@ -2006,17 +2096,20 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
   const cur = STARTER_DECK[idx], next = STARTER_DECK[idx2];
   useEffect(() => { [idx2, idx2 + 1, idx2 + 2].forEach(i => STARTER_DECK[i] && starterCover(STARTER_DECK[i][0])); }, [idx2]);
   const count = Object.values(picks).filter(p => !owned(p.b)).length;
+  const wantCount = Object.values(picks).filter(p => p.want && !owned(p.b)).length;
   const nq = norm(q);
   const found = nq ? STARTER_DECK.filter(([b]) => norm(b.join(' ')).includes(nq)) : [];
 
+  // true = קראתי, false = לא קראתי, 'want' = רוצה לקרוא
   const swipe = (read) => {
     if (!cur) return;
     const [b, gi] = cur, k = STARTER_KEY(b);
     const n = { ...picks };
-    if (read) n[k] = { rating: 4, gi, b, rated: false }; else delete n[k];
+    if (read === 'want') n[k] = { rating: 0, gi, b, want: true };
+    else if (read) n[k] = { rating: 4, gi, b, rated: false }; else delete n[k];
     const no = (state.no || []).filter(x => x !== k).concat(read ? [] : [k]);
     save({ pos: idx + 1, picks: n, no, trail: [...trail, idx].slice(-50) });
-    setRateKey(read ? k : '');
+    setRateKey(read === true ? k : '');
     setLast({ title: b[0], read });
   };
   const undo = () => {
@@ -2049,7 +2142,7 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
     setPhase('working');
     setProg({ done: 0, total: entries.length, added: 0, queued: 0 });
     const added = [], queued = [];
-    const one = async ({ b, gi, rating }) => {
+    const one = async ({ b, gi, rating, want }) => {
       const [title, author, original] = b;
       let best = null;
       for (const [t, a] of [[title, author], original ? [original, ''] : null].filter(Boolean)) {
@@ -2063,8 +2156,8 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
       }
       if (best && !findInLibrary(best, db.books) && !findInLibrary(best, added)) {
         const now = Date.now();
-        added.push(sanitizeBook({ ...best, id: uid(), rating, tags: [STARTER[gi].tag], addedAt: now, editedAt: now, verifiedAt: now }));
-      } else if (!best) queued.push({ id: uid(), raw: title, title, author: author || '', rating, note: '', status: 'pending', savedTitle: '' });
+        added.push(sanitizeBook({ ...best, id: uid(), status: want ? 'want' : 'read', rating: want ? 0 : rating, tags: [STARTER[gi].tag], addedAt: now, editedAt: now, verifiedAt: now }));
+      } else if (!best) queued.push({ id: uid(), raw: title, title, author: author || '', rating: want ? 0 : rating, want: !!want, note: '', status: 'pending', savedTitle: '' });
       setProg(p => ({ ...p, done: p.done + 1, added: added.length, queued: queued.length }));
     };
     for (let i = 0; i < entries.length; i += 3) await Promise.all(entries.slice(i, i + 3).map(one));
@@ -2143,16 +2236,20 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
             <button type="button" onClick={() => swipe(true)} className="min-h-[52px] px-5 whitespace-nowrap rounded-full border-2 border-ok text-ok font-semibold bg-surface flex items-center gap-1.5">
               <Icon name="Check" size={20} />קראתי
             </button>
-            <button type="button" onClick={undo} disabled={!trail.length} aria-label="חזרה לספר הקודם" className="min-h-[52px] w-[52px] rounded-full border border-line text-muted bg-surface grid place-items-center disabled:opacity-40">
-              <Icon name="Undo2" size={20} />
+            <button type="button" onClick={() => swipe('want')} aria-label="רוצה לקרוא" className="min-h-[52px] w-[52px] rounded-full border-2 border-brass text-brass bg-surface grid place-items-center">
+              <Icon name="Bookmark" size={20} />
             </button>
             <button type="button" onClick={() => swipe(false)} className="min-h-[52px] px-5 whitespace-nowrap rounded-full border-2 border-line text-muted font-semibold bg-surface flex items-center gap-1.5">
               <Icon name="X" size={20} />לא קראתי
             </button>
           </div>
+          <div className="flex justify-center items-center gap-3 -mt-1">
+            <button type="button" onClick={undo} disabled={!trail.length} className="text-[13px] text-muted inline-flex items-center gap-1 min-h-[36px] disabled:opacity-40"><Icon name="Undo2" size={15} />חזרה לספר הקודם</button>
+            <span className="text-[12px] text-muted">הסימנייה = רוצה לקרוא</span>
+          </div>
           {last && (
             <div className={`fade-in text-center text-[14px] rounded-lg py-1.5 ${last.read ? 'bg-accentSoft text-accent font-semibold' : 'bg-surface2 text-muted'}`} role="status">
-              {last.read ? `✓ קראתי: ${last.title}` : `לא קראתי: ${last.title}`}
+              {last.read === 'want' ? `🔖 רוצה לקרוא: ${last.title}` : last.read ? `✓ קראתי: ${last.title}` : `לא קראתי: ${last.title}`}
             </div>
           )}
           {rated ? (
@@ -2168,7 +2265,7 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
           ) : (
             <div className="flex justify-between items-center text-[13px] text-muted px-1">
               <span className="tabular">{STARTER[cur[1]].genre} · {inGenre[0]} מתוך {inGenre[1]}</span>
-              <span className="tabular">קראתי {count} · לא קראתי {(state.no || []).length}</span>
+              <span className="tabular">קראתי {count - wantCount} · רוצה {wantCount} · לא {(state.no || []).length}</span>
             </div>
           )}
         </div>
@@ -2208,13 +2305,16 @@ function AiDetailsButton({ book, onUpdate }) {
   );
 }
 
-function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd }) {
+function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
   const [q, setQ] = useState('');
   const [tag, setTag] = useState('');
   const [sort, setSort] = useState('recent');
   const [open, setOpen] = useState(null);
   const [confirmDel, setConfirmDel] = useState(false);
-  const books = db.books;
+  const [shelf, setShelf] = useState(() => { try { return sessionStorage.getItem('vrt_shelf') || 'read'; } catch (e) { return 'read'; } });
+  useEffect(() => { try { sessionStorage.setItem('vrt_shelf', shelf); } catch (e) { /* */ } }, [shelf]);
+  const readBooks = db.books.filter(b => b.status !== 'want'), wantBooks = db.books.filter(b => b.status === 'want');
+  const books = shelf === 'want' ? wantBooks : readBooks;
   const allTags = useMemo(() => {
     const m = new Map();
     books.forEach(b => b.tags.forEach(t => m.set(t, (m.get(t) || 0) + 1)));
@@ -2226,11 +2326,11 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd }) {
     const s = { recent: (a, b) => b.addedAt - a.addedAt, rating: (a, b) => b.rating - a.rating || b.addedAt - a.addedAt, title: (a, b) => a.title.localeCompare(b.title, 'he') }[sort];
     return l.slice().sort(s);
   }, [books, q, tag, sort]);
-  const avg = books.length ? (books.reduce((s, b) => s + b.rating, 0) / books.length).toFixed(1) : '–';
-  const loved = books.filter(b => b.rating >= 4).length;
-  const current = open ? books.find(b => b.id === open) : null;
+  const avg = readBooks.length ? (readBooks.reduce((s, b) => s + b.rating, 0) / readBooks.length).toFixed(1) : '–';
+  const loved = readBooks.filter(b => b.rating >= 4).length;
+  const current = open ? db.books.find(b => b.id === open) : null;
 
-  if (!books.length) {
+  if (!db.books.length) {
     return (
       <div className="fade-in pt-6">
         <h1 className="font-display font-medium text-[26px] leading-snug mb-2">הספרייה שלך מחכה לספר הראשון</h1>
@@ -2252,8 +2352,14 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd }) {
     <div className="fade-in">
       <header className="pt-4 pb-3">
         <h1 className="font-display font-medium text-[26px] leading-snug">הספרים שלי</h1>
-        <p className="text-muted text-[15px] tabular">{books.length} ספרים · ממוצע {avg}★ · {loved} אהובים (4★+)</p>
+        <p className="text-muted text-[15px] tabular">{readBooks.length} ספרים · ממוצע {avg}★ · {loved} אהובים (4★+)</p>
       </header>
+      <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2 mb-3" role="tablist" aria-label="מדף">
+        {[['read', `קראתי (${readBooks.length})`, 'BookCheck'], ['want', `רוצה לקרוא (${wantBooks.length})`, 'Bookmark']].map(([k, l, ic]) => (
+          <button key={k} type="button" role="tab" aria-selected={shelf === k} onClick={() => { setShelf(k); setTag(''); }}
+            className={`min-h-[44px] rounded-xl font-semibold text-[15px] inline-flex items-center justify-center gap-1.5 ${shelf === k ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}><Icon name={ic} size={17} />{l}</button>
+        ))}
+      </div>
       <div className="flex gap-2 mb-3">
         <div className="relative flex-1 min-w-0">
           <span className="absolute top-1/2 -translate-y-1/2 right-3 text-muted"><Icon name="Search" size={18} /></span>
@@ -2283,14 +2389,14 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd }) {
               <div className="min-w-0 flex-1">
                 <div className="font-display font-medium text-[17px] leading-snug clamp-2">{b.title}</div>
                 <div className="text-muted text-[14px] truncate">{[b.authors.join(', '), b.publisher, b.year].filter(Boolean).join(' · ')}</div>
-                <div className="mt-1"><Stars value={b.rating} size={15} /></div>
+                {b.status === 'want' ? <div className="mt-1 text-[13px] text-accent font-semibold inline-flex items-center gap-1"><Icon name="Bookmark" size={13} />רוצה לקרוא</div> : <div className="mt-1"><Stars value={b.rating} size={15} /></div>}
                 {b.tags.length > 0 && <div className="flex flex-wrap gap-1 mt-1.5">{b.tags.slice(0, 4).map(t => <span key={t} className="text-[12px] px-2 py-0.5 rounded-full bg-surface2 text-muted font-semibold">{t}</span>)}{b.tags.length > 4 && <span className="text-[12px] text-muted">+{b.tags.length - 4}</span>}</div>}
               </div>
             </button>
           </li>
         ))}
       </ul>
-      {!list.length && <p className="text-center text-muted py-8">אין ספרים שתואמים לחיפוש.</p>}
+      {!list.length && <p className="text-center text-muted py-8">{shelf === 'want' && !wantBooks.length ? 'עוד אין ספרים ברשימה. אפשר להוסיף מהחיפוש, מההמלצות או מהסוויפ.' : 'אין ספרים שתואמים לחיפוש.'}</p>}
 
       {current && (
         <Sheet open onClose={() => setOpen(null)} title="פרטי הספר">
@@ -2301,7 +2407,7 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd }) {
               {current.subtitle && <div className="text-[14px] text-muted">{current.subtitle}</div>}
               <div className="text-[15px] mt-1">{current.authors.join(', ')}</div>
               <div className="text-muted text-[13px] tabular mt-0.5">{metaLine(current)}</div>
-              <div className="mt-2"><Stars value={current.rating} size={18} /></div>
+              <div className="mt-2">{current.status === 'want' ? <span className="text-accent font-semibold inline-flex items-center gap-1"><Icon name="Bookmark" size={15} />ברשימת "רוצה לקרוא"</span> : <Stars value={current.rating} size={18} />}</div>
             </div>
           </div>
           <div className="flex flex-wrap gap-1.5 mb-3"><SourceBadge book={current} />{current.tags.map(t => <span key={t} className="text-[13px] px-2 py-0.5 rounded-full bg-surface2 font-semibold">{t}</span>)}</div>
@@ -2316,9 +2422,10 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd }) {
           <AiDetailsButton book={current} onUpdate={(patch) => onUpdateBook(current.id, patch)} />
           <p className="text-muted text-[13px] mb-3">נוסף ב-{fmtDate(current.addedAt)}{current.isbns[0] ? ` · ISBN ${current.isbns[0]}` : ''}</p>
           <div className="mb-3"><FormatInfo book={current} /></div>
+          <RecommendToFriend book={current} notify={notify} />
           {current.link && <a href={current.link} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent font-semibold mb-4 min-h-[44px]"><Icon name="ExternalLink" size={16} />לרשומה במקור</a>}
           <div className="grid grid-cols-2 gap-2">
-            <Btn variant="soft" onClick={() => { onEdit(current); setOpen(null); }}><Icon name="Pencil" size={18} />עריכה</Btn>
+            <Btn variant="soft" onClick={() => { onEdit(current); setOpen(null); }}><Icon name={current.status === 'want' ? 'BookCheck' : 'Pencil'} size={18} />{current.status === 'want' ? 'קראתי אותו' : 'עריכה'}</Btn>
             {!confirmDel
               ? <Btn variant="danger" onClick={() => setConfirmDel(true)}><Icon name="Trash2" size={18} />מחיקה</Btn>
               : <Btn variant="danger" className="!bg-danger !text-accentInk" onClick={() => { onDelete(current.id); setOpen(null); }}>לחצו שוב למחיקה</Btn>}
@@ -2927,7 +3034,7 @@ function BulkImport({ db, onPick, goSettings }) {
                 )}
                 <SearchResults res={res} db={db} goSettings={goSettings} smart={smart}
                   onSmart={() => { smartTarget.current = cur.id; runSmart(cur.title, cur.author || ''); }}
-                  onPick={(b) => onPick({ ...b, ...(cur.note ? { note: cur.note } : {}), ...(cur.rating ? { presetRating: cur.rating } : {}) }, { onSaved: (saved) => { setItem(cur.id, { status: 'saved', savedTitle: saved.title }); goNext(cur.id); } })} />
+                  onPick={(b) => onPick({ ...b, ...(cur.note ? { note: cur.note } : {}), ...(cur.rating ? { presetRating: cur.rating } : {}) }, { status: cur.want ? 'want' : undefined, onSaved: (saved) => { setItem(cur.id, { status: 'saved', savedTitle: saved.title }); goNext(cur.id); } })} />
               </>
             );
           })()}
@@ -3098,6 +3205,63 @@ function FormatInfo({ book }) {
   );
 }
 
+// הפרופיל הספרותי: מוצג למשתמש, מתעדכן לבד ברקע כשנוספו כמה ספרים או שלילות עם הערה, ואפשר להוסיף הערה משלך
+const PROFILE_BUSY = {};
+function LitProfileCard({ db, update }) {
+  const p = db.litProfile;
+  const [busy, setBusy] = useState(!!PROFILE_BUSY[ACTIVE.id]);
+  const [err, setErr] = useState('');
+  const [open, setOpen] = useState(false);
+  const [editNote, setEditNote] = useState(false);
+  const [note, setNote] = useState(db.profileNote || '');
+  const build = async () => {
+    if (PROFILE_BUSY[ACTIVE.id]) return;
+    PROFILE_BUSY[ACTIVE.id] = true; setBusy(true); setErr('');
+    try { const np = await aiBuildProfile(db); update(d => ({ ...d, litProfile: np })); }
+    catch (e) { setErr(e.message); }
+    PROFILE_BUSY[ACTIVE.id] = false; setBusy(false);
+  };
+  useEffect(() => { if (aiAvailable() && profileStale(db)) build(); }, []);
+  if (!aiAvailable()) return null;
+  const read = db.books.filter(b => b.status !== 'want').length;
+  return (
+    <section className="bg-surface border border-line rounded-2xl p-3.5 mb-4 grid gap-2 shadow-sm">
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="font-display font-medium text-[18px] flex items-center gap-1.5"><Icon name="Feather" size={18} />הפרופיל הספרותי שלי</h2>
+        {busy ? <span className="text-[13px] text-muted inline-flex items-center gap-1"><Spinner size={14} />מתעדכן…</span>
+          : p && <button type="button" className="text-[13px] text-accent font-semibold min-h-[36px]" onClick={build}>עדכון</button>}
+      </div>
+      {p ? (
+        <>
+          <p className={`font-reading text-[15.5px] whitespace-pre-line ${open ? '' : 'clamp-4'}`}>{p.text}</p>
+          <div className="flex items-center justify-between gap-2 text-[13px] text-muted">
+            <button type="button" className="text-accent font-semibold min-h-[36px]" onClick={() => setOpen(!open)}>{open ? 'פחות' : 'לפרופיל המלא'}</button>
+            <span>עודכן {fmtDate(p.at)}{changedSince(db, p.at).length ? ` · ${changedSince(db, p.at).length} שינויים מאז` : ''}</span>
+          </div>
+        </>
+      ) : <p className="text-[14px] text-muted">{read < 3 ? 'אחרי 3 ספרים מדורגים ייבנה כאן פרופיל של הטעם שלך. ההמלצות משתמשות בו כדי לעבוד מהר יותר.' : busy ? 'בונה את הפרופיל מהספרים שקראת…' : 'עוד אין פרופיל.'}</p>}
+      {!p && !busy && read >= 3 && <Btn variant="soft" onClick={build}><Icon name="Feather" size={18} />בניית הפרופיל</Btn>}
+      {err && <p className="text-[13px] text-danger">{err}</p>}
+      {editNote ? (
+        <div className="grid gap-2">
+          <label htmlFor="profile-note" className="text-[13px] font-semibold text-muted">משהו שחשוב לדעת על הטעם שלך?</label>
+          <textarea id="profile-note" rows={3} value={note} onChange={e => setNote(e.target.value)} maxLength={1500} placeholder="למשל: אוהב סופים פתוחים, לא מתחבר לספרי מתח, מחפש עכשיו ספרים קצרים"
+            className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px]" />
+          <div className="grid grid-cols-2 gap-2">
+            <Btn onClick={() => { update(d => ({ ...d, profileNote: note.trim(), profileNoteAt: Date.now() })); setEditNote(false); }}>שמירה</Btn>
+            <Btn variant="ghost" onClick={() => { setNote(db.profileNote || ''); setEditNote(false); }}>ביטול</Btn>
+          </div>
+        </div>
+      ) : (
+        <button type="button" className="text-[13px] text-accent font-semibold min-h-[36px] justify-self-start inline-flex items-center gap-1" onClick={() => setEditNote(true)}>
+          <Icon name="PenLine" size={14} />{db.profileNote ? 'עריכת ההערה שלי לפרופיל' : 'להוסיף הערה משלי לפרופיל'}
+        </button>
+      )}
+      {db.profileNote && !editNote && <p className="text-[13px] text-muted">ההערה שלך: {db.profileNote}</p>}
+    </section>
+  );
+}
+
 function FocusGroup({ id, focus, onToggle }) {
   const f = FOCUS[id], cur = focus[id];
   const on = (k) => f.multi ? (cur || []).includes(k) : cur === k;
@@ -3131,7 +3295,36 @@ function RecAvailability({ r }) {
   );
 }
 
-function RecCard({ r, onRead, onDismiss, inLib }) {
+/* ---------- שלילת המלצה: לחודש או לתמיד, עם הערה שמדייקת את הפרופיל ---------- */
+const activeRejections = (db) => (db.rejections || []).filter(x => !x.until || x.until > Date.now());
+const rejectedKeys = (db) => activeRejections(db).flatMap(x => [x.key, x.dkey, x.title]).filter(Boolean);
+function rejectBook(update, b, { forever, note }) {
+  const now = Date.now();
+  const entry = { id: uid(), key: b.key, dkey: dedupeKey(b), title: b.title, author: (b.authors || [])[0] || '', until: forever ? 0 : now + 30 * 86400000, note: (note || '').trim().slice(0, 500), at: now, editedAt: now };
+  update(d => ({ ...d, rejections: [entry, ...(d.rejections || [])].slice(0, 500), dismissed: forever ? Array.from(new Set([...d.dismissed, b.key, dedupeKey(b)])) : d.dismissed }));
+}
+function RejectSheet({ book, onDone, onClose }) {
+  const [forever, setForever] = useState(false);
+  const [note, setNote] = useState('');
+  return (
+    <Sheet open onClose={onClose} title="לא מתאים לי">
+      <div className="font-display font-medium text-[18px] mb-3">{book.title}</div>
+      <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2 mb-3" role="radiogroup" aria-label="לכמה זמן">
+        {[[false, 'לא בחודש הקרוב'], [true, 'לעולם לא']].map(([v, l]) => (
+          <button key={l} type="button" role="radio" aria-checked={forever === v} onClick={() => setForever(v)}
+            className={`min-h-[44px] rounded-xl font-semibold text-[15px] ${forever === v ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}>{l}</button>
+        ))}
+      </div>
+      <label htmlFor="reject-note" className="block text-[13px] font-semibold text-muted mb-1.5">למה? (רשות, עוזר לדייק את הפרופיל הספרותי)</label>
+      <textarea id="reject-note" value={note} onChange={e => setNote(e.target.value)} rows={3} maxLength={500}
+        placeholder="למשל: כבר קראתי משהו דומה; כבד מדי בשבילי עכשיו; לא אוהב את הסופר"
+        className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px] leading-relaxed mb-3" />
+      <Btn className="w-full" onClick={() => onDone({ forever, note })}><Icon name="ThumbsDown" size={18} />{forever ? 'לא להציג יותר' : 'להסתיר לחודש'}</Btn>
+    </Sheet>
+  );
+}
+
+function RecCard({ r, onRead, onWant, onDismiss, inLib }) {
   const [extra, setExtra] = useState({});
   return (
     <li className="fade-in bg-surface border border-line rounded-xl p-3">
@@ -3152,8 +3345,11 @@ function RecCard({ r, onRead, onDismiss, inLib }) {
       {r.offers ? <RecAvailability r={r} /> : <FormatInfo book={r} />}
       <div className="grid grid-cols-[1fr_auto_auto] gap-2 mt-2">
         {inLib
-          ? <div className="min-h-[48px] rounded-xl bg-surface2 text-ok font-semibold grid place-items-center text-[14px]">בספרייה ({inLib.rating}★)</div>
-          : <Btn variant="soft" onClick={() => onRead({ ...r, ...extra })}><Icon name="BookPlus" size={18} />קראתי, להוספה</Btn>}
+          ? <div className="min-h-[48px] rounded-xl bg-surface2 text-ok font-semibold grid place-items-center text-[14px]">{inLib.status === 'want' ? 'ברשימת "רוצה לקרוא"' : `בספרייה (${inLib.rating}★)`}</div>
+          : <div className="grid grid-cols-2 gap-2">
+              <Btn variant="soft" onClick={() => onWant({ ...r, ...extra })}><Icon name="Bookmark" size={18} />רוצה לקרוא</Btn>
+              <Btn variant="ghost" onClick={() => onRead({ ...r, ...extra })}><Icon name="BookCheck" size={18} />קראתי</Btn>
+            </div>}
         <button type="button" onClick={() => onDismiss(r)} aria-label="לא מעניין אותי" className="min-h-[48px] w-12 grid place-items-center rounded-xl border border-line text-muted"><Icon name="ThumbsDown" size={18} /></button>
         <a href={(r.offers && r.offers[0] && r.offers[0].url) || r.link} target="_blank" rel="noopener noreferrer" aria-label="לדף הספר" className="min-h-[48px] w-12 grid place-items-center rounded-xl border border-line text-muted"><Icon name="ExternalLink" size={18} /></a>
       </div>
@@ -3170,6 +3366,7 @@ const answersSummary = (a) => [
 
 function HistoryView({ db, update, onPick, notify, openId, setOpenId }) {
   const [confirmClear, setConfirmClear] = useState(false);
+  const [rejecting, setRejecting] = useState(null);
   const hist = db.history || [];
   const open = openId && hist.find(h => h.id === openId);
   if (open) {
@@ -3192,10 +3389,11 @@ function HistoryView({ db, update, onPick, notify, openId, setOpenId }) {
         <h2 className="font-display font-medium text-[20px]">{open.recs.length} המלצות</h2>
         <ul className="grid gap-3">
           {open.recs.map(r => (
-            <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)} onRead={(b) => onPick(b)}
-              onDismiss={(b) => { update(d => ({ ...d, dismissed: Array.from(new Set([...d.dismissed, b.key, dedupeKey(b)])) })); notify('סומן "לא מעניין". לא נמליץ עליו שוב.'); }} />
+            <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)} onRead={(b) => onPick(b)} onWant={(b) => onPick(b, { status: 'want' })}
+              onDismiss={(b) => setRejecting(b)} />
           ))}
         </ul>
+        {rejecting && <RejectSheet book={rejecting} onClose={() => setRejecting(null)} onDone={(o) => { rejectBook(update, rejecting, o); notify(o.forever ? 'לא נמליץ עליו שוב.' : 'הוסתר לחודש הקרוב.'); setRejecting(null); }} />}
         <Btn variant="danger" onClick={() => { update(d => ({ ...d, history: d.history.filter(h => h.id !== open.id), tombstones: { ...d.tombstones, history: { ...d.tombstones.history, [open.id]: Date.now() } } })); setOpenId(null); notify('השיחה נמחקה'); }}>
           <Icon name="Trash2" size={18} />מחיקת השיחה מההיסטוריה
         </Btn>
@@ -3259,6 +3457,7 @@ function DiscoverTab({ db, update, onPick, notify }) {
   const [multi, setMulti] = useState([]);
   const [view, setView] = useState('chat');   // 'chat' | 'history' | מזהה שיחה
   const [aiText, setAiText] = useState('');
+  const [rejecting, setRejecting] = useState(null);
   const hasAi = aiAvailable();
   const endRef = useRef(null);
   const prof = useMemo(() => buildProfile(db.books), [db.books]);
@@ -3295,7 +3494,7 @@ function DiscoverTab({ db, update, onPick, notify }) {
     const progress = (t) => pushLog({ from: 'bot', text: t, progress: true });
     try {
       if (!db.books.length) progress('הספרייה ריקה, אז ההמלצות יתבססו רק על התשובות שלך. דירוג ספרים שקראת ישפר מאוד את הדיוק.');
-      const { recs: r } = await recommend({ books: db.books, answers: ans, lang, exclude, dismissed: db.dismissed, want: 5, onProgress: progress });
+      const { recs: r } = await recommend({ books: db.books, answers: ans, lang, exclude, dismissed: [...db.dismissed, ...rejectedKeys(db)], want: 5, onProgress: progress });
       if (!r.length) progress('לא נמצאו ספרים שעברו את כל שלבי האימות. נסו לשנות תשובה (למשל אורך או שפה), או להוסיף עוד ספרים מדורגים.');
       const all = [...st.recs, ...r];
       const sh = new Set(st.shown); r.forEach(x => { sh.add(x.key); sh.add(dedupeKey(x)); });
@@ -3314,7 +3513,7 @@ function DiscoverTab({ db, update, onPick, notify }) {
     const next = f.multi ? ((cur || []).includes(k) ? cur.filter(x => x !== k) : [...(cur || []), k]) : (cur === k ? undefined : k);
     recSet(st, { focus: { ...st.focus, [id]: next } });
   };
-  const excludeNow = () => [...st.recs.map(x => x.title), ...[...st.shown].filter(k => !k.includes(':') && !k.includes('|'))];
+  const excludeNow = () => [...st.recs.map(x => x.title), ...[...st.shown].filter(k => !k.includes(':') && !k.includes('|')), ...activeRejections(db).map(x => x.title)];
   const applyRecs = (ans, r, interpretation) => {
     if (interpretation) pushLog({ from: 'bot', text: interpretation });
     if (!r.length) progress('לא נשארו המלצות שעברו את האימות. נסו לנסח את הבקשה אחרת.');
@@ -3328,7 +3527,8 @@ function DiscoverTab({ db, update, onPick, notify }) {
     try {
       const { recs: r, interpretation } = await aiRecommend({
         books: db.books, request: ans.request, focus: ans.focus, qa, lang, exclude: excludeNow(),
-        dismissed: db.dismissed, history: db.history, want: 5, onProgress: progress, ctx: { ans, qa }
+        dismissed: db.dismissed, history: db.history, want: 5, onProgress: progress, ctx: { ans, qa },
+        profile: db.litProfile, profileNote: db.profileNote, rejections: activeRejections(db).concat((db.rejections || []).filter(x => x.note && x.until && x.until <= Date.now())), friendsLoved: friendsLovedTitles(db.books)
       });
       applyRecs(ans, r, interpretation);
     } catch (e) { progress(e.message); }
@@ -3341,7 +3541,7 @@ function DiscoverTab({ db, update, onPick, notify }) {
     recSet(st, { answers: ans, step: QUESTIONS.length, running: true, qa: [] });
     pushLog({ from: 'me', text: [request || 'תמליץ לי על הספר הבא', ...sum].join(' · ') });
     let qs = [];
-    try { qs = await aiClarify({ books: db.books, request, focus: st.focus }); } catch (e) { qs = []; }
+    try { qs = await aiClarify({ books: db.books, request, focus: st.focus, profile: db.litProfile }); } catch (e) { qs = []; }
     if (qs.length) {
       pushLog({ from: 'bot', text: `כדי לדייק, ${qs.length} שאלות קצרות (אפשר לדלג):` });
       recSet(st, { questions: qs, qa: [], running: false });
@@ -3393,9 +3593,10 @@ function DiscoverTab({ db, update, onPick, notify }) {
         <div className="mb-3"><Notice tone="info">בלי מפתח Google Books ההמלצות מגיעות בעיקר מ-Open Library, ויש שם מעט ספרים בעברית. אפשר להוסיף מפתח חינמי בלשונית "הגדרות".</Notice></div>
       )}
 
+      <LitProfileCard db={db} update={update} />
       <div className="bg-surface border border-line rounded-xl p-3 mb-4 grid gap-2">
-        <div className="text-[13px] font-semibold tracking-wide text-muted">הפרופיל שלך</div>
-        {db.books.length
+        {!hasAi && <div className="text-[13px] font-semibold tracking-wide text-muted">הפרופיל שלך</div>}
+        {hasAi ? null : db.books.length
           ? <div className="text-[14px] leading-relaxed">
               {prof.topAuthors.length > 0 && <div><span className="text-muted">מחברים אהובים: </span>{prof.topAuthors.slice(0, 3).map(a => a.name).join(', ')}</div>}
               {prof.topTags.length > 0 && <div><span className="text-muted">תגיות מובילות: </span>{prof.topTags.slice(0, 4).map(a => a.name).join(', ')}</div>}
@@ -3478,17 +3679,18 @@ function DiscoverTab({ db, update, onPick, notify }) {
           <ul className="grid gap-3">
             {recs.map(r => (
               <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)}
-                onRead={(b) => onPick(b)}
-                onDismiss={(b) => {
-                  update(d => ({ ...d, dismissed: Array.from(new Set([...d.dismissed, b.key, dedupeKey(b)])) }));
-                  recSet(st, { recs: st.recs.filter(x => x.key !== b.key) });
-                  notify('הוסר. לא נמליץ עליו שוב.');
-                }} />
+                onRead={(b) => onPick(b)} onWant={(b) => onPick(b, { status: 'want' })}
+                onDismiss={(b) => setRejecting(b)} />
             ))}
           </ul>
         </section>
       )}
 
+      {rejecting && <RejectSheet book={rejecting} onClose={() => setRejecting(null)} onDone={(o) => {
+        rejectBook(update, rejecting, o);
+        recSet(st, { recs: st.recs.filter(x => x.key !== rejecting.key) });
+        notify(o.forever ? 'הוסר. לא נמליץ עליו שוב.' : 'הוסתר לחודש הקרוב.'); setRejecting(null);
+      }} />}
       {done && !running && !(st.questions.length > 0 && st.qa.length < st.questions.length) && (
         <div className="grid grid-cols-2 gap-2 mt-4">
           <Btn variant="soft" onClick={() => answers.mode === 'ai' ? runAi(answers, st.qa) : go(answers, new Set(shown))}><Icon name="RefreshCw" size={18} />עוד המלצות</Btn>
@@ -3816,15 +4018,254 @@ function InstallPrompt() {
   );
 }
 
+/* ============================================================
+   לשונית: חברים — בקשות חברות, המדפים של החברים, המלצות ביניהם, ומה אהוב אצל חברים ובקהילה
+   ============================================================ */
+const slimBook = (b) => ({
+  key: b.key, source: b.source, sourceId: b.sourceId, title: b.title, subtitle: b.subtitle || '', authors: b.authors || [], year: b.year || '',
+  description: (b.description || '').slice(0, 800), descSource: b.descSource || '', categories: (b.categories || []).slice(0, 4), cover: b.cover || '',
+  pageCount: b.pageCount || 0, language: b.language || '', isbns: (b.isbns || []).slice(0, 3), link: b.link || '', publisher: b.publisher || '',
+  verifiedVia: b.verifiedVia || '', verifiedAt: b.verifiedAt || 0
+});
+function useProfilesList() {
+  const [p, setP] = useState(() => loadProfiles().profiles);
+  useEffect(() => { const f = () => setP(loadProfiles().profiles); window.addEventListener('vrt-profiles-changed', f); return () => window.removeEventListener('vrt-profiles-changed', f); }, []);
+  return p;
+}
+function useFriends() {
+  const social = useSocial();
+  const me = ACTIVE.id;
+  const rel = friendsOf(social.items, me);
+  const accepted = [...rel.entries()].filter(([, x]) => x.status === 'accepted').map(([pid]) => pid);
+  const incoming = [...rel.values()].filter(x => x.status === 'pending' && x.to === me);
+  const outgoing = [...rel.values()].filter(x => x.status === 'pending' && x.from === me);
+  const inbox = social.items.filter(x => x.type === 'rec' && x.to === me && x.status !== 'dismissed');
+  return { social, me, rel, accepted, incoming, outgoing, inbox, badge: incoming.length + inbox.filter(x => x.status === 'new').length };
+}
+// ספרים שחברים (או כל המשתמשים) אהבו ועוד לא אצלי
+function lovedBy(pids, myBooks, { minFans = 1 } = {}) {
+  const m = new Map();
+  pids.forEach(pid => {
+    const d = loadDBOf(pid);
+    if (!d) return;
+    d.books.forEach(b => {
+      const loved = b.status !== 'want' && b.rating >= 4, wanted = b.status === 'want';
+      if (!loved && !wanted) return;
+      if (findInLibrary(b, myBooks)) return;
+      const k = dedupeKey(b);
+      const cur = m.get(k) || { book: b, fans: [], wants: [], score: 0 };
+      if (loved) { cur.fans.push({ pid, rating: b.rating, note: b.note }); cur.score += b.rating - 2; } else { cur.wants.push(pid); cur.score += 0.5; }
+      m.set(k, cur);
+    });
+  });
+  return [...m.values()].filter(x => x.fans.length >= minFans || (minFans <= 1 && x.wants.length)).sort((a, b) => b.score - a.score);
+}
+function friendsLovedTitles(myBooks) {
+  const { accepted } = (() => { const s = loadSocial(); const rel = friendsOf(s.items, ACTIVE.id); return { accepted: [...rel.entries()].filter(([, x]) => x.status === 'accepted').map(([p]) => p) }; })();
+  return lovedBy(accepted, myBooks).filter(x => x.fans.length).slice(0, 20).map(x => `${x.book.title} — ${(x.book.authors || [])[0] || ''}`);
+}
+
+function FriendsTab({ db, onPick, notify }) {
+  const profiles = useProfilesList();
+  const { me, rel, accepted, incoming, outgoing, inbox } = useFriends();
+  const [view, setView] = useState(null);   // מזהה חבר שהמדף שלו פתוח
+  const nameOf = (pid) => (profiles.find(p => p.id === pid) || {}).name || 'משתמש';
+  const profOf = (pid) => profiles.find(p => p.id === pid) || { id: pid, name: 'משתמש', color: 0 };
+  const now = () => Date.now();
+  const request = (pid) => { socialChange(items => [...items, { id: uid(), type: 'friend', from: me, to: pid, status: 'pending', at: now(), editedAt: now() }]); notify(`נשלחה בקשת חברות ל${nameOf(pid)}`); };
+  const setRel = (item, status) => socialChange(items => items.map(x => x.id === item.id ? { ...x, status, editedAt: now() } : x));
+  const setRec = (item, status) => socialChange(items => items.map(x => x.id === item.id ? { ...x, status, editedAt: now() } : x));
+  useEffect(() => { if (inbox.some(x => x.status === 'new')) socialChange(items => items.map(x => x.type === 'rec' && x.to === me && x.status === 'new' ? { ...x, status: 'seen', editedAt: now() } : x)); }, [inbox.length]);
+  const others = profiles.filter(p => p.id !== me && !(rel.get(p.id) && ['accepted', 'pending'].includes(rel.get(p.id).status)));
+  const fromFriends = useMemo(() => lovedBy(accepted, db.books).slice(0, 15), [accepted.join(), db.books]);
+  const community = useMemo(() => lovedBy(profiles.map(p => p.id).filter(p => p !== me), db.books, { minFans: 2 }).slice(0, 10), [profiles.length, db.books]);
+
+  if (view) return <FriendShelf pid={view} profile={profOf(view)} myBooks={db.books} onBack={() => setView(null)} onPick={onPick} />;
+  const BookRow = ({ book, children }) => (
+    <li className="bg-surface border border-line rounded-2xl p-3 flex gap-3">
+      <Cover book={book} className="w-14 h-20" />
+      <div className="min-w-0 flex-1">
+        <div className="font-display font-medium text-[17px] leading-snug clamp-2">{book.title}</div>
+        <div className="text-muted text-[14px] truncate">{(book.authors || []).join(', ')}</div>
+        {children}
+      </div>
+    </li>
+  );
+  const AddButtons = ({ book }) => {
+    const inLib = findInLibrary(book, db.books);
+    if (inLib) return <div className="text-[13px] text-muted mt-1.5">{inLib.status === 'want' ? 'כבר ברשימת "רוצה לקרוא"' : `כבר בספרייה (${inLib.rating}★)`}</div>;
+    return (
+      <div className="flex gap-1.5 mt-2 flex-wrap">
+        <Chip onClick={() => onPick(book, { status: 'want' })}><Icon name="Bookmark" size={14} />רוצה לקרוא</Chip>
+        <Chip onClick={() => onPick(book)}><Icon name="BookCheck" size={14} />קראתי</Chip>
+      </div>
+    );
+  };
+  return (
+    <div className="fade-in">
+      <header className="pt-4 pb-3">
+        <h1 className="font-display font-medium text-[26px] leading-snug">חברים</h1>
+        <p className="text-muted text-[15px]">רואים מה החברים קוראים ואוהבים, ממליצים אחד לשני, ומגלים ספרים דרכם.</p>
+      </header>
+
+      {incoming.length > 0 && (
+        <section className="mb-5">
+          <h2 className="font-semibold text-[15px] mb-2">בקשות חברות</h2>
+          <ul className="grid gap-2">{incoming.map(x => (
+            <li key={x.id} className="bg-surface border border-accent rounded-2xl p-3 flex items-center gap-2">
+              <Avatar profile={profOf(x.from)} size={36} />
+              <span className="flex-1 font-semibold">{nameOf(x.from)}</span>
+              <Btn variant="soft" onClick={() => setRel(x, 'accepted')}>אישור</Btn>
+              <Btn variant="ghost" onClick={() => setRel(x, 'declined')}>לא עכשיו</Btn>
+            </li>))}</ul>
+        </section>
+      )}
+
+      {inbox.length > 0 && (
+        <section className="mb-5">
+          <h2 className="font-semibold text-[15px] mb-2">חברים המליצו לך</h2>
+          <ul className="grid gap-2">{inbox.map(x => (
+            <BookRow key={x.id} book={x.book}>
+              <div className="text-[13px] mt-1"><span className="font-semibold">{nameOf(x.from)}</span>{x.note ? `: "${x.note}"` : ' המליץ/ה'}</div>
+              <div className="flex items-center gap-1.5"><AddButtons book={x.book} />
+                <button type="button" className="text-[13px] text-muted underline mt-2 min-h-[32px]" onClick={() => setRec(x, 'dismissed')}>הסתרה</button></div>
+            </BookRow>))}</ul>
+        </section>
+      )}
+
+      <section className="mb-5">
+        <h2 className="font-semibold text-[15px] mb-2">החברים שלי</h2>
+        {accepted.length
+          ? <ul className="grid grid-cols-2 gap-2">{accepted.map(pid => {
+              const d = loadDBOf(pid);
+              const read = d ? d.books.filter(b => b.status !== 'want').length : 0, want = d ? d.books.filter(b => b.status === 'want').length : 0;
+              return (
+                <li key={pid}>
+                  <button type="button" onClick={() => setView(pid)} className="w-full text-right bg-surface border border-line rounded-2xl p-3 grid gap-1">
+                    <span className="flex items-center gap-2"><Avatar profile={profOf(pid)} size={32} /><span className="font-semibold truncate">{nameOf(pid)}</span></span>
+                    <span className="text-[13px] text-muted tabular">{read} קראו · {want} רוצים לקרוא</span>
+                  </button>
+                </li>
+              );
+            })}</ul>
+          : <p className="text-[14px] text-muted">עוד אין חברים. אפשר לשלוח בקשה למשתמשים אחרים כאן למטה.</p>}
+        {outgoing.length > 0 && <p className="text-[13px] text-muted mt-2">ממתינות לאישור: {outgoing.map(x => nameOf(x.to)).join(', ')}</p>}
+      </section>
+
+      {fromFriends.length > 0 && (
+        <section className="mb-5">
+          <h2 className="font-semibold text-[15px] mb-2">מה החברים אוהבים ועוד לא קראת</h2>
+          <ul className="grid gap-2">{fromFriends.map(x => (
+            <BookRow key={dedupeKey(x.book)} book={x.book}>
+              <div className="text-[13px] text-muted mt-1">
+                {x.fans.map(f => `${nameOf(f.pid)} (${f.rating}★)`).join(' · ')}{x.wants.length ? `${x.fans.length ? ' · ' : ''}רוצים לקרוא: ${x.wants.map(nameOf).join(', ')}` : ''}
+              </div>
+              {x.fans.find(f => f.note) && <div className="text-[13px] font-reading mt-0.5 clamp-2">"{x.fans.find(f => f.note).note}"</div>}
+              <AddButtons book={x.book} />
+            </BookRow>))}</ul>
+        </section>
+      )}
+
+      {community.length > 0 && (
+        <section className="mb-5">
+          <h2 className="font-semibold text-[15px] mb-2">אהובים בקהילה</h2>
+          <p className="text-[13px] text-muted mb-2">ספרים שכמה משתמשים דירגו 4★ ומעלה.</p>
+          <ul className="grid gap-2">{community.map(x => (
+            <BookRow key={dedupeKey(x.book)} book={x.book}>
+              <div className="text-[13px] text-muted mt-1 tabular">{x.fans.length} משתמשים אהבו · ממוצע {(x.fans.reduce((s, f) => s + f.rating, 0) / x.fans.length).toFixed(1)}★</div>
+              <AddButtons book={x.book} />
+            </BookRow>))}</ul>
+        </section>
+      )}
+
+      <section className="mb-5">
+        <h2 className="font-semibold text-[15px] mb-2">להוסיף חברים</h2>
+        {others.length
+          ? <ul className="grid gap-2">{others.map(p => (
+              <li key={p.id} className="bg-surface border border-line rounded-2xl p-3 flex items-center gap-2">
+                <Avatar profile={p} size={32} /><span className="flex-1 font-semibold truncate">{p.name}</span>
+                <Btn variant="soft" onClick={() => request(p.id)}><Icon name="UserPlus" size={16} />בקשת חברות</Btn>
+              </li>))}</ul>
+          : <p className="text-[14px] text-muted">כל המשתמשים כבר ברשימה. משתמשים חדשים שיצטרפו יופיעו כאן.</p>}
+      </section>
+    </div>
+  );
+}
+function FriendShelf({ pid, profile, myBooks, onBack, onPick }) {
+  const d = loadDBOf(pid);
+  const [shelf, setShelf] = useState('read');
+  const books = d ? d.books.filter(b => shelf === 'want' ? b.status === 'want' : b.status !== 'want').sort((a, b) => (b.rating - a.rating) || (b.addedAt - a.addedAt)) : [];
+  return (
+    <div className="fade-in">
+      <header className="pt-4 pb-3 flex items-center gap-2">
+        <button type="button" onClick={onBack} aria-label="חזרה" className="w-10 h-10 grid place-items-center rounded-full border border-line"><Icon name="ChevronRight" size={20} /></button>
+        <Avatar profile={profile} size={36} />
+        <h1 className="font-display font-medium text-[24px] leading-snug truncate">המדף של {profile.name}</h1>
+      </header>
+      <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2 mb-3" role="tablist" aria-label="מדף">
+        {[['read', 'קראו'], ['want', 'רוצים לקרוא']].map(([k, l]) => (
+          <button key={k} type="button" role="tab" aria-selected={shelf === k} onClick={() => setShelf(k)}
+            className={`min-h-[44px] rounded-xl font-semibold text-[15px] ${shelf === k ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}>{l}</button>
+        ))}
+      </div>
+      <ul className="grid gap-2">
+        {!books.length && <li className="text-center text-muted py-6">אין כאן ספרים עדיין.</li>}
+        {books.map(b => {
+          const inLib = findInLibrary(b, myBooks);
+          return (
+            <li key={b.id} className="bg-surface border border-line rounded-2xl p-3 flex gap-3">
+              <Cover book={b} className="w-12 h-[4.5rem]" />
+              <div className="min-w-0 flex-1">
+                <div className="font-display font-medium text-[16px] leading-snug clamp-2">{b.title}</div>
+                <div className="text-muted text-[13px] truncate">{b.authors.join(', ')}</div>
+                {b.status !== 'want' && <Stars value={b.rating} size={13} />}
+                {b.note && <div className="text-[13px] font-reading clamp-2 mt-0.5">"{b.note}"</div>}
+                {inLib ? <div className="text-[12px] text-muted mt-1">{inLib.status === 'want' ? 'ברשימה שלך' : `קראת (${inLib.rating}★)`}</div>
+                  : <div className="flex gap-1.5 mt-1.5"><Chip onClick={() => onPick(b, { status: 'want' })}><Icon name="Bookmark" size={14} />רוצה לקרוא</Chip><Chip onClick={() => onPick(b)}>קראתי</Chip></div>}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+// המלצה לחבר מתוך דף הספר
+function RecommendToFriend({ book, notify }) {
+  const profiles = useProfilesList();
+  const { accepted, me } = useFriends();
+  const [open, setOpen] = useState(false);
+  const [to, setTo] = useState([]);
+  const [note, setNote] = useState('');
+  if (!accepted.length) return null;
+  const send = () => {
+    const now = Date.now();
+    socialChange(items => [...items, ...to.map(pid => ({ id: uid(), type: 'rec', from: me, to: pid, book: slimBook(book), note: note.trim().slice(0, 300), status: 'new', at: now, editedAt: now }))]);
+    notify(`ההמלצה נשלחה ל-${to.length} חברים`); setOpen(false); setTo([]); setNote('');
+  };
+  if (!open) return <Btn variant="ghost" className="w-full mb-3" onClick={() => setOpen(true)}><Icon name="Send" size={18} />להמליץ לחבר</Btn>;
+  return (
+    <div className="mb-3 border border-line rounded-2xl p-3 grid gap-2">
+      <div className="text-[14px] font-semibold">למי להמליץ?</div>
+      <div className="flex flex-wrap gap-1.5">{accepted.map(pid => <Chip key={pid} active={to.includes(pid)} onClick={() => setTo(t => t.includes(pid) ? t.filter(x => x !== pid) : [...t, pid])}>{(profiles.find(p => p.id === pid) || {}).name || 'חבר'}</Chip>)}</div>
+      <label htmlFor="rec-note" className="sr-only">מה לכתוב</label>
+      <input id="rec-note" value={note} onChange={e => setNote(e.target.value)} placeholder="כמה מילים: למה זה בשבילו/ה (רשות)" className="min-h-[44px] px-3 rounded-xl border border-line bg-bg text-[16px]" />
+      <div className="grid grid-cols-2 gap-2"><Btn disabled={!to.length} onClick={send}>שליחה</Btn><Btn variant="ghost" onClick={() => setOpen(false)}>ביטול</Btn></div>
+    </div>
+  );
+}
+
 const TABS = [
   { id: 'library', label: 'הספרים שלי', icon: 'Library' },
   { id: 'add', label: 'הוספת ספר', icon: 'BookPlus' },
   { id: 'discover', label: 'גלה ספר חדש', icon: 'Sparkles' },
+  { id: 'friends', label: 'חברים', icon: 'Users' },
   { id: 'backup', label: 'הגדרות', icon: 'Settings' }
 ];
 
 function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
   const { db, update, replace, status } = usePersistentDB();
+  const friendsBadge = useFriends().badge;
   const [tab, setTab] = useState(() => { try { return sessionStorage.getItem('vrt_tab') || 'library'; } catch (e) { return 'library'; } });
   const [starterOpen, setStarterOpen] = useState(false);
   const showStarter = tab === 'library' && (starterOpen || (!db.books.length && !db.settings.onboarded));
@@ -3874,18 +4315,18 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
 
   const pick = (book, opts) => {
     const existing = findInLibrary(book, db.books);
-    setPending({ book: existing || book, existing: existing || null, onSaved: opts && opts.onSaved });
+    setPending({ book: existing || book, existing: existing || null, onSaved: opts && opts.onSaved, status: opts && opts.status });
   };
-  const save = ({ rating, tags, note }) => {
+  const save = ({ status = 'read', rating, tags, note }) => {
     const { book, existing } = pending;
     update(d => {
       const tagLibrary = Array.from(new Set([...d.tagLibrary, ...tags]));
-      if (existing) return { ...d, tagLibrary, books: d.books.map(b => b.id === existing.id ? { ...b, rating, tags, note, editedAt: Date.now() } : b) };
+      if (existing) return { ...d, tagLibrary, books: d.books.map(b => b.id === existing.id ? sanitizeBook({ ...b, status, rating, tags, note, editedAt: Date.now() }) : b) };
       const now = Date.now();
-      const rec = sanitizeBook({ ...book, id: uid(), rating, tags, note, addedAt: now, editedAt: now, verifiedAt: book.verifiedAt || now });
+      const rec = sanitizeBook({ ...book, id: uid(), status, rating, tags, note, addedAt: now, editedAt: now, verifiedAt: book.verifiedAt || now });
       return { ...d, tagLibrary, books: [rec, ...d.books], settings: { ...d.settings, onboarded: true } };
     });
-    notify(existing ? 'השינויים נשמרו' : `"${book.title}" נשמר בספרייה`);
+    notify(existing ? 'השינויים נשמרו' : status === 'want' ? `"${book.title}" נוסף לרשימת "רוצה לקרוא"` : `"${book.title}" נשמר בספרייה`);
     const onSaved = pending.onSaved;
     setPending(null);
     if (onSaved) onSaved(existing || book);
@@ -3907,20 +4348,22 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
         <InstallPrompt />
         {showStarter && <Starter db={db} update={update} onBegin={() => setStarterOpen(true)} onClose={() => setStarterOpen(false)}
           goQueue={() => { setStarterOpen(false); try { sessionStorage.setItem('vrt_add_mode', 'bulk'); } catch (e) { /* */ } setTab('add'); }} />}
-        {tab === 'library' && !showStarter && <LibraryTab db={db} onEdit={(b) => setPending({ book: b, existing: b })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id), tombstones: { ...d.tombstones, books: { ...d.tombstones.books, [id]: Date.now() } } })); notify('הספר נמחק'); }}
-          onUpdateBook={(id, patch) => update(d => ({ ...d, books: d.books.map(b => b.id === id ? sanitizeBook({ ...b, ...patch, editedAt: Date.now() }) : b) }))} goAdd={() => setTab('add')} />}
+        {tab === 'library' && !showStarter && <LibraryTab db={db} onEdit={(b) => setPending({ book: b, existing: b, status: b.status === 'want' ? 'read' : undefined })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id), tombstones: { ...d.tombstones, books: { ...d.tombstones.books, [id]: Date.now() } } })); notify('הספר נמחק'); }}
+          onUpdateBook={(id, patch) => update(d => ({ ...d, books: d.books.map(b => b.id === id ? sanitizeBook({ ...b, ...patch, editedAt: Date.now() }) : b) }))} goAdd={() => setTab('add')} notify={notify} />}
         {tab === 'add' && <AddTab db={db} onPick={pick} goSettings={() => setTab('backup')} />}
         {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} />}
+        {tab === 'friends' && <FriendsTab db={db} onPick={pick} notify={notify} />}
         {tab === 'backup' && <BackupTab onOpenStarter={() => { setStarterOpen(true); setTab('library'); }} db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
       </main>
 
       <nav className="fixed bottom-0 inset-x-0 z-30 bg-surface border-t border-line safe-bottom" aria-label="ניווט ראשי">
-        <ul className="mx-auto max-w-xl grid grid-cols-4">
+        <ul className="mx-auto max-w-xl grid grid-cols-5">
           {TABS.map(t => (
             <li key={t.id}>
               <button type="button" onClick={() => setTab(t.id)} aria-current={tab === t.id ? 'page' : undefined}
                 className={`w-full min-h-[62px] flex flex-col items-center justify-center gap-0.5 text-[12px] font-semibold transition-colors ${tab === t.id ? 'text-accent' : 'text-muted'}`}>
-                <span className={`px-4 py-1 rounded-full transition-colors ${tab === t.id ? 'bg-accentSoft' : ''}`}><Icon name={t.icon} size={22} /></span>
+                <span className={`relative px-4 py-1 rounded-full transition-colors ${tab === t.id ? 'bg-accentSoft' : ''}`}><Icon name={t.icon} size={22} />
+                  {t.id === 'friends' && friendsBadge > 0 && <span className="absolute -top-0.5 left-2 min-w-[18px] h-[18px] px-1 rounded-full bg-brass text-accentInk text-[11px] font-bold grid place-items-center tabular" aria-label={`${friendsBadge} חדשים`}>{friendsBadge}</span>}</span>
                 {t.label}
               </button>
             </li>
@@ -3928,7 +4371,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
         </ul>
       </nav>
 
-      {pending && <RateSheet book={pending.book} existing={pending.existing} tagLibrary={db.tagLibrary} onSave={save} onClose={() => setPending(null)} />}
+      {pending && <RateSheet book={pending.book} existing={pending.existing} initialStatus={pending.status} tagLibrary={db.tagLibrary} onSave={save} onClose={() => setPending(null)} />}
       <Toast toast={toast} />
     </div>
   );
