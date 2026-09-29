@@ -65,6 +65,7 @@
 - **ייבוא וייצוא:** `readImportRows` (Goodreads, StoryGraph, CSV כללי) ו-`toGoodreadsCSV`. מה שלא אומת עובר לתור של "הוספה ← רשימה".
 
 - **מראה:** `applyLook` + `LookSettings`: 4 ערכות (`data-palette`: paper/library/ink/stone, ו'מתחלף' לפי היום), בהיר/כהה (`data-mode`), גופן אחד לכל האפליקציה (`data-font`, המשתנה `--font`), גודל (`--zoom`), מצב נגישות (`data-a11y`, לפי ת"י 5568 / WCAG AA). נשמר גם ב-`vrt-look` כדי שיוחל לפני הציור הראשון.
+- **מדינה:** `book.country` — נקבע ברקע (`aiCountries`, Haiku, פעם אחת לכל סופר; 'ספרות ישראלית' = ישראל). נשלח למודל (`[מדינה]` ליד כל ספר, ו-`countryMixText`), וכל המלצה מחזירה `country`. מוצג ברשימה, בסטטיסטיקות ובסיכום.
 - **מתי נקרא:** `whenReadForPrompt` ו-`readingTimeline` שולחים למודל כמה זמן עבר מאז כל ספר, כדי לזהות את התפתחות הטעם.
 - **עיצוב:** `PageHero` (אריח צבעוני לכל מסך), `SettingsGroup` (קבוצות בהגדרות), `ChatLog` (הודעות התקדמות מקובצות), `SyncDot` (חיווי סנכרון), `MySummaryCard` (כרטיס קבוע לסיכום בספרייה). צילומי מסך: `SHOTS=<תיקייה> node e2e.mjs`.
 - **חנויות:** `STORE_SEARCH` — דפי החיפוש האמיתיים: סטימצקי `catalogsearch/result/?q=`, צומת ספרים `/חיפוש?q=`, עברית `/Search/<שם>`.

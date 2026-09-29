@@ -31,7 +31,7 @@ let store = { rev: 0, data: null };
 const aiCalls = [], aiScript = [], errors = [], feedbacks = [];
 const digestFor = new Map();
 let stallNext = false;
-const jobs = new Map(), jobBodies = [], jobHold = new Set(), profileCalls = [];
+const jobs = new Map(), jobBodies = [], jobHold = new Set(), profileCalls = [], countryCalls = [];
 let viaProxy = 0, direct = 0;
 
 function sse(blocks, stop) {
@@ -119,6 +119,13 @@ async function phone(browser, name) {
       if (u.pathname.startsWith('/v1/messages')) {
         const reqBody = JSON.parse(req.postData());
         // בניית הפרופיל הספרותי רצה ברקע: עונים עליה לבד, בלי לצרוך את התסריט של הבדיקה
+        // זיהוי מדינת הסופר רץ ברקע: עונים לבד
+        if ((reqBody.tools || []).some(t => t.name === 'submit_countries')) {
+          countryCalls.push(reqBody);
+          const C = { 'עמוס עוז': 'ישראל', 'עגנון': 'ישראל', 'הרוקי מורקמי': 'יפן', 'Haruki Murakami': 'יפן', 'ארנסט המינגוויי': 'ארצות הברית' };
+          const items = reqBody.messages[0].content.split('\n').map(l => l.replace(/^- /, '')).map(a => ({ author: a, country_he: C[a] || '' }));
+          return route.fulfill({ headers: { ...cors, 'content-type': 'text/event-stream' }, body: sse([{ type: 'tool_use', id: 'c1', name: 'submit_countries', input: { items } }], 'tool_use') });
+        }
         if ((reqBody.tools || []).some(t => t.name === 'submit_profile')) {
           profileCalls.push(reqBody);
           return route.fulfill({ headers: { ...cors, 'content-type': 'text/event-stream' }, body: sse([{ type: 'tool_use', id: 'p1', name: 'submit_profile', input: { profile_he: 'אוהב/ת: ספרות ישראלית וקלאסיקות.', brief_en: 'Likes Israeli literary fiction and classics.' } }], 'tool_use') });
@@ -485,6 +492,16 @@ try {
     // אחרי הצפייה: הכרטיס הבולט נעלם, ונשאר קישור צנוע "סיכום הקריאה"
     assert.equal(await A.locator('button.summary-card').count(), 0, 'big card gone after seen');
     await A.click('button.summary-link'); await rep.waitFor(); await rep.locator('button[aria-label="סגירה"]').click();
+  });
+  await step('country of each book: detected in the background, shown in stats, summary and the book list', async () => {
+    await A.click('nav >> text=ספרים שלי');
+    await A.waitForSelector('main li:has-text("יער נורווגי") >> text=יפן', { timeout: 20000 });
+    assert.ok(countryCalls.length >= 1 && countryCalls[0].model === 'claude-haiku-4-5-20251001', 'fast model');
+    await A.click('button:has-text("סטטיסטיקות")');
+    await A.waitForSelector('[aria-label="ספרים לפי מדינה"] >> text=יפן');
+    await A.click('button.summary-link'); const rep = A.locator('[role=dialog][aria-label="סיכום הקריאה"]');
+    await rep.locator('h3:has-text("מדינות")').waitFor(); await rep.locator('text=מ-2 מדינות').first().waitFor();
+    await rep.locator('button[aria-label="סגירה"]').click();
   });
   await step('user guide: from the top of every screen, search, jump to a topic, answers open on tap', async () => {
     await A.click('nav >> text=חברים');

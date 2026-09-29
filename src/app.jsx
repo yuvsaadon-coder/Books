@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '32';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '33';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -700,7 +700,7 @@ function sanitizeBook(b) {
     readAt: Number(b.readAt) || 0, startedAt: Number(b.startedAt) || 0,
     // נבחר מתוך המלצה: מתי ולמה, כדי לשאול אחר כך איך היה
     fromRec: b.fromRec && typeof b.fromRec === 'object' ? { at: Number(b.fromRec.at) || 0, why: str(b.fromRec.why).slice(0, 400), asked: Number(b.fromRec.asked) || 0 } : null,   // מתי נקרא (0 = לא הוזן; ברירת המחדל היא מועד ההוספה)
-    verifiedVia: str(b.verifiedVia), descSource: str(b.descSource),
+    verifiedVia: str(b.verifiedVia), descSource: str(b.descSource), country: str(b.country).slice(0, 40),
     ebook: !!b.ebook, ebookLink: str(b.ebookLink), olEbook: !!b.olEbook,
     note: str(b.note).slice(0, 4000), descriptionHe: str(b.descriptionHe), editedAt: Number(b.editedAt) || Number(b.addedAt) || 0,
     genres: arr(b.genres), sources: Array.isArray(b.sources) ? b.sources.filter(x => x && x.url).map(x => ({ title: str(x.title), url: str(x.url) })).slice(0, 8) : [],
@@ -1360,7 +1360,7 @@ function libraryForPrompt(books, n = 80) {
   const recent = rated.filter(b => b.readAt).sort((a, b) => b.readAt - a.readAt).slice(0, Math.ceil(n / 2));
   const best = rated.filter(b => !recent.includes(b)).sort((a, b) => b.rating - a.rating || (b.addedAt || 0) - (a.addedAt || 0)).slice(0, n - recent.length);
   const list = [...recent, ...best].sort((a, b) => (b.readAt || 0) - (a.readAt || 0));
-  return list.map(b => `- ${b.title}${b.year ? ` (${b.year})` : ''} — ${(b.authors || [])[0] || '?'} | ${b.rating} | ${whenReadForPrompt(b)}${statusOf(b) === 'partial' ? ' | stopped midway' : ''}${b.tags.length ? ' | ' + b.tags.slice(0, 3).join(', ') : ''}${b.note ? ' | ' + b.note.replace(/\s+/g, ' ').slice(0, 160) : ''}`).join('\n');
+  return list.map(b => `- ${b.title}${b.year ? ` (${b.year})` : ''} — ${(b.authors || [])[0] || '?'}${b.country ? ` [${b.country}]` : ''} | ${b.rating} | ${whenReadForPrompt(b)}${statusOf(b) === 'partial' ? ' | stopped midway' : ''}${b.tags.length ? ' | ' + b.tags.slice(0, 3).join(', ') : ''}${b.note ? ' | ' + b.note.replace(/\s+/g, ' ').slice(0, 160) : ''}`).join('\n');
 }
 // ציר הזמן של הקריאה: מה נקרא בחצי השנה האחרונה, בשנה-שנתיים שלפני, ומוקדם יותר
 function readingTimeline(books, now = Date.now()) {
@@ -1422,6 +1422,26 @@ async function aiClarify({ books, request, focus, profile, avoid = [], count = 0
   return (input.questions || []).filter(q => q.question && (q.options || []).length).slice(0, count || 4).map(q => ({ question: q.question, options: q.options.slice(0, 5) }));
 }
 
+// מאיזו מדינה הספר: לפי המדינה שהסופר/ת מזוהה/ת איתה. נקבע ברקע ע"י המודל המהיר, פעם אחת לכל סופר
+// בלי מודל: רק ספר מתויג 'ספרות ישראלית' (תרגום לעברית נראה כמו מקור עברי, כולל שם הסופר, ולכן לא מנחשים לפי שפה)
+const guessCountry = (b) => (b.tags || []).includes('ספרות ישראלית') ? 'ישראל' : '';
+async function aiCountries(authors) {
+  const { input } = await aiRun({
+    fast: true, web: false,
+    system: 'For each author, give the country they are mainly identified with as a writer (usually their country of citizenship or where they write), as the common Hebrew name of the country (e.g. ישראל, ארצות הברית, יפן, בריטניה, צרפת, רוסיה). Use the country as it is called today. If you are not sure who the author is, return an empty string.',
+    prompt: authors.map(a => '- ' + a).join('\n'),
+    submitTool: { name: 'submit_countries', description: 'Return the country for each author.',
+      input_schema: { type: 'object', additionalProperties: false, required: ['items'], properties: { items: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['author', 'country_he'], properties: { author: { type: 'string' }, country_he: { type: 'string' } } } } } } }
+  });
+  const out = {};
+  (input.items || []).forEach(x => { if (x && x.author && x.country_he && hasHebrew(x.country_he)) out[x.author] = x.country_he.trim().slice(0, 40); });
+  return out;
+}
+const countryMixText = (books) => {
+  const list = books.filter(b => isRated(b) && b.country);
+  if (list.length < 5) return '';
+  return countBy(list, b => b.country).slice(0, 8).map(([c, n]) => `${c} ${Math.round(n * 100 / list.length)}%`).join(', ');
+};
 const REC_TOOL = {
   name: 'submit_recommendations', description: 'Return the final recommendations.',
   input_schema: { type: 'object', additionalProperties: false, required: ['interpretation', 'recommendations'], properties: {
@@ -1431,9 +1451,10 @@ const REC_TOOL = {
         title_he: { type: 'string', description: 'exact title of a Hebrew edition you know exists; empty if none. Never translate a title yourself.' },
         title_original: { type: 'string' }, author: { type: 'string' }, isbn: { type: 'string', description: 'only if sure, else empty' },
         candidate: { type: 'integer', description: 'the number of the book in CANDIDATES, or 0 for a book of your own' },
-        why: { type: 'string' }, genres: { type: 'array', items: { type: 'string' } } } } } } }
+        why: { type: 'string' }, genres: { type: 'array', items: { type: 'string' } },
+        country: { type: 'string', description: 'the country the book comes from (the author\'s country), in Hebrew' } } } } } }
 };
-REC_TOOL.input_schema.properties.recommendations.items.required.push('candidate');
+REC_TOOL.input_schema.properties.recommendations.items.required.push('candidate', 'country');
 
 /* ---------- שכבה אלגוריתמית לפני ה-AI ----------
    לפני שפונים ל-Claude, האפליקציה אוספת בעצמה 30 ספרים אמיתיים (כבר מאומתים) שמתאימים לקורא, ומדרגת אותם לפי אותות:
@@ -1544,7 +1565,8 @@ function recRequestBase({ books, request, focus, qa, lang, exclude, dismissed, h
   const wishBlock = wish.length ? `\nWISHLIST (they already plan to read these; do not recommend them, but they show current interests): ${wish.slice(0, 40).map(b => b.title).join('; ')}` : '';
   const rejBlock = rejections.length ? `\nREJECTED RECOMMENDATIONS (do not recommend; learn from the reasons): ${rejections.slice(0, 30).map(x => `${x.title}${x.note ? ` (${x.note})` : ''}`).join('; ')}` : '';
   const fbBlock = feedback.length ? `\nRECENT FEEDBACK ON EARLIER SUGGESTIONS (may be a passing mood; weigh it for this request): ${feedback.slice(0, 5).map(x => `"${x.text}"`).join('; ')}` : '';
-  const mixBlock = (genreMix ? `\nGENRE MIX OF WHAT THEY READ: ${genreMix}` : '') + (giftFor ? '' : (() => { const t = readingTimeline(books); return t ? '\n' + t : ''; })());
+  const cMix = giftFor ? '' : countryMixText(books);
+  const mixBlock = (genreMix ? `\nGENRE MIX OF WHAT THEY READ: ${genreMix}` : '') + (cMix ? `\nCOUNTRIES OF WHAT THEY READ (by author): ${cMix}. Consider where the reader likes their books to come from; a book from a new country can be a good surprise when it fits the taste.` : '') + (giftFor ? '' : (() => { const t = readingTimeline(books); return t ? '\n' + t : ''; })());
   const friendsBlock = friendsLoved.length ? `\nLOVED BY THEIR FRIENDS (optional signal, not a must): ${friendsLoved.join('; ')}` : '';
   return {
     system: [
@@ -1641,7 +1663,7 @@ async function finishRecs({ input, cost, books, exclude, want = 5, onProgress, c
     const c = checked[i];
     if (recs.length >= want) return;
     if (!c || (heOnly && !isHebrewOrIsraeli(c)) || findInLibrary(c, books) || exclude.includes(c.key) || recs.some(x => x.key === c.key)) { rejected++; return; }
-    recs.push({ ...c, original: r.title_original && r.title_original !== c.title ? r.title_original : (c.subtitle || ''), reasons: [r.why], genres: r.genres, verifiedAt: Date.now(), verifiedVia: c.verifiedVia || (c.source === 'google' ? 'Google Books' : 'Open Library') });
+    recs.push({ ...c, country: c.country || r.country || '', original: r.title_original && r.title_original !== c.title ? r.title_original : (c.subtitle || ''), reasons: [r.why], genres: r.genres, verifiedAt: Date.now(), verifiedVia: c.verifiedVia || (c.source === 'google' ? 'Google Books' : 'Open Library') });
   });
   // הזמינות והתקציר מהחנויות נטענים אחר כך בכל כרטיס, כדי שההמלצות יופיעו מיד
   onProgress && onProgress(`אומתו ${recs.length} ספרים${rejected ? `; ${rejected} נפסלו (לא נמצאו במאגרים${heOnly ? ', אין מהדורה עברית' : ''}, או כבר אצלך)` : ''}. עלות משוערת: $${cost.toFixed(2)}`);
@@ -2616,6 +2638,7 @@ function LibraryStats({ books, onSummary }) {
   const topA = [...authors.entries()].filter(([, n]) => n > 1).sort((a, b) => b[1] - a[1]).slice(0, 5);
   const max = Math.max(1, ...gs.map(x => x.count));
   const tagIndex = (t) => Math.max(0, STARTER.findIndex(g => g.tag === t));
+  const countries = countBy(read, b => b.country);
   return (
     <section className="bg-surface border border-line rounded-2xl p-3 mb-3 grid gap-3" aria-label="סטטיסטיקות קריאה">
       <div>
@@ -2627,6 +2650,10 @@ function LibraryStats({ books, onSummary }) {
             <span className="tabular text-muted">{x.count} · {(x.sum / x.count).toFixed(1)}★</span>
           </li>))}</ul>
       </div>
+      {countries.length > 0 && <div>
+        <div className="text-[13px] font-semibold text-muted mb-1.5">לפי מדינה ({countries.length})</div>
+        <BarList label="ספרים לפי מדינה" rows={countries.slice(0, 8)} />
+      </div>}
       {ys.length > 0 && <div className="text-[13px]"><span className="font-semibold text-muted">לפי שנת קריאה: </span><span className="tabular">{ys.map(([y, n]) => `${y}: ${n}`).join(' · ')}</span></div>}
       {topA.length > 0 && <div className="text-[13px]"><span className="font-semibold text-muted">הסופרים שקראת הכי הרבה: </span>{topA.map(([a, n]) => `${a} (${n})`).join(' · ')}</div>}
       {onSummary && <Btn variant="soft" onClick={onSummary}><Icon name="Trophy" size={18} />הסיכום הדו-שבועי שלי</Btn>}
@@ -2790,7 +2817,7 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
               <Cover book={b} className="w-14 h-20" />
               <div className="min-w-0 flex-1">
                 <div className="font-display font-medium text-[17px] leading-snug clamp-2">{b.title}</div>
-                <div className="text-muted text-[14px] truncate">{[b.authors.join(', '), b.publisher, b.year].filter(Boolean).join(' · ')}</div>
+                <div className="text-muted text-[14px] truncate">{[b.authors.join(', '), b.country, b.year].filter(Boolean).join(' · ')}</div>
                 {statusOf(b) === 'read' || b.rating > 0 ? <div className="mt-1"><Stars value={b.rating} size={15} /></div>
                   : <div className={`mt-1 text-[12px] font-semibold inline-flex items-center gap-1 px-2 py-0.5 rounded-full ${STATUS_TONE[statusOf(b)] || ''}`}><Icon name={(STATUSES.find(x => x[0] === statusOf(b)) || [])[2]} size={13} />{(STATUSES.find(x => x[0] === statusOf(b)) || [])[1]}</div>}
                 {b.tags.length > 0 && <div className="flex flex-wrap gap-1 mt-1.5">{b.tags.slice(0, 4).map(t => <span key={t} className="text-[12px] px-2 py-0.5 rounded-full bg-surface2 text-muted font-semibold">{t}</span>)}{b.tags.length > 4 && <span className="text-[12px] text-muted">+{b.tags.length - 4}</span>}</div>}
@@ -3816,7 +3843,7 @@ function RecCard({ r, onRead, onWant, onDismiss, inLib, onEnrich }) {
         <div className="min-w-0 flex-1">
           <div className="font-display font-medium text-[18px] leading-snug">{r.title}</div>
           <div className="text-[15px]">{r.authors.join(', ')}</div>
-          <div className="text-muted text-[13px] tabular">{[r.year, r.pageCount ? r.pageCount + ' עמ\'' : '', langLabel(r.language)].filter(Boolean).join(' · ')}</div>
+          <div className="text-muted text-[13px] tabular">{[r.year, r.country, r.pageCount ? r.pageCount + ' עמ\'' : '', langLabel(r.language)].filter(Boolean).join(' · ')}</div>
           <div className="mt-1.5 flex flex-wrap gap-1 items-center"><SourceBadge book={r} /><span className="text-[12px] text-muted">{fmtDateTime(r.verifiedAt)}</span></div>
         </div>
       </div>
@@ -3982,7 +4009,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
     language: r.language, isbns: (r.isbns || []).slice(0, 3), link: r.link, publisher: r.publisher || '', reasons: r.reasons || [],
     verifiedAt: r.verifiedAt, verifiedVia: r.verifiedVia || '', ebook: !!r.ebook, ebookLink: r.ebookLink || '', olEbook: !!r.olEbook,
     sources: r.sources || [], aiFormats: r.aiFormats || null, genres: r.genres || [], descSource: r.descSource || '', descriptionHe: (r.descriptionHe || '').slice(0, 1500),
-    offers: (r.offers || []).slice(0, 8), availability: r.availability || null, reviews: r.reviews || null, original: r.original || ''
+    offers: (r.offers || []).slice(0, 8), availability: r.availability || null, reviews: r.reviews || null, original: r.original || '', country: r.country || ''
   });
   const saveSession = (ans, usedLang, allRecs) => {
     if (!st.session.id) st.session = { id: uid(), at: Date.now() };
@@ -5326,7 +5353,7 @@ function summaryStats(books, now = Date.now(), period = '14') {
     decades, oldest: withYear[0] || null, newest: withYear[withYear.length - 1] || null,
     shortest: withPages[0] || null, longest: withPages[withPages.length - 1] || null, avgPages: withPages.length ? Math.round(withPages.reduce((a, b) => a + b.pageCount, 0) / withPages.length) : 0,
     authors, newAuthors: authors.filter(([a]) => !before.has(a)).length, ratings: [5, 4, 3, 2, 1].map(r => [r, ratedL.filter(b => b.rating === r).length]),
-    langs: countBy(finished, langKind), pace, perMonth: finished.length / (days / 30.4),
+    langs: countBy(finished, langKind), countries: countBy(finished, b => b.country), pace, perMonth: finished.length / (days / 30.4),
     prevCount: prev ? prev.length : null, prevPages: prev ? prev.filter(b => statusOf(b) === 'read').reduce((a, b) => a + (b.pageCount || 0), 0) : null,
     total: books.filter(isRated).length, year: books.filter(b => isRated(b) && b.readAt && new Date(b.readAt).getFullYear() === new Date(now).getFullYear()).length };
   s.type = readerType(s);
@@ -5356,6 +5383,7 @@ async function summaryImage(s) {
   if (s.top) section('הספר של התקופה', [`${s.top.title}${(s.top.authors || [])[0] ? ` / ${s.top.authors[0]}` : ''}${s.top.rating ? ' · ' + '★'.repeat(s.top.rating) : ''}`]);
   section('סוגות', s.genres.slice(0, 3).map(g => `${g.name} · ${g.n}`));
   section('מתי נכתבו', s.decades.slice(-3).map(([d, n]) => `שנות ה-${d} · ${n}`));
+  if (s.countries.length) section('מדינות', [s.countries.slice(0, 4).map(([c, n]) => `${c} ${n}`).join(' · ')]);
   if (s.authors[0]) section('סופרים', [`${s.authors.length} סופרים, ${s.newAuthors} חדשים לספרייה`]);
   text(s.type.name, 1760, 64, 700, accent); text('מה שנקרא', 1850, 34, 400, muted);
   return new Promise(r => c.toBlob(r, 'image/png'));
@@ -5491,6 +5519,10 @@ function SummaryStory({ db, onClose, onOpenDigest, notify }) {
               {s.shortest && s.shortest !== s.longest && <div><span className="text-muted">הקצר ביותר: </span>{bookLine(s.shortest, s.shortest.pageCount + ' עמ\'')}</div>}
             </div>
           </ReportCard>}
+          {s.countries.length > 0 && <ReportCard title="מדינות" icon="Globe">
+            <p className="text-[14px]">{s.countries.length === 1 ? `כל הספרים מ${s.countries[0][0]}.` : `ספרים מ-${s.countries.length} מדינות.`}</p>
+            {s.countries.length > 1 && <BarList label="ספרים לפי מדינה" rows={s.countries.slice(0, 8)} />}
+          </ReportCard>}
           {s.langs.length > 0 && <ReportCard title="שפה ומקור" icon="Languages"><BarList label="לפי שפה ומקור" rows={s.langs.map(([k, n]) => [LANG[k], n])} /></ReportCard>}
           {s.finished.length > 0 && s.pace.length > 1 && <ReportCard title="קצב לאורך התקופה" icon="ChartColumn"><BarList label="ספרים לפי זמן" rows={s.pace.map(p => [p.label, p.n])} /></ReportCard>}
           {(s.started.length > 0 || s.wanted.length > 0 || s.partial > 0) && <ReportCard title="ועוד" icon="Bookmark">
@@ -5522,7 +5554,8 @@ const GUIDE = [
     ['איך מסמנים שסיימתי ספר?', 'בספר שנמצא ב"קורא עכשיו" יש כפתור "סיימתי". בוחרים מתי (היום, אתמול או חודש) ומדרגים.'],
     ['איך עורכים או מוחקים ספר?', 'לוחצים על הספר, ובחלון שנפתח בוחרים "עריכה" או "מחיקה".'],
     ['אפשר לראות את הספרים כקוביות?', 'כן. ליד החיפוש יש מתג בין רשימה לקוביות, ותפריט מיון (חדשים, מתי קראתי, שנת הוצאה, דירוג, א–ת).'],
-    ['איפה הסטטיסטיקות?', 'בראש "הספרים שלי": מספר הספרים, הדירוג הממוצע, האהובים והשנה, ו"סטטיסטיקות לפי ז\'אנר" עם פירוט לפי סוגה, שנה וסופר.']] },
+    ['איפה הסטטיסטיקות?', 'בראש "הספרים שלי": מספר הספרים, הדירוג הממוצע, האהובים והשנה, ו"סטטיסטיקות לפי ז\'אנר" עם פירוט לפי סוגה, מדינה, שנה וסופר.'],
+    ['מאיפה יודעים מאיזו מדינה כל ספר?', 'המדינה נקבעת לפי הסופר/ת, אוטומטית ברקע. המדינה מופיעה ליד הספר, בסטטיסטיקות ובסיכום, וההמלצות מתחשבות בה.']] },
   { id: 'add', title: 'הוספת ספרים', icon: 'BookPlus', intro: 'שלוש דרכים להוסיף: ספר אחד, רשימה, או טקסט חופשי. רק ספרים שנמצאו במאגרים נכנסים לספרייה.', qa: [
     ['איך מוסיפים ספר אחד?', 'בלשונית "הוספת ספר" כותבים שם בעברית או באנגלית, ISBN או קישור לדף הספר. בוחרים את הספר (ואם רוצים, את המהדורה המדויקת), ואז את המדף והדירוג.'],
     ['יש לי רשימה של הרבה ספרים', 'בוחרים "רשימה" ומדביקים ספר בכל שורה (אפשר להוסיף מחבר אחרי מקף). עוברים על הספרים אחד אחרי השני, ואפשר לדייק או לחפש מחדש.'],
@@ -5746,6 +5779,25 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
       }
       heBusy.current = false;
     })();
+  }, [db.books]);
+
+  // מדינת המקור של כל ספר: "ספרות ישראלית" = ישראל מיד; לשאר הסופרים שואלים את המודל המהיר ברקע (עד 40 סופרים בפעם, כל סופר פעם אחת)
+  const countryBusy = useRef(false);
+  useEffect(() => {
+    if (countryBusy.current) return;
+    const quick = db.books.filter(b => !b.country && guessCountry(b));
+    if (quick.length) { update(d => ({ ...d, books: d.books.map(b => !b.country && guessCountry(b) ? { ...b, country: guessCountry(b) } : b) })); return; }
+    if (!aiAvailable()) return;
+    let checked = {};
+    try { checked = JSON.parse(localStorage.getItem('vrt-country-checked') || '{}') || {}; } catch (e) { /* */ }
+    const authors = uniq(db.books.filter(b => !b.country && (b.authors || [])[0]).map(b => b.authors[0])).filter(a => !checked[a]).slice(0, 40);
+    if (!authors.length) return;
+    countryBusy.current = true;
+    aiCountries(authors).then(found => {
+      authors.forEach(a => { checked[a] = 1; });
+      try { localStorage.setItem('vrt-country-checked', JSON.stringify(checked)); } catch (e) { /* */ }
+      if (Object.keys(found).length) update(d => ({ ...d, books: d.books.map(b => !b.country && found[(b.authors || [])[0]] ? { ...b, country: found[b.authors[0]] } : b) }));
+    }).catch(() => {}).finally(() => { countryBusy.current = false; });
   }, [db.books]);
 
   const notify = (t) => {
