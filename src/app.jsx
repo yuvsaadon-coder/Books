@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '30';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '31';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -1345,9 +1345,38 @@ async function aiTranslate(text) {
 }
 
 // 4. המלצות: המודל קורא את הספרייה, מחפש ביקורות וניתוחים באתרים המאושרים, וחושב
+// מתי נקרא, ביחס להיום: כך המודל רואה את ההתפתחות של הטעם (מה עניין אותו פעם ומה עכשיו)
+function whenReadForPrompt(b, now = Date.now()) {
+  if (!b.readAt) return 'read: date unknown (marked from memory, likely years ago)';
+  const days = Math.max(0, Math.round((now - b.readAt) / 86400000));
+  const y = new Date(b.readAt).getFullYear();
+  if (days < 45) return `read ${days <= 1 ? 'in the last days' : days + ' days ago'}`;
+  if (days < 540) return `read ${Math.round(days / 30)} months ago (${y})`;
+  return `read ${Math.round(days / 365)} years ago (${y})`;
+}
+// קודם הספרים האחרונים שנקראו (הטעם העכשווי), ואז המדורגים הגבוהים; הרשימה ממוינת מהחדש לישן
 function libraryForPrompt(books, n = 80) {
-  const list = books.filter(isRated).sort((a, b) => b.rating - a.rating || (b.addedAt || 0) - (a.addedAt || 0)).slice(0, n);
-  return list.map(b => `- ${b.title}${b.year ? ` (${b.year})` : ''} — ${(b.authors || [])[0] || '?'} | ${b.rating} | read ${new Date(b.readAt || b.addedAt || Date.now()).getFullYear()}${statusOf(b) === 'partial' ? ' | stopped midway' : ''}${b.tags.length ? ' | ' + b.tags.slice(0, 3).join(', ') : ''}${b.note ? ' | ' + b.note.replace(/\s+/g, ' ').slice(0, 160) : ''}`).join('\n');
+  const rated = books.filter(isRated);
+  const recent = rated.filter(b => b.readAt).sort((a, b) => b.readAt - a.readAt).slice(0, Math.ceil(n / 2));
+  const best = rated.filter(b => !recent.includes(b)).sort((a, b) => b.rating - a.rating || (b.addedAt || 0) - (a.addedAt || 0)).slice(0, n - recent.length);
+  const list = [...recent, ...best].sort((a, b) => (b.readAt || 0) - (a.readAt || 0));
+  return list.map(b => `- ${b.title}${b.year ? ` (${b.year})` : ''} — ${(b.authors || [])[0] || '?'} | ${b.rating} | ${whenReadForPrompt(b)}${statusOf(b) === 'partial' ? ' | stopped midway' : ''}${b.tags.length ? ' | ' + b.tags.slice(0, 3).join(', ') : ''}${b.note ? ' | ' + b.note.replace(/\s+/g, ' ').slice(0, 160) : ''}`).join('\n');
+}
+// ציר הזמן של הקריאה: מה נקרא בחצי השנה האחרונה, בשנה-שנתיים שלפני, ומוקדם יותר
+function readingTimeline(books, now = Date.now()) {
+  const rated = books.filter(isRated);
+  const bands = [['last 6 months', 0, 183], ['6-24 months ago', 183, 730], ['more than 2 years ago', 730, 1e9]];
+  const lines = bands.map(([label, from, to]) => {
+    const list = rated.filter(b => b.readAt && (now - b.readAt) / 86400000 >= from && (now - b.readAt) / 86400000 < to);
+    if (!list.length) return '';
+    const g = new Map(); list.forEach(b => { const [t] = classifyBook(b); if (t) g.set(t, (g.get(t) || 0) + 1); });
+    const top = [...g.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([t, c]) => `${GENRE_OF_TAG[t] || t} ${c}`).join(', ');
+    const avg = (list.reduce((a, b) => a + b.rating, 0) / list.length).toFixed(1);
+    return `${label}: ${list.length} books, avg ${avg}${top ? `, mostly ${top}` : ''}`;
+  }).filter(Boolean);
+  const unknown = rated.filter(b => !b.readAt).length;
+  if (unknown) lines.push(`date unknown (marked from memory): ${unknown} books`);
+  return lines.length ? `READING TIMELINE (today is ${new Date(now).toISOString().slice(0, 10)}):\n${lines.join('\n')}` : '';
 }
 function historyForPrompt(history, books) {
   return (history || []).slice(0, 6).map(h => {
@@ -1382,7 +1411,7 @@ async function aiClarify({ books, request, focus, profile, avoid = [], count = 0
   const { input } = await aiRun({
     fast: true, web: false,
     system: (count ? `You help a reader find their next book. Ask exactly ${count} new short follow-up question, different from the questions listed under ALREADY ASKED,` : 'You help a reader find their next book. Before recommending, ask 2 to 4 short follow-up questions') + ' that would most change which books you pick, given their library and request. Do not ask what they already answered. Each question gets 2–5 short answer options. ' + HEBREW_OUT + addressRule(addressOf()),
-    prompt: `${gift ? 'GIFT MODE: the book is a gift for someone else, described in the request. Ask about the recipient (age, what they like to read, occasion), not about the user.' : profile && profile.text ? `READER PROFILE:\n${profile.brief || profile.text}` : `READER'S LIBRARY (title (published) — author | rating 1-5 | year read | tags | notes):\n${libraryForPrompt(books).split('\n').slice(0, 40).join('\n') || '(empty)'}`}\n\nREQUEST: ${request || '(none)'}\nPREFERENCES: ${focusSummary(focus).join('; ') || '(none)'}${avoid.length ? `\nALREADY ASKED: ${avoid.join(' | ')}` : ''}`,
+    prompt: `${gift ? 'GIFT MODE: the book is a gift for someone else, described in the request. Ask about the recipient (age, what they like to read, occasion), not about the user.' : profile && profile.text ? `READER PROFILE:\n${profile.brief || profile.text}` : `READER'S LIBRARY (title (published) — author | rating 1-5 | when read | tags | notes):\n${libraryForPrompt(books).split('\n').slice(0, 40).join('\n') || '(empty)'}`}\n\nREQUEST: ${request || '(none)'}\nPREFERENCES: ${focusSummary(focus).join('; ') || '(none)'}${avoid.length ? `\nALREADY ASKED: ${avoid.join(' | ')}` : ''}`,
     submitTool: {
       name: 'submit_questions', description: 'Return 2 to 4 follow-up questions.',
       input_schema: { type: 'object', additionalProperties: false, required: ['questions'], properties: {
@@ -1468,7 +1497,7 @@ const slimCandidate = (c) => ({ title: c.title, author: c.author, signals: c.sig
 const PROFILE_TOOL = {
   name: 'submit_profile', description: 'Return the literary profile.',
   input_schema: { type: 'object', additionalProperties: false, required: ['profile_he', 'brief_en'], properties: {
-    profile_he: { type: 'string', description: 'the reader\'s literary profile in Hebrew, 120-220 words, as short labelled lines: אוהב/ת, פחות מתחבר/ת, סופרים, נושאים ורגש, סגנון וקצב, מה לא להציע' },
+    profile_he: { type: 'string', description: 'the reader\'s literary profile in Hebrew, 130-240 words, as short labelled lines: אוהב/ת, פחות מתחבר/ת, סופרים, נושאים ורגש, סגנון וקצב, התפתחות לאורך הזמן (מה קרא/ה פעם לעומת לאחרונה), מה לא להציע' },
     brief_en: { type: 'string', description: 'the same profile compressed for another model, in English, at most 120 words, dense and specific' } } }
 };
 const changedSince = (db, at) => db.books.filter(b => (b.editedAt || b.addedAt || 0) > at);
@@ -1487,11 +1516,11 @@ async function aiBuildProfile(db) {
   const fbs = (db.feedback || []).filter(x => !p || (x.at || 0) > p.at).slice(0, 20).map(x => `"${x.text}"${x.request ? ` (when asking for: ${x.request})` : ''}`).join('; ');
   const fb = fbs ? `\nFEEDBACK THE READER GAVE ON RECOMMENDATIONS: ${fbs}\nTreat feedback carefully: a single remark may reflect a passing mood or a specific request. Turn it into a lasting trait only if it repeats or matches their ratings; otherwise record it as a situational preference (e.g. "sometimes wants lighter books").` : '';
   const prompt = p && p.text
-    ? `CURRENT PROFILE:\n${p.text}${note}${fb}\n\nCHANGES SINCE IT WAS WRITTEN (title (published) — author | rating | year read | tags | notes):\n${libraryForPrompt(changedSince(db, p.at), 60) || '(none)'}${wish ? `\nWISHLIST NOW: ${wish}` : ''}${rej ? `\nREJECTED RECOMMENDATIONS WITH REASONS: ${rej}` : ''}\n\nUpdate the profile: keep what still holds, add what the changes show.`
-    : `READER'S LIBRARY (title (published) — author | rating 1-5 | year read | tags | notes):\n${libraryForPrompt(db.books, 200)}${note}${fb}${wish ? `\nWISHLIST: ${wish}` : ''}${rej ? `\nREJECTED RECOMMENDATIONS WITH REASONS: ${rej}` : ''}\n\nWrite the profile.`;
+    ? `CURRENT PROFILE:\n${p.text}${note}${fb}\n\n${readingTimeline(db.books)}\n\nCHANGES SINCE IT WAS WRITTEN (title (published) — author | rating | when read | tags | notes):\n${libraryForPrompt(changedSince(db, p.at), 60) || '(none)'}${wish ? `\nWISHLIST NOW: ${wish}` : ''}${rej ? `\nREJECTED RECOMMENDATIONS WITH REASONS: ${rej}` : ''}\n\nUpdate the profile: keep what still holds, add what the changes show.`
+    : `${readingTimeline(db.books)}\n\nREADER'S LIBRARY (title (published) — author | rating 1-5 | when read | tags | notes):\n${libraryForPrompt(db.books, 200)}${note}${fb}${wish ? `\nWISHLIST: ${wish}` : ''}${rej ? `\nREJECTED RECOMMENDATIONS WITH REASONS: ${rej}` : ''}\n\nWrite the profile.`;
   const { input, cost } = await aiRun({
     fast: true, web: false, prompt, submitTool: PROFILE_TOOL,
-    system: 'You are a literary advisor. Build a concise, specific literary taste profile of this reader from what they read, how they rated it, their notes, their wishlist and the recommendations they rejected (with reasons). Name authors, themes, qualities of writing, emotional register and pace. profile_he is written in Hebrew for the reader; brief_en is in English for another model.' + addressRule(db.settings && db.settings.address)
+    system: 'You are a literary advisor. Build a concise, specific literary taste profile of this reader from what they read, how they rated it, their notes, their wishlist and the recommendations they rejected (with reasons). Name authors, themes, qualities of writing, emotional register and pace. Each book says when it was read relative to today: describe how the taste has evolved (what they read years ago versus lately), treat recent reading as the best sign of current interests, and older favourites as lasting taste. profile_he is written in Hebrew for the reader; brief_en is in English for another model.' + addressRule(db.settings && db.settings.address)
   });
   return { text: input.profile_he, brief: input.brief_en, at: Date.now(), count: db.books.length, cost };
 }
@@ -1509,17 +1538,18 @@ function recRequestBase({ books, request, focus, qa, lang, exclude, dismissed, h
   const read = books.filter(isRated), wish = books.filter(b => ['want', 'reading'].includes(statusOf(b)) && !(b.tags || []).includes('מתנה'));   // ספרי מתנה לא מעידים על הטעם שלי
   const recent = profile ? libraryForPrompt(read.filter(b => (b.editedAt || b.addedAt || 0) > profile.at), 25) : '';
   const readerBlock = profile && profile.text
-    ? `READER PROFILE (built from their whole library):\n${profile.brief || profile.text}${recent ? `\n\nADDED OR CHANGED SINCE THE PROFILE (title (published) — author | rating | year read | tags | notes):\n${recent}` : ''}`
+    ? `READER PROFILE (built from their whole library):\n${profile.brief || profile.text}${recent ? `\n\nADDED OR CHANGED SINCE THE PROFILE (title (published) — author | rating | when read | tags | notes):\n${recent}` : ''}`
     : giftFor ? 'GIFT MODE: the user is choosing a book as a gift for someone else. Recommend for the recipient described in the REQUEST and FOLLOW-UP ANSWERS, not for the user. Prefer well-loved, giftable books.'
-    : `READER'S LIBRARY (title (published) — author | rating 1-5 | year read | tags | notes):\n${libraryForPrompt(read) || '(empty)'}`;
+    : `READER'S LIBRARY (title (published) — author | rating 1-5 | when read | tags | notes):\n${libraryForPrompt(read) || '(empty)'}`;
   const wishBlock = wish.length ? `\nWISHLIST (they already plan to read these; do not recommend them, but they show current interests): ${wish.slice(0, 40).map(b => b.title).join('; ')}` : '';
   const rejBlock = rejections.length ? `\nREJECTED RECOMMENDATIONS (do not recommend; learn from the reasons): ${rejections.slice(0, 30).map(x => `${x.title}${x.note ? ` (${x.note})` : ''}`).join('; ')}` : '';
   const fbBlock = feedback.length ? `\nRECENT FEEDBACK ON EARLIER SUGGESTIONS (may be a passing mood; weigh it for this request): ${feedback.slice(0, 5).map(x => `"${x.text}"`).join('; ')}` : '';
-  const mixBlock = genreMix ? `\nGENRE MIX OF WHAT THEY READ: ${genreMix}` : '';
+  const mixBlock = (genreMix ? `\nGENRE MIX OF WHAT THEY READ: ${genreMix}` : '') + (giftFor ? '' : (() => { const t = readingTimeline(books); return t ? '\n' + t : ''; })());
   const friendsBlock = friendsLoved.length ? `\nLOVED BY THEIR FRIENDS (optional signal, not a must): ${friendsLoved.join('; ')}` : '';
   return {
     system: [
       'You are a literary advisor with deep knowledge of world and Israeli literature. Recommend books this specific reader will love.',
+      'Books are listed with when they were read relative to today. Recent reading shows current interests and where the reader\'s taste is heading; older reading shows lasting taste. Weigh recent reading more, and follow the direction the taste is developing in.',
       'Think about the reader: what their highly rated books and notes have in common (themes, voice, structure, emotional register, pace, setting), and what they rated low. Follow their stated preferences and answers closely.',
       'Choose from your own knowledge of the books, their critical reception and literary analyses. Prefer well-regarded books over merely popular ones when the reader\'s taste is literary, unless they asked for well-known books. Decide quickly.',
       'You have no web access. Every book you name is checked afterwards against the National Library of Israel catalogue, Google Books, Open Library and the Israeli stores and publishers; books that are not found are dropped, so name only real, published books.',
@@ -2611,7 +2641,7 @@ function StarterPrompt({ db, update, onOpen }) {
   return (
     <section className="bg-surface border border-line rounded-2xl p-3.5 mb-3 grid gap-2.5" aria-label="בחירה מרשימת ספרים מוכרים">
       <div className="flex items-start gap-3">
-        <span className="w-10 h-10 rounded-xl grid place-items-center shrink-0 text-white" style={{ background: 'linear-gradient(140deg, var(--brass), var(--rose))' }}><Icon name="ListChecks" size={20} /></span>
+        <span className="w-10 h-10 rounded-xl grid place-items-center shrink-0 bg-accentSoft text-accent"><Icon name="ListChecks" size={20} /></span>
         <div className="min-w-0">
           <h2 className="font-bold text-[16px] leading-tight">היכרות מהירה עם הטעם שלך</h2>
           <p className="text-[13.5px] text-muted mt-0.5">{T('סימון מהיר של ספרים מוכרים מתוך 400, לפי ז\'אנרים. כך ההמלצות מדויקות יותר כבר מההתחלה.')}</p>
@@ -2693,10 +2723,10 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
       <div className="grid grid-cols-2 gap-2 mb-3" role="tablist" aria-label="מדף">
         {STATUSES.map(([k, l, ic]) => (
           <button key={k} type="button" role="tab" aria-selected={shelf === k} onClick={() => { setShelf(k); setTag(''); }}
-            className={`shelf-tab min-h-[46px] rounded-xl font-semibold text-[14px] inline-flex items-center justify-start gap-2 px-3 border transition-all ${shelf === k ? 'is-on border-transparent text-white' : 'bg-surface border-line text-ink'}`}
-            style={shelf === k ? { background: `linear-gradient(135deg, ${STATUS_COLOR[k]}, color-mix(in srgb, ${STATUS_COLOR[k]} 70%, #000))` } : undefined}>
-            <span className={`w-7 h-7 rounded-lg grid place-items-center shrink-0 ${shelf === k ? 'bg-white/20' : ''}`} style={shelf === k ? undefined : { color: STATUS_COLOR[k], background: `color-mix(in srgb, ${STATUS_COLOR[k]} 13%, transparent)` }}><Icon name={ic} size={16} /></span>
-            <span className="flex-1 text-right truncate">{l}</span><span className={`tabular text-[13px] ${shelf === k ? 'opacity-90' : 'text-muted'}`}>{byShelf(k).length}</span>
+            className={`shelf-tab min-h-[46px] rounded-xl font-semibold text-[14px] inline-flex items-center justify-start gap-2 px-3 border-2 bg-surface text-ink ${shelf === k ? '' : 'border-line'}`}
+            style={shelf === k ? { borderColor: STATUS_COLOR[k], background: `color-mix(in srgb, ${STATUS_COLOR[k]} 9%, var(--surface))` } : undefined}>
+            <span className="w-7 h-7 rounded-lg grid place-items-center shrink-0" style={{ color: STATUS_COLOR[k], background: `color-mix(in srgb, ${STATUS_COLOR[k]} 13%, transparent)` }}><Icon name={ic} size={16} /></span>
+            <span className="flex-1 text-right truncate">{l}</span><span className="tabular text-[13px] text-muted">{byShelf(k).length}</span>
           </button>
         ))}
       </div>
@@ -2751,7 +2781,7 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
           <li key={b.id} className="relative">
             <button type="button" onClick={() => { setOpen(b.id); setConfirmDel(false); }}
               className="w-full text-right flex gap-3 p-3 bg-surface border border-line rounded-xl active:bg-surface2 transition-colors overflow-hidden relative">
-              <span aria-hidden="true" className="absolute right-0 inset-y-0 w-1" style={{ background: spineColor(b) }} />
+              <span aria-hidden="true" className="absolute right-0 inset-y-0 w-1 opacity-60" style={{ background: spineColor(b) }} />
               <Cover book={b} className="w-14 h-20" />
               <div className="min-w-0 flex-1">
                 <div className="font-display font-medium text-[17px] leading-snug clamp-2">{b.title}</div>
@@ -4268,6 +4298,90 @@ async function copyText(text, fallbackEl) {
 
 // הסנכרון אוטומטי; מוצג רק כשיש בעיה שהמשתמש צריך לדעת עליה
 // מצב קורא אלקטרוני: הגדרה של המכשיר הזה בלבד (לא מסתנכרנת), כי היא תלויה במסך
+// ערכות עיצוב ספרותיות: [מזהה, שם, צבע הדגשה, רקע] ("מתחלף": ערכה אחרת בכל יום)
+const PALETTES = [['paper', 'נייר וקלף', '#8A3B2B', '#F4EEE3'], ['library', 'ספרייה ישנה', '#2E5B45', '#EDEFE7'], ['ink', 'דיו כחול', '#2C4677', '#F2F2EE'], ['stone', 'אבן ירושלמית', '#5E5E26', '#F1EADC']];
+const FONT_CHOICES = [['frank', 'פרנק רוהל', '"Frank Ruhl Libre", serif'], ['david', 'דוד', '"David Libre", serif'], ['assistant', 'אסיסטנט', 'Assistant, sans-serif'], ['alef', 'אלף', 'Alef, sans-serif']];
+const ZOOMS = [0.9, 1, 1.1, 1.2, 1.35, 1.5];
+const paletteOf = (st) => (st.palette === 'rotate' ? PALETTES[Math.floor(Date.now() / 86400000) % PALETTES.length][0] : st.palette) || 'paper';
+const zoomOf = (st) => Math.max(Number(st.zoom) || 1, st.a11y ? 1.15 : 0);
+function applyLook(st) {
+  const R = document.documentElement, pal = paletteOf(st);
+  pal === 'paper' ? R.removeAttribute('data-palette') : R.setAttribute('data-palette', pal);
+  const dark = st.theme === 'dark' || (st.theme !== 'light' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
+  dark ? R.setAttribute('data-mode', 'dark') : R.removeAttribute('data-mode');
+  st.font && st.font !== 'frank' ? R.setAttribute('data-font', st.font) : R.removeAttribute('data-font');
+  st.a11y ? R.setAttribute('data-a11y', '') : R.removeAttribute('data-a11y');
+  R.style.setProperty('--zoom', String(zoomOf(st)));
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', getComputedStyle(R).getPropertyValue('--bg').trim() || '#F4EEE3');
+  try { localStorage.setItem('vrt-look', JSON.stringify({ palette: pal, mode: st.theme || 'system', font: st.font || '', zoom: zoomOf(st), a11y: !!st.a11y })); } catch (e) { /* */ }
+}
+function LookSettings({ db, update }) {
+  const st = db.settings;
+  const set = (patch) => update(d => ({ ...d, settings: { ...d.settings, ...patch } }));
+  const zi = Math.max(0, ZOOMS.indexOf(Number(st.zoom) || 1));
+  return (
+    <div className="grid gap-4">
+      <div>
+        <div className="text-[14px] text-muted mb-1.5">ערכת עיצוב</div>
+        <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="ערכת עיצוב">
+          {[...PALETTES, ['rotate', 'מתחלף כל יום', null, null]].map(([k, l, ac, bg]) => {
+            const on = (st.palette || 'paper') === k;
+            return (
+              <button key={k} type="button" role="radio" aria-checked={on} onClick={() => set({ palette: k })}
+                className={`min-h-[52px] rounded-xl border-2 px-2.5 flex items-center gap-2 text-right ${on ? 'border-accent' : 'border-line'} bg-surface`}>
+                <span className="w-8 h-8 rounded-full shrink-0 border border-line grid place-items-center overflow-hidden" style={{ background: bg || 'conic-gradient(#8A3B2B 0 25%, #2E5B45 0 50%, #2C4677 0 75%, #5E5E26 0)' }}>
+                  {ac && <span className="w-3.5 h-3.5 rounded-full" style={{ background: ac }} />}</span>
+                <span className="text-[14px] font-semibold leading-tight">{l}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div>
+        <div className="text-[14px] text-muted mb-1.5">בהיר או כהה</div>
+        <div className="flex gap-2 flex-wrap">
+          {[['system', 'לפי המכשיר', 'Monitor'], ['light', 'בהיר', 'Sun'], ['dark', 'כהה', 'Moon']].map(([k, l, ic]) => (
+            <Chip key={k} active={(st.theme || 'system') === k} onClick={() => set({ theme: k })}><span className="inline-flex items-center gap-1.5"><Icon name={ic} size={16} />{l}</span></Chip>
+          ))}
+        </div>
+      </div>
+      <div>
+        <div className="text-[14px] text-muted mb-1.5">גופן</div>
+        <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="גופן">
+          {FONT_CHOICES.map(([k, l, fam]) => {
+            const on = (st.font || 'frank') === k;
+            return <button key={k} type="button" role="radio" aria-checked={on} onClick={() => set({ font: k })} style={{ fontFamily: fam }}
+              className={`min-h-[52px] rounded-xl border-2 px-3 text-right ${on ? 'border-accent' : 'border-line'} bg-surface`}>
+              <span className="block text-[17px] leading-tight">{l}</span><span className="block text-[13px] text-muted">מה שנקרא, ספר טוב</span></button>;
+          })}
+        </div>
+      </div>
+      <div>
+        <div className="text-[14px] text-muted mb-1.5">גודל הטקסט</div>
+        <div className="flex items-center gap-2">
+          <button type="button" aria-label="הקטנת הטקסט" disabled={zi <= 0} onClick={() => set({ zoom: ZOOMS[zi - 1] })} className="w-12 h-12 rounded-xl border border-line bg-surface font-bold text-[15px] disabled:opacity-40">א-</button>
+          <div className="flex-1 text-center tabular font-semibold" aria-live="polite">{Math.round(zoomOf(st) * 100)}%</div>
+          <button type="button" aria-label="הגדלת הטקסט" disabled={zi >= ZOOMS.length - 1} onClick={() => set({ zoom: ZOOMS[zi + 1] })} className="w-12 h-12 rounded-xl border border-line bg-surface font-bold text-[19px] disabled:opacity-40">א+</button>
+        </div>
+      </div>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-[15px] font-semibold">מצב נגישות</div>
+          <div className="text-[13px] text-muted">ניגודיות גבוהה, טקסט גדול יותר (לפחות 115%), קישורים מסומנים בקו, מסגרת מיקוד בולטת, בלי אנימציות ואזורי לחיצה גדולים. לפי תקן הנגישות הישראלי (ת"י 5568) ו-WCAG 2.0 AA.</div>
+        </div>
+        <button type="button" role="switch" aria-checked={!!st.a11y} aria-label="מצב נגישות" onClick={() => set({ a11y: !st.a11y })}
+          className={`shrink-0 w-14 h-8 rounded-full relative transition-colors ${st.a11y ? 'bg-accent' : 'bg-surface2 border border-line'}`}>
+          <span className={`absolute top-1 w-6 h-6 rounded-full bg-surface shadow transition-all ${st.a11y ? 'left-1' : 'right-1'}`} />
+        </button>
+      </div>
+      <details className="text-[13px] text-muted">
+        <summary className="cursor-pointer font-semibold min-h-[32px]">הצהרת נגישות</summary>
+        <p className="mt-1">האפליקציה נבנתה כך שתתאים לתקן הישראלי 5568 ולהנחיות WCAG 2.0 ברמה AA: ניווט במקלדת, תמיכה בקוראי מסך (תוויות ותפקידים לכל כפתור), ניגודיות צבעים מספקת, הגדלת טקסט, מצב ניגודיות גבוהה והפחתת תנועה. נתקלת בבעיה? אפשר לכתוב בתיבת המשוב שבהגדרות.</p>
+      </details>
+    </div>
+  );
+}
 function EinkToggle() {
   const [on, setOn] = useState(isEink);
   const toggle = () => {
@@ -4495,7 +4609,7 @@ function FeedbackBox({ profile, notify }) {
 function SettingsGroup({ icon, title, color, children }) {
   return (
     <section className="settings-group bg-surface border border-line rounded-2xl p-3.5 grid gap-3">
-      <h2 className="font-bold text-[17px]"><span className="w-8 h-8 rounded-xl grid place-items-center shrink-0 text-white" style={{ background: color }}><Icon name={icon} size={17} /></span>{title}</h2>
+      <h2 className="font-display font-bold text-[18px]"><span className="w-8 h-8 rounded-lg grid place-items-center shrink-0 bg-accentSoft text-accent"><Icon name={icon} size={17} /></span>{title}</h2>
       {children}
     </section>
   );
@@ -4649,16 +4763,9 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
           <PushButton notify={notify} />
         </div>
       </SettingsGroup>
-      <SettingsGroup icon="Palette" title="תצוגה" color="var(--teal)">
+      <SettingsGroup icon="Palette" title="תצוגה ונגישות">
+        <LookSettings db={db} update={update} />
         <EinkToggle />
-        <div>
-          <div className="text-[14px] text-muted mb-1.5">ערכת צבעים</div>
-          <div className="flex gap-2 flex-wrap">
-            {[['system', 'לפי המכשיר', 'Monitor'], ['light', 'בהירה', 'Sun'], ['dark', 'כהה', 'Moon']].map(([k, l, ic]) => (
-              <Chip key={k} active={db.settings.theme === k} onClick={() => update(d => ({ ...d, settings: { ...d.settings, theme: k } }))}><span className="inline-flex items-center gap-1.5"><Icon name={ic} size={16} />{l}</span></Chip>
-            ))}
-          </div>
-        </div>
       </SettingsGroup>
       <SettingsGroup icon="MessageSquareHeart" title="💬 משוב" color="var(--rose)">
         <FeedbackBox profile={profile} notify={notify} />
@@ -4668,7 +4775,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
       </SettingsGroup>
 
 
-      <h2 className="font-bold text-[17px] mt-2 -mb-2 flex items-center gap-2"><span className="w-8 h-8 rounded-xl grid place-items-center text-white" style={{ background: 'var(--brass)' }}><Icon name="Database" size={17} /></span>הנתונים שלי</h2>
+      <h2 className="font-bold text-[17px] mt-2 -mb-2 flex items-center gap-2"><span className="w-8 h-8 rounded-lg grid place-items-center bg-accentSoft text-accent"><Icon name="Database" size={17} /></span>הנתונים שלי</h2>
       <KnowsAboutMe db={db} update={update} notify={notify} />
       <AppImport db={db} update={update} notify={notify} onExport={() => { downloadFile(`my-books-${profile.name}-${stamp}.csv`, toGoodreadsCSV(db), 'text/csv;charset=utf-8'); notify('קובץ ה-CSV נוצר'); }} />
       <details className="bg-surface border border-line rounded-xl p-3">
@@ -5060,7 +5167,7 @@ function RecommendToFriend({ book, notify }) {
   );
 }
 
-/* ---------- כרטיס "בחרת ספר" בסגנון Wrapped, ומעקב אחרי 3 שבועות ---------- */
+/* ---------- כרטיס "בחרת ספר", ומעקב אחרי 3 שבועות ---------- */
 const FOLLOW_UP_AFTER = 21 * 86400000;
 function PickCard({ pick, onClose }) {
   const { book, status, why } = pick;
@@ -5071,7 +5178,7 @@ function PickCard({ pick, onClose }) {
   return ReactDOM.createPortal((
     <div className="fixed inset-0 z-50 grid place-items-center p-5 fade-in" role="dialog" aria-modal="true" aria-label="בחרת ספר" style={{ background: 'rgba(10,10,20,.55)' }} onClick={onClose}>
       <div className="sheet-in w-full max-w-sm rounded-3xl p-6 text-center grid gap-3 relative overflow-hidden" onClick={e => e.stopPropagation()}
-        style={{ background: 'linear-gradient(150deg, var(--accent) 0%, var(--rose) 55%, var(--brass) 100%)', color: '#fff' }}>
+        style={{ background: 'var(--accent)', color: 'var(--accent-ink)' }}>
         <div className="text-[13px] font-bold tracking-[.2em] opacity-90">הבחירה שלך</div>
         <div className="mx-auto w-28 h-40 rounded-lg overflow-hidden shadow-2xl ring-4 ring-white/30 bg-white/20 grid place-items-center">
           {book.cover && !isEink() ? <img src={book.cover} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" /> : <span className="font-display text-[40px]">{(book.title || '?').charAt(0)}</span>}
@@ -5152,78 +5259,107 @@ const digestBook = (b, d) => ({
   link: (b.urls && b.urls[0] && b.urls[0].url) || '', publisher: '', verifiedVia: (b.urls && b.urls[0] && b.urls[0].site) || 'המאגרים', verifiedAt: d.at,
   offers: b.urls || [], availability: b.available || null, reasons: b.why ? [b.why] : []
 });
-/* ---------- סיכום דו-שבועי בסגנון Wrapped: מחושב במכשיר מהספרייה, בלי AI ---------- */
+/* ---------- סיכום הקריאה: מחושב במכשיר מהספרייה, בלי AI. תקופות: שבועיים, חודש, חודש קודם, שנה, כל הזמן ---------- */
 const DAY_MS = 86400000;
-const SUMMARY_ANCHOR = Date.UTC(2026, 0, 4, 6);   // יום ראשון; כל 14 יום מתחילה תקופה חדשה
+const SUMMARY_ANCHOR = Date.UTC(2026, 0, 4, 6);   // יום ראשון; כל 14 יום מתחילה תקופה חדשה (להתראה ולתג "חדש")
 const summaryPeriod = (now = Date.now()) => Math.floor((now - SUMMARY_ANCHOR) / (14 * DAY_MS));
 function readerType(s) {
   const T3 = (m, f, n, d) => ({ name: gx(m, f, n), desc: d });
-  if (!s.finished.length) return s.started.length || s.wanted.length ? T3('החולם', 'החולמת', 'תוכניות גדולות', 'עוד לא הסתיים ספר, אבל הרשימה מתמלאת ויש ספר בדרך.') : T3('בהפסקה', 'בהפסקה', 'הפסקה קטנה', 'שבועיים שקטים. הספר הבא מחכה.');
-  if (s.finished.length >= 4) return T3('המרתוניסט', 'המרתוניסטית', 'מרתון קריאה', 'ספר אחרי ספר, כמעט בלי לנשום.');
+  if (!s.finished.length) return s.started.length || s.wanted.length ? T3('בין ספר לספר', 'בין ספר לספר', 'בין ספר לספר', 'עוד לא הסתיים ספר בתקופה הזו, אבל יש ספר בקריאה והרשימה מתמלאת.') : T3('תקופה שקטה', 'תקופה שקטה', 'תקופה שקטה', 'לא נרשמה קריאה בתקופה הזו. הספר הבא מחכה.');
   const yrs = s.finished.map(b => parseInt(b.year, 10)).filter(Boolean), nowY = new Date().getFullYear();
-  if (yrs.length >= 2 && yrs.filter(y => y < 1960).length * 2 >= yrs.length) return T3('חובב הקלאסיקות', 'חובבת הקלאסיקות', 'קלאסיקה בדם', 'הספרים הכי ותיקים על המדף, ובצדק.');
-  if (yrs.length >= 2 && yrs.filter(y => y >= nowY - 3).length * 2 >= yrs.length) return T3('צייד החידושים', 'ציידת החידושים', 'תמיד על החדש', 'מה שיצא עכשיו, כבר נקרא.');
-  if (s.avg >= 4.5 && s.rated >= 2) return T3('מוצא הפנינים', 'מוצאת הפנינים', 'פנינים בלבד', 'כל ספר שנבחר, קלע.');
-  if (s.genres.length >= 3) return T3('הנווט הספרותי', 'הנווטת הספרותית', 'מסע בין ז\'אנרים', 'קפיצה בין עולמות, בלי להתקבע.');
-  if (s.partial >= 2) return T3('הטועם', 'הטועמת', 'טעימות ספרותיות', 'לא כל ספר צריך להיגמר. בוחרים מה שווה את הזמן.');
-  if (s.avg && s.avg <= 2.5 && s.rated >= 2) return T3('המבקר החריף', 'המבקרת החריפה', 'עין ביקורתית', 'רף גבוה. הספר הבא יצטרך להתאמץ.');
-  return T3('הקורא המתמיד', 'הקוראת המתמידה', 'קריאה בקצב קבוע', 'קצב יציב, ספר טוב אחרי ספר טוב.');
+  if (s.finished.length >= 4 && s.perMonth >= 3) return T3('קורא רציף', 'קוראת רציפה', 'קריאה רציפה', 'ספר אחרי ספר, בקצב גבוה ויציב.');
+  if (yrs.length >= 2 && yrs.filter(y => y < 1960).length * 2 >= yrs.length) return T3('נאמן לקלאסיקה', 'נאמנה לקלאסיקה', 'נאמנות לקלאסיקה', 'רוב הספרים נכתבו לפני 1960.');
+  if (yrs.length >= 2 && yrs.filter(y => y >= nowY - 3).length * 2 >= yrs.length) return T3('קשוב לחדש', 'קשובה לחדש', 'קשב לספרים חדשים', 'רוב הספרים יצאו בשלוש השנים האחרונות.');
+  if (s.avg >= 4.5 && s.rated >= 2) return T3('בוחר במדויק', 'בוחרת במדויק', 'בחירות מדויקות', 'כמעט כל ספר שנבחר קיבל ציון גבוה.');
+  if (s.genres.length >= 3) return T3('נודד בין סוגות', 'נודדת בין סוגות', 'מסע בין סוגות', `${s.genres.length} סוגות שונות בתקופה אחת.`);
+  if (s.partial >= 2) return T3('קורא בררן', 'קוראת בררנית', 'קריאה בררנית', 'לא כל ספר צריך להיגמר; נשארים עם מה ששווה את הזמן.');
+  if (s.avg && s.avg <= 2.5 && s.rated >= 2) return T3('קורא ביקורתי', 'קוראת ביקורתית', 'עין ביקורתית', 'רף גבוה: רוב הספרים לא עמדו בו.');
+  return T3('קורא מתמיד', 'קוראת מתמידה', 'קריאה מתמידה', 'קצב יציב, ספר אחרי ספר.');
 }
-// תקופות לסיכום: שבועיים אחרונים, החודש, החודש שעבר, השנה
-const SUMMARY_PERIODS = [['14', 'שבועיים'], ['month', 'החודש'], ['prev', 'החודש שעבר'], ['year', 'השנה']];
+const SUMMARY_PERIODS = [['14', 'שבועיים'], ['month', 'החודש'], ['prev', 'החודש שעבר'], ['year', 'השנה'], ['all', 'כל הזמן']];
 function periodRange(k, now = Date.now()) {
   const d = new Date(now);
   if (k === 'month') return [new Date(d.getFullYear(), d.getMonth(), 1).getTime(), now];
   if (k === 'prev') return [new Date(d.getFullYear(), d.getMonth() - 1, 1).getTime(), new Date(d.getFullYear(), d.getMonth(), 1).getTime() - 1];
   if (k === 'year') return [new Date(d.getFullYear(), 0, 1).getTime(), now];
+  if (k === 'all') return [0, now];
   return [now - 14 * DAY_MS, now];
 }
+const countBy = (list, key) => { const m = new Map(); list.forEach(x => { const k = key(x); if (k != null && k !== '') m.set(k, (m.get(k) || 0) + 1); }); return [...m.entries()].sort((a, b) => b[1] - a[1]); };
+// שפת הקריאה: מקור עברי / תרגום לעברית / בשפה אחרת
+const langKind = (b) => !hasHebrew(b.title) ? 'foreign' : (b.subtitle && !hasHebrew(b.subtitle)) || (b.authors || []).some(a => !hasHebrew(a)) ? 'translated' : 'hebrew';
 function summaryStats(books, now = Date.now(), period = '14') {
-  const [from, to] = periodRange(period, now);
+  const [from0, to] = periodRange(period, now);
+  const dated = books.filter(b => ['read', 'partial'].includes(statusOf(b)) && b.readAt);
+  const from = period === 'all' ? Math.min(now, ...dated.map(b => b.readAt)) : from0;
   const inWin = (t) => t >= from && t <= to + DAY_MS;
   // רק ספרים עם תאריך סיום (לא ספרים שסומנו בבת אחת מרשימת ההיכרות)
-  const finished = books.filter(b => ['read', 'partial'].includes(statusOf(b)) && b.readAt && inWin(b.readAt)).sort((a, b) => (b.rating || 0) - (a.rating || 0) || b.readAt - a.readAt);
+  const finished = dated.filter(b => inWin(b.readAt)).sort((a, b) => (b.rating || 0) - (a.rating || 0) || b.readAt - a.readAt);
   const started = books.filter(b => statusOf(b) === 'reading' && inWin(b.startedAt || b.addedAt));
   const wanted = books.filter(b => statusOf(b) === 'want' && inWin(b.addedAt));
+  const done = finished.filter(b => statusOf(b) === 'read');
   const ratedL = finished.filter(b => b.rating > 0);
-  const gm = new Map();
-  finished.forEach(b => { const [g] = classifyBook(b); if (g) gm.set(g, (gm.get(g) || 0) + 1); });
-  const genres = [...gm.entries()].sort((a, b) => b[1] - a[1]).map(([t, n]) => ({ tag: t, name: GENRE_OF_TAG[t] || t, n }));
-  const s = { from, to, period, finished, started, wanted, partial: finished.filter(b => statusOf(b) === 'partial').length,
-    pages: finished.filter(b => statusOf(b) === 'read').reduce((a, b) => a + (b.pageCount || 0), 0), rated: ratedL.length,
+  const genres = countBy(finished, b => classifyBook(b)[0]).map(([t, n]) => ({ tag: t, name: GENRE_OF_TAG[t] || t, n }));
+  const withYear = finished.filter(b => parseInt(b.year, 10) > 0).sort((a, b) => parseInt(a.year, 10) - parseInt(b.year, 10));
+  const decades = countBy(withYear, b => Math.floor(parseInt(b.year, 10) / 10) * 10).sort((a, b) => a[0] - b[0]);
+  const withPages = done.filter(b => b.pageCount > 0).sort((a, b) => a.pageCount - b.pageCount);
+  const authors = countBy(finished, b => (b.authors || [])[0]);
+  const before = new Set(dated.filter(b => b.readAt < from).flatMap(b => (b.authors || []).slice(0, 1)));
+  const days = Math.max(1, (to - from) / DAY_MS);
+  // קצב: לפי חודשים (שנה / כל הזמן) או לפי שבועות (שבועיים / חודש)
+  const byMonth = period === 'year' || period === 'all';
+  const bucket = (t) => { const d = new Date(t); return byMonth ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` : `w${Math.floor((t - from) / (7 * DAY_MS))}`; };
+  const paceMap = new Map(countBy(finished, b => bucket(b.readAt)));
+  const pace = [];
+  if (byMonth) { const d0 = new Date(from); for (let d = new Date(d0.getFullYear(), d0.getMonth(), 1); d.getTime() <= to && pace.length < 60; d.setMonth(d.getMonth() + 1)) { const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; pace.push({ label: d.toLocaleDateString(DEFAULT_LOCALE, { month: 'short', ...(period === 'all' ? { year: '2-digit' } : {}) }), n: paceMap.get(k) || 0 }); } }
+  else for (let w = 0; w * 7 < days; w++) pace.push({ label: `שבוע ${w + 1}`, n: paceMap.get('w' + w) || 0 });
+  const prevRange = [from - (to - from), from - 1];
+  const prev = period === 'all' ? null : dated.filter(b => b.readAt >= prevRange[0] && b.readAt <= prevRange[1]);
+  const s = { from, to, period, finished, started, wanted, partial: finished.length - done.length,
+    pages: done.reduce((a, b) => a + (b.pageCount || 0), 0), rated: ratedL.length,
     avg: ratedL.length ? ratedL.reduce((a, b) => a + b.rating, 0) / ratedL.length : 0, top: ratedL[0] || finished[0] || null, genres,
+    decades, oldest: withYear[0] || null, newest: withYear[withYear.length - 1] || null,
+    shortest: withPages[0] || null, longest: withPages[withPages.length - 1] || null, avgPages: withPages.length ? Math.round(withPages.reduce((a, b) => a + b.pageCount, 0) / withPages.length) : 0,
+    authors, newAuthors: authors.filter(([a]) => !before.has(a)).length, ratings: [5, 4, 3, 2, 1].map(r => [r, ratedL.filter(b => b.rating === r).length]),
+    langs: countBy(finished, langKind), pace, perMonth: finished.length / (days / 30.4),
+    prevCount: prev ? prev.length : null, prevPages: prev ? prev.filter(b => statusOf(b) === 'read').reduce((a, b) => a + (b.pageCount || 0), 0) : null,
     total: books.filter(isRated).length, year: books.filter(b => isRated(b) && b.readAt && new Date(b.readAt).getFullYear() === new Date(now).getFullYear()).length };
   s.type = readerType(s);
   s.active = !!(finished.length || started.length || wanted.length);
   return s;
 }
 const fmtShort = (ts) => { try { return new Date(ts).toLocaleDateString(DEFAULT_LOCALE, { day: 'numeric', month: 'short' }); } catch (e) { return ''; } };
-// תמונת סטורי 1080×1920 לשיתוף (בלי כריכות: תמונות מאתרים אחרים לא ניתנות לציור ושמירה)
+const PERIOD_TITLE = { '14': 'השבועיים האחרונים', month: 'החודש', prev: 'החודש שעבר', year: 'השנה', all: 'כל הזמן' };
+// תמונה לשיתוף (1080×1920) בצבעי ערכת העיצוב; בלי כריכות (תמונות מאתרים אחרים לא ניתנות לשמירה)
 async function summaryImage(s) {
+  const css = getComputedStyle(document.documentElement), v = (k, d) => (css.getPropertyValue(k) || '').trim() || d;
+  const bg = v('--surface', '#FFFCF5'), ink = v('--ink', '#2A2521'), muted = v('--muted', '#6E655B'), accent = v('--accent', '#7A3B2E'), line = v('--line', '#E0D5C2');
+  const family = v('--font', 'Frank Ruhl Libre').split(',')[0].replace(/"/g, '').trim();
   const c = document.createElement('canvas'); c.width = 1080; c.height = 1920;
   const x = c.getContext('2d');
-  const g = x.createLinearGradient(0, 0, 1080, 1920); g.addColorStop(0, '#3446B0'); g.addColorStop(.55, '#D4506C'); g.addColorStop(1, '#DF8A1F');
-  x.fillStyle = g; x.fillRect(0, 0, 1080, 1920);
-  x.direction = 'rtl'; x.textAlign = 'center'; x.fillStyle = '#fff';
-  const font = (px, w = 700) => `${w} ${px}px "Assistant", "Frank Ruhl Libre", sans-serif`;
-  const line = (t, y, px, w, a = 1) => { x.globalAlpha = a; x.font = font(px, w); x.fillText(t, 540, y, 960); x.globalAlpha = 1; };
-  try { await Promise.all(['700 64px Assistant', '800 96px Assistant', '400 44px Assistant'].map(f => document.fonts.load(f))); } catch (e) { /* גופן ברירת מחדל */ }
-  line({ '14': 'השבועיים שלי בספרים', month: 'החודש שלי בספרים', prev: 'החודש שלי בספרים', year: 'השנה שלי בספרים' }[s.period] || 'הסיכום שלי', 200, 64, 700, .9);
-  line(`${fmtShort(s.from)} – ${fmtShort(s.to)}`, 280, 44, 400, .8);
-  line(String(s.finished.length), 640, 300, 800);
-  line(s.finished.length === 1 ? 'ספר שהסתיים' : 'ספרים שהסתיימו', 740, 64, 600);
-  if (s.pages) line(`${s.pages.toLocaleString(DEFAULT_LOCALE)} עמודים`, 830, 52, 400, .9);
-  if (s.top) { line('הספר של התקופה', 1010, 44, 400, .85); line(s.top.title, 1100, 76, 700); if (s.top.rating) line('★'.repeat(s.top.rating), 1190, 60, 400); }
-  if (s.genres[0]) { line('הז\'אנר המוביל', 1330, 44, 400, .85); line(s.genres[0].name, 1410, 64, 700); }
-  line(s.type.name, 1600, 96, 800);
-  line('מה שנקרא', 1820, 44, 600, .8);
+  try { await Promise.all([`700 64px "${family}"`, `400 44px "${family}"`].map(f => document.fonts.load(f))); } catch (e) { /* גופן ברירת מחדל */ }
+  x.fillStyle = bg; x.fillRect(0, 0, 1080, 1920);
+  x.fillStyle = accent; x.fillRect(0, 0, 1080, 14);
+  x.direction = 'rtl'; x.textAlign = 'right';
+  const font = (px, w = 700) => `${w} ${px}px "${family}", serif`;
+  const text = (t, y, px, w = 700, color = ink, xx = 980) => { x.font = font(px, w); x.fillStyle = color; x.fillText(t, xx, y, 880); };
+  text('סיכום הקריאה שלי', 170, 70); text(`${PERIOD_TITLE[s.period]} · ${fmtShort(s.from)} – ${fmtShort(s.to)}`, 240, 38, 400, muted);
+  const tiles = [[s.finished.length, 'ספרים'], [s.pages ? s.pages.toLocaleString(DEFAULT_LOCALE) : '—', 'עמודים'], [s.avg ? s.avg.toFixed(1) + '★' : '—', 'דירוג ממוצע']];
+  tiles.forEach(([n, l], i) => { const cx = 980 - i * 300; x.strokeStyle = line; x.lineWidth = 3; x.strokeRect(cx - 270, 300, 270, 200); text(String(n), 400, 84, 700, accent, cx - 30); text(l, 465, 34, 400, muted, cx - 30); });
+  let y = 600;
+  const section = (title, rows) => { if (!rows.length) return; text(title, y, 40, 700, accent); y += 60; rows.forEach(r => { text(r, y, 38, 400); y += 58; }); y += 30; };
+  if (s.top) section('הספר של התקופה', [`${s.top.title}${(s.top.authors || [])[0] ? ` / ${s.top.authors[0]}` : ''}${s.top.rating ? ' · ' + '★'.repeat(s.top.rating) : ''}`]);
+  section('סוגות', s.genres.slice(0, 3).map(g => `${g.name} · ${g.n}`));
+  section('מתי נכתבו', s.decades.slice(-3).map(([d, n]) => `שנות ה-${d} · ${n}`));
+  if (s.authors[0]) section('סופרים', [`${s.authors.length} סופרים, ${s.newAuthors} חדשים לספרייה`]);
+  text(s.type.name, 1760, 64, 700, accent); text('מה שנקרא', 1850, 34, 400, muted);
   return new Promise(r => c.toBlob(r, 'image/png'));
 }
 async function shareSummary(s, notify) {
   try {
     const blob = await summaryImage(s);
     const file = new File([blob], 'my-reading-summary.png', { type: 'image/png' });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], text: 'השבועיים שלי בספרים 📚' }); return; }
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], text: 'סיכום הקריאה שלי 📚' }); return; }
     downloadFile('my-reading-summary.png', blob, 'image/png');
     notify && notify('התמונה נשמרה');
   } catch (e) { /* ביטול שיתוף */ }
@@ -5233,14 +5369,14 @@ function MySummaryCard({ books, onOpen, fresh }) {
   const s = useMemo(() => summaryStats(books), [books]);
   const y = useMemo(() => summaryStats(books, Date.now(), 'year'), [books]);
   return (
-    <button type="button" onClick={onOpen} className="summary-card w-full text-right rounded-2xl p-3.5 mb-3 text-white flex items-center gap-3 shadow-md active:scale-[.99] transition-transform">
-      <span className="w-12 h-12 rounded-2xl bg-white/20 grid place-items-center shrink-0"><Icon name="Trophy" size={24} /></span>
+    <button type="button" onClick={onOpen} className="summary-card w-full text-right rounded-xl p-3.5 mb-3 flex items-center gap-3 bg-surface border border-line">
+      <span className="w-11 h-11 rounded-xl grid place-items-center shrink-0 bg-accentSoft text-accent"><Icon name="ChartColumn" size={22} /></span>
       <span className="flex-1 min-w-0">
-        <span className="block text-[12px] font-bold tracking-[.12em] opacity-90">הסיכום שלי{fresh && s.active ? <span className="ms-2 px-1.5 py-0.5 rounded-full bg-white text-[#1B1A28] text-[11px] tracking-normal">חדש</span> : null}</span>
-        <span className="block font-display font-bold text-[18px] leading-tight">{s.finished.length ? `${s.finished.length} ספרים בשבועיים · ${s.type.name}` : y.finished.length ? `השנה: ${y.finished.length} ספרים · ${y.type.name}` : 'סיכום הקריאה שלך'}</span>
-        <span className="block text-[13px] opacity-90">שבועיים, חודש או שנה, בסגנון Wrapped</span>
+        <span className="block text-[13px] font-semibold text-accent">סיכום הקריאה שלי{fresh && s.active ? <span className="ms-2 px-1.5 py-0.5 rounded-full bg-accent text-accentInk text-[11px]">חדש</span> : null}</span>
+        <span className="block font-display font-bold text-[17px] leading-tight">{s.finished.length ? `${s.finished.length} ספרים בשבועיים האחרונים` : y.finished.length ? `השנה: ${y.finished.length} ספרים` : 'כל הנתונים על הקריאה שלך'}</span>
+        <span className="block text-[13px] text-muted">סוגות, שנים, סופרים, דירוגים וקצב</span>
       </span>
-      <Icon name="ChevronLeft" size={22} />
+      <Icon name="ChevronLeft" size={20} className="text-muted" />
     </button>
   );
 }
@@ -5250,75 +5386,120 @@ function SummaryBanner({ db, update, onOpen }) {
   if (!s.active || db.settings.summarySeen === p || !db.books.length) return null;
   return (
     <button type="button" onClick={() => { update(d => ({ ...d, settings: { ...d.settings, summarySeen: p } })); onOpen(); }}
-      className="fade-in mt-3 w-full text-right rounded-2xl p-3 flex items-center gap-3 text-white shadow-md" style={{ background: 'linear-gradient(120deg, var(--accent), var(--rose) 60%, var(--brass))' }}>
-      <span className="w-11 h-11 rounded-full grid place-items-center shrink-0 bg-white/20"><Icon name="Trophy" size={22} /></span>
+      className="fade-in mt-3 w-full text-right rounded-xl p-3 flex items-center gap-3 bg-surface border border-line">
+      <span className="w-10 h-10 rounded-xl grid place-items-center shrink-0 bg-accentSoft text-accent"><Icon name="ChartColumn" size={20} /></span>
       <span className="flex-1 min-w-0">
-        <span className="block font-bold text-[16px]">הסיכום הדו-שבועי שלך מוכן</span>
-        <span className="block text-[13px] opacity-90 truncate">{s.finished.length ? `${s.finished.length} ספרים הסתיימו · ${s.type.name}` : s.type.name}</span>
+        <span className="block font-semibold text-[15px]">סיכום הקריאה הדו-שבועי מוכן</span>
+        <span className="block text-[13px] text-muted truncate">{s.finished.length ? `${s.finished.length} ספרים הסתיימו · ${s.type.name}` : s.type.name}</span>
       </span>
-      <Icon name="ChevronLeft" size={20} />
+      <Icon name="ChevronLeft" size={20} className="text-muted" />
     </button>
   );
 }
+// גרף עמודות אופקי פשוט: סדרה אחת, צבע אחד, המספר כתוב ליד כל עמודה (לא רק בצבע)
+function BarList({ rows, label }) {
+  const max = Math.max(1, ...rows.map(r => r[1]));
+  return (
+    <ul className="grid gap-1.5" aria-label={label}>
+      {rows.map(([name, n]) => (
+        <li key={name} className="grid grid-cols-[6.5rem_1fr_2rem] items-center gap-2 text-[14px]" title={`${name}: ${n}`}>
+          <span className="truncate">{name}</span>
+          <span className="h-3 rounded-sm bg-surface2 overflow-hidden flex justify-start"><span className="h-full rounded-sm bg-accent" style={{ width: `${(n / max) * 100}%`, minWidth: n ? 4 : 0 }} /></span>
+          <span className="tabular text-muted text-left">{n}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+function ReportCard({ title, icon, children }) {
+  return (
+    <section className="bg-surface border border-line rounded-xl p-3.5 grid gap-2.5">
+      <h3 className="font-display font-bold text-[17px] flex items-center gap-2"><Icon name={icon} size={18} className="text-accent" />{title}</h3>
+      {children}
+    </section>
+  );
+}
+const delta = (cur, prev) => prev == null ? '' : cur === prev ? 'כמו בתקופה הקודמת' : `${cur > prev ? '+' : ''}${cur - prev} לעומת התקופה הקודמת`;
 function SummaryStory({ db, onClose, onOpenDigest, notify }) {
   const [period, setPeriod] = useState('14');
   const s = useMemo(() => summaryStats(db.books, Date.now(), period), [db.books, period]);
-  const pLabel = { '14': 'השבועיים שלך בספרים', month: 'החודש שלך בספרים', prev: 'החודש שעבר בספרים', year: 'השנה שלך בספרים' }[period];
   const { digests } = useDigest();
-  const [i, setI] = useState(0);
-  const card = (key, body) => ({ key, body });
-  const big = 'font-display font-bold leading-none';
-  const slides = [
-    card('intro', <><div className="text-[15px] font-bold tracking-[.2em] opacity-90">הסיכום שלי</div>
-      <div className={`${big} text-[44px] mt-4`}>{pLabel}</div>
-      <div className="text-[18px] opacity-90 mt-3">{fmtShort(s.from)} – {fmtShort(s.to)}</div></>),
-    !s.finished.length && card('empty', <><div className={`${big} text-[34px]`}>{T('עוד לא הסתיים ספר בתקופה הזו')}</div>
-      <p className="text-[18px] opacity-95 mt-4 leading-relaxed">{s.started.length ? `יש ${s.started.length} ספרים בקריאה עכשיו. ` : ''}{s.wanted.length ? `${s.wanted.length} ספרים חדשים ברשימת "רוצה לקרוא". ` : ''}הספר הבא כבר מחכה 📖</p>
-      <p className="text-[15px] opacity-85 mt-3">אפשר לבחור תקופה אחרת למעלה.</p></>),
-    s.finished.length > 0 && card('count', <><div className={`${big} text-[120px]`}>{s.finished.length}</div>
-      <div className="text-[24px] font-semibold mt-2">{s.finished.length === 1 ? 'ספר הסתיים' : 'ספרים הסתיימו'}</div>
-      {s.pages > 0 && <div className="text-[18px] opacity-90 mt-2">{s.pages.toLocaleString(DEFAULT_LOCALE)} עמודים</div>}
-      {(s.started.length > 0 || s.wanted.length > 0) && <div className="text-[16px] opacity-90 mt-4">{[s.started.length ? `${s.started.length} בקריאה עכשיו` : '', s.wanted.length ? `${s.wanted.length} נוספו לרשימה` : ''].filter(Boolean).join(' · ')}</div>}
-      <div className="text-[15px] opacity-80 mt-4">השנה: {s.year} ספרים · סה"כ בספרייה: {s.total}</div></>),
-    s.top && card('top', <><div className="text-[15px] font-bold tracking-[.2em] opacity-90">הספר של התקופה</div>
-      <div className="mx-auto w-32 h-48 rounded-lg overflow-hidden shadow-2xl ring-4 ring-white/30 bg-white/20 grid place-items-center mt-4">
-        {s.top.cover && !isEink() ? <img src={s.top.cover} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" /> : <span className="font-display text-[44px]">{s.top.title.charAt(0)}</span>}</div>
-      <div className={`${big} text-[30px] mt-4`}>{s.top.title}</div>
-      {(s.top.authors || [])[0] && <div className="text-[17px] opacity-90 mt-1">{s.top.authors[0]}</div>}
-      {s.top.rating > 0 && <div className="text-[26px] mt-2" aria-label={`${s.top.rating} כוכבים`}>{'★'.repeat(s.top.rating)}</div>}</>),
-    s.genres.length > 0 && card('genre', <><div className="text-[15px] font-bold tracking-[.2em] opacity-90">הז'אנר המוביל</div>
-      <div className={`${big} text-[42px] mt-4`}>{s.genres[0].name}</div>
-      <div className="flex flex-wrap gap-2 justify-center mt-5">{s.genres.slice(1, 5).map(g => <span key={g.tag} className="px-3 py-1 rounded-full bg-white/20 text-[15px] font-semibold">{g.name}</span>)}</div>
-      {s.avg > 0 && <div className="text-[18px] opacity-90 mt-5">דירוג ממוצע: {s.avg.toFixed(1)}★</div>}</>),
-    card('type', <><div className="text-[15px] font-bold tracking-[.2em] opacity-90">סוג הקריאה שלך</div>
-      <div className={`${big} text-[46px] mt-4`}>{s.type.name}</div>
-      <p className="text-[18px] opacity-95 mt-4 leading-relaxed">{s.type.desc}</p></>),
-    card('end', <><div className={`${big} text-[34px]`}>{period === 'year' ? 'שנה של ספרים 📚' : 'נתראה בסיכום הבא 📚'}</div>
-      <div className="grid gap-2 mt-6 w-full">
-        {s.finished.length > 0 && <button type="button" onClick={(e) => { e.stopPropagation(); shareSummary(s, notify); }} className="min-h-[48px] rounded-xl bg-white text-[#1B1A28] font-bold inline-flex items-center justify-center gap-2"><Icon name="Share2" size={18} />שיתוף כתמונה</button>}
-        {digests[0] && digests[0].books.length > 0 && <button type="button" onClick={(e) => { e.stopPropagation(); onClose(); onOpenDigest(digests[0]); }} className="min-h-[48px] rounded-xl bg-white/20 font-bold">{digests[0].books.length} ספרים חדשים בשבילך ←</button>}
-      </div></>)
-  ].filter(Boolean);
-  const last = slides.length - 1;
-  useEffect(() => { if (i >= last) return; const t = setTimeout(() => setI(n => Math.min(last, n + 1)), 6000); return () => clearTimeout(t); }, [i, last]);
-  useEffect(() => { const k = (e) => { if (e.key === 'Escape') onClose(); if (e.key === 'ArrowLeft') setI(n => Math.min(last, n + 1)); if (e.key === 'ArrowRight') setI(n => Math.max(0, n - 1)); }; document.addEventListener('keydown', k); return () => document.removeEventListener('keydown', k); }, [last]);
-  const hues = ['var(--accent)', 'var(--rose)', 'var(--brass)', 'var(--teal)'];
+  useEffect(() => { const k = (e) => { if (e.key === 'Escape') onClose(); }; document.addEventListener('keydown', k); return () => document.removeEventListener('keydown', k); }, []);
+  const LANG = { hebrew: 'מקור עברי', translated: 'תרגום לעברית', foreign: 'בשפת המקור' };
+  const bookLine = (b, extra) => b ? <span><b className="font-semibold">{b.title}</b>{(b.authors || [])[0] ? ` / ${b.authors[0]}` : ''}{extra ? <span className="text-muted"> · {extra}</span> : null}</span> : null;
   return ReactDOM.createPortal((
-    <div className="fixed inset-0 z-50 fade-in text-white select-none" role="dialog" aria-modal="true" aria-label="הסיכום הדו-שבועי"
-      style={{ background: `linear-gradient(160deg, ${hues[i % 4]} 0%, ${hues[(i + 1) % 4]} 60%, ${hues[(i + 2) % 4]} 100%)`, transition: 'background .6s' }}
-      onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setI(n => e.clientX - r.left < r.width / 2 ? Math.min(last, n + 1) : Math.max(0, n - 1)); }}>
-      <div className="absolute z-10 inset-x-0 top-0 px-3 pt-[calc(env(safe-area-inset-top,0px)+10px)] flex gap-1.5" dir="rtl">
-        {slides.map((sl, j) => <span key={sl.key} className="story-bar flex-1"><i className={j < i ? 'full' : j === i ? 'run' : ''} key={j === i ? 'r' + i : 'x'} /></span>)}
-      </div>
-      <div className="absolute z-10 inset-x-0 top-[calc(env(safe-area-inset-top,0px)+72px)] flex justify-center gap-1.5 px-3" role="group" aria-label="תקופה">
-        {SUMMARY_PERIODS.map(([k, l]) => <button key={k} type="button" aria-pressed={period === k} onClick={(e) => { e.stopPropagation(); setPeriod(k); setI(0); }}
-          className={`min-h-[34px] px-3 rounded-full text-[13px] font-bold ${period === k ? 'bg-white text-[#1B1A28]' : 'bg-white/20'}`}>{l}</button>)}
-      </div>
-      <button type="button" aria-label="סגירה" onClick={(e) => { e.stopPropagation(); onClose(); }} className="absolute z-10 left-3 top-[calc(env(safe-area-inset-top,0px)+22px)] w-11 h-11 rounded-full bg-white/20 grid place-items-center"><Icon name="X" size={22} /></button>
-      <div key={slides[i].key} className="sheet-in h-full max-w-md mx-auto px-7 flex flex-col items-center justify-center text-center">{slides[i].body}</div>
-      <div className="absolute z-10 inset-x-0 bottom-0 pb-[calc(env(safe-area-inset-bottom,0px)+14px)] flex justify-center gap-3">
-        <button type="button" onClick={(e) => { e.stopPropagation(); setI(n => Math.max(0, n - 1)); }} disabled={i === 0} className="min-h-[40px] px-4 rounded-full bg-white/15 text-[14px] font-semibold disabled:opacity-40">הקודם</button>
-        <button type="button" onClick={(e) => { e.stopPropagation(); i >= last ? onClose() : setI(i + 1); }} className="min-h-[40px] px-4 rounded-full bg-white/25 text-[14px] font-semibold">{i >= last ? 'סיום' : 'הבא'}</button>
+    <div className="fixed inset-0 z-50 overflow-y-auto fade-in" style={{ background: 'var(--bg)' }} role="dialog" aria-modal="true" aria-label="סיכום הקריאה">
+      <div className="mx-auto max-w-xl px-4 pb-12 safe-top">
+        <div className="sticky top-0 z-10 pt-3 pb-2 -mx-4 px-4" style={{ background: 'var(--bg)' }}>
+          <div className="flex items-center gap-2">
+            <h2 className="font-display font-bold text-[24px] flex-1">סיכום הקריאה שלי</h2>
+            <button type="button" aria-label="סגירה" onClick={onClose} className="w-11 h-11 rounded-full bg-surface border border-line grid place-items-center text-muted"><Icon name="X" size={20} /></button>
+          </div>
+          <div className="flex gap-1.5 overflow-x-auto mt-2 pb-1" role="group" aria-label="תקופה">
+            {SUMMARY_PERIODS.map(([k, l]) => <Chip key={k} active={period === k} onClick={() => setPeriod(k)} className="shrink-0">{l}</Chip>)}
+          </div>
+          <p className="text-[13px] text-muted mt-1">{PERIOD_TITLE[period]}{s.finished.length || period !== 'all' ? ` · ${fmtShort(s.from)} – ${fmtShort(s.to)}` : ''}</p>
+        </div>
+        <div className="grid gap-3 mt-2">
+          <div className="grid grid-cols-2 gap-2">
+            {[['ספרים שהסתיימו', s.finished.length, delta(s.finished.length, s.prevCount)], ['עמודים', s.pages ? s.pages.toLocaleString(DEFAULT_LOCALE) : '—', s.prevPages != null && s.pages ? delta(s.pages, s.prevPages) : ''],
+              ['דירוג ממוצע', s.avg ? s.avg.toFixed(1) + '★' : '—', s.rated ? `${s.rated} דירוגים` : ''], ['קצב', s.finished.length ? `${s.perMonth.toFixed(1)}` : '—', 'ספרים בחודש']].map(([l, n, sub]) => (
+              <div key={l} className="bg-surface border border-line rounded-xl p-3">
+                <div className="text-[13px] text-muted">{l}</div>
+                <div className="font-display font-bold text-[28px] leading-tight tabular">{n}</div>
+                {sub && <div className="text-[12px] text-muted">{sub}</div>}
+              </div>
+            ))}
+          </div>
+          <ReportCard title="סוג הקריאה שלך" icon="Feather">
+            <div className="font-display font-bold text-[22px] text-accent">{s.type.name}</div>
+            <p className="text-[15px] font-reading">{s.type.desc}</p>
+          </ReportCard>
+          {!s.finished.length && <p className="text-[15px] text-muted text-center py-4">{T('בתקופה הזו עוד לא הסתיים ספר. אפשר לבחור תקופה אחרת למעלה.')}</p>}
+          {s.top && <ReportCard title="הספר של התקופה" icon="Award">
+            <div className="flex gap-3 items-center">
+              <Cover book={s.top} className="w-16 h-24" />
+              <div className="min-w-0"><div className="font-display font-bold text-[19px] leading-tight">{s.top.title}</div>
+                <div className="text-[14px] text-muted">{(s.top.authors || [])[0]}{s.top.year ? ` · ${s.top.year}` : ''}</div>
+                {s.top.rating > 0 && <Stars value={s.top.rating} size={16} />}</div>
+            </div>
+            {s.finished.length > 1 && <details><summary className="text-[14px] text-accent font-semibold cursor-pointer min-h-[32px]">כל {s.finished.length} הספרים</summary>
+              <ol className="grid gap-1 mt-1 text-[14px] list-decimal pr-5">{s.finished.map(b => <li key={b.id}>{bookLine(b, [b.rating ? b.rating + '★' : '', statusOf(b) === 'partial' ? 'חלקית' : '', fmtShort(b.readAt)].filter(Boolean).join(' · '))}</li>)}</ol></details>}
+          </ReportCard>}
+          {s.genres.length > 0 && <ReportCard title="סוגות" icon="Shapes"><BarList label="ספרים לפי סוגה" rows={s.genres.slice(0, 8).map(g => [g.name, g.n])} /></ReportCard>}
+          {s.decades.length > 0 && <ReportCard title="מתי נכתבו" icon="Hourglass">
+            <BarList label="ספרים לפי עשור" rows={s.decades.map(([d, n]) => [`שנות ה-${d}`, n])} />
+            <div className="text-[14px] grid gap-0.5">
+              {s.oldest && <div><span className="text-muted">הוותיק ביותר: </span>{bookLine(s.oldest, s.oldest.year)}</div>}
+              {s.newest && s.newest !== s.oldest && <div><span className="text-muted">החדש ביותר: </span>{bookLine(s.newest, s.newest.year)}</div>}
+            </div>
+          </ReportCard>}
+          {s.authors.length > 0 && <ReportCard title="סופרים" icon="PenLine">
+            <p className="text-[14px]">{s.authors.length} סופרים{s.newAuthors ? `, מהם ${s.newAuthors} שלא קראת לפני כן` : ''}.</p>
+            {s.authors[0][1] > 1 && <BarList label="הסופרים שנקראו הכי הרבה" rows={s.authors.filter(([, n]) => n > 1).slice(0, 5)} />}
+          </ReportCard>}
+          {s.rated > 0 && <ReportCard title="דירוגים" icon="Star"><BarList label="התפלגות הדירוגים" rows={s.ratings.map(([r, n]) => ['★'.repeat(r), n])} /></ReportCard>}
+          {s.avgPages > 0 && <ReportCard title="אורך" icon="BookOpenText">
+            <p className="text-[14px]">בממוצע {s.avgPages} עמודים לספר.</p>
+            <div className="text-[14px] grid gap-0.5">
+              {s.longest && <div><span className="text-muted">הארוך ביותר: </span>{bookLine(s.longest, s.longest.pageCount + ' עמ\'')}</div>}
+              {s.shortest && s.shortest !== s.longest && <div><span className="text-muted">הקצר ביותר: </span>{bookLine(s.shortest, s.shortest.pageCount + ' עמ\'')}</div>}
+            </div>
+          </ReportCard>}
+          {s.langs.length > 0 && <ReportCard title="שפה ומקור" icon="Languages"><BarList label="לפי שפה ומקור" rows={s.langs.map(([k, n]) => [LANG[k], n])} /></ReportCard>}
+          {s.finished.length > 0 && s.pace.length > 1 && <ReportCard title="קצב לאורך התקופה" icon="ChartColumn"><BarList label="ספרים לפי זמן" rows={s.pace.map(p => [p.label, p.n])} /></ReportCard>}
+          {(s.started.length > 0 || s.wanted.length > 0 || s.partial > 0) && <ReportCard title="ועוד" icon="Bookmark">
+            <ul className="text-[14px] grid gap-0.5">
+              {s.started.length > 0 && <li>{s.started.length} ספרים התחילו ועדיין בקריאה</li>}
+              {s.wanted.length > 0 && <li>{s.wanted.length} ספרים נוספו לרשימת "רוצה לקרוא"</li>}
+              {s.partial > 0 && <li>{s.partial} ספרים הופסקו באמצע</li>}
+            </ul>
+          </ReportCard>}
+          <div className="grid gap-2">
+            {s.finished.length > 0 && <Btn onClick={() => shareSummary(s, notify)}><Icon name="Share2" size={18} />שיתוף כתמונה</Btn>}
+            {digests[0] && digests[0].books.length > 0 && <Btn variant="soft" onClick={() => { onClose(); onOpenDigest(digests[0]); }}>{digests[0].books.length} ספרים חדשים שנבחרו בשבילך</Btn>}
+          </div>
+        </div>
       </div>
     </div>
   ), document.body);
@@ -5330,7 +5511,7 @@ function DigestBanner({ db, update, onOpen }) {
   if (!latest || !latest.books.length || (db.settings.digestSeen === latest.id)) return null;
   return (
     <button type="button" onClick={() => onOpen(latest)} className="fade-in mt-3 w-full text-right bg-surface border border-line rounded-2xl p-3 flex items-center gap-3 accent-top">
-      <span className="w-11 h-11 rounded-full grid place-items-center shrink-0" style={{ background: 'linear-gradient(135deg, var(--rose), var(--brass))', color: '#fff' }}><Icon name="Sparkles" size={22} /></span>
+      <span className="w-11 h-11 rounded-full grid place-items-center shrink-0 bg-accentSoft text-accent"><Icon name="Sparkles" size={22} /></span>
       <span className="flex-1 min-w-0">
         <span className="block font-semibold text-[16px]">{latest.books.length} ספרים חדשים בשבילך</span>
         <span className="block text-[13px] text-muted truncate">{latest.intro || 'לפי הספרים שקראת וההעדפות שלך'}</span>
@@ -5380,13 +5561,11 @@ function DigestSheet({ digest, db, update, onPick, notify, onClose }) {
 }
 
 // כותרת לכל מסך: אריח צבעוני עם האייקון של הלשונית, כותרת ותת-כותרת
-const HERO_TONES = { library: ['var(--accent)', 'var(--rose)'], add: ['var(--teal)', 'var(--accent)'], discover: ['var(--rose)', 'var(--brass)'], friends: ['var(--brass)', 'var(--teal)'], backup: ['var(--accent-2)', 'var(--teal)'] };
 function PageHero({ tab, title, sub, children }) {
   const t = TABS.find(x => x.id === tab) || TABS[0];
-  const [a, b] = HERO_TONES[tab] || HERO_TONES.library;
   return (
     <header className="pt-5 pb-4 flex items-start gap-3">
-      <span className="hero-tile shrink-0" style={{ background: `linear-gradient(140deg, ${a}, ${b})` }} aria-hidden="true"><Icon name={t.icon} size={24} /></span>
+      <span className="hero-tile shrink-0" aria-hidden="true"><Icon name={t.icon} size={22} /></span>
       <div className="min-w-0 flex-1">
         <h1 className="font-display font-bold text-[26px] leading-tight">{title}</h1>
         {sub && <p className="text-muted text-[14.5px] mt-1 leading-snug">{sub}</p>}
@@ -5431,11 +5610,15 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
   useEffect(() => { if (!db.settings.starterDone && db.books.length && starterLocalDone(db.books)) update(d => ({ ...d, settings: { ...d.settings, starterDone: true } })); }, [db.books.length]);
 
   useEffect(() => { try { sessionStorage.setItem('vrt_tab', tab); } catch (e) { /* */ } window.scrollTo({ top: 0 }); }, [tab]);
+  // ערכת עיצוב, מצב בהיר/כהה, גופן, גודל ונגישות
+  const lookKey = ['theme', 'palette', 'font', 'zoom', 'a11y'].map(k => db.settings[k]).join('|');
   useEffect(() => {
-    const root = document.documentElement;
-    if (db.settings.theme === 'light' || db.settings.theme === 'dark') root.setAttribute('data-theme', db.settings.theme);
-    else root.removeAttribute('data-theme');
-  }, [db.settings.theme]);
+    applyLook(db.settings);
+    if (db.settings.theme === 'light' || db.settings.theme === 'dark' || !window.matchMedia) return undefined;
+    const mq = matchMedia('(prefers-color-scheme: dark)'), f = () => applyLook(db.settings);
+    mq.addEventListener ? mq.addEventListener('change', f) : mq.addListener(f);
+    return () => { mq.removeEventListener ? mq.removeEventListener('change', f) : mq.removeListener(f); };
+  }, [lookKey]);
   // ספרים שנשמרו בשם לועזי: מחפשים ברקע את שם המהדורה העברית (פעם אחת לכל ספר)
   const heBusy = useRef(false);
   useEffect(() => {
@@ -5483,7 +5666,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
       const rec = sanitizeBook({ ...book, id: uid(), status, rating, tags, note, readAt, startedAt: status === 'reading' ? now : 0, addedAt: now, editedAt: now, verifiedAt: book.verifiedAt || now, fromRec });
       return { ...d, tagLibrary, books: [rec, ...d.books], settings: { ...d.settings, onboarded: true } };
     });
-    // ספר שבחרת מתוך המלצה: כרטיס חגיגי בסגנון Wrapped, ובעוד 3 שבועות נשאל איך היה
+    // ספר שבחרת מתוך המלצה: כרטיס חגיגי, ובעוד 3 שבועות נשאל איך היה
     if (!existing && pending.fromRec && status !== 'read') setCelebrate({ book, status, why: (book.reasons || [])[0] || '' });
     notify(existing ? 'השינויים נשמרו' : { want: `"${book.title}" נוסף לרשימת "רוצה לקרוא"`, reading: `"${book.title}" נוסף ל"${STATUSES[1][1]}". קריאה נעימה!` }[status] || `"${book.title}" נשמר בספרייה`);
     const onSaved = pending.onSaved;
@@ -5527,13 +5710,13 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
         {tab === 'backup' && <BackupTab db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
       </main>
 
-      <nav className="fixed bottom-0 inset-x-0 z-30" aria-label="ניווט ראשי">
-        <ul className="mx-auto max-w-xl grid grid-cols-5 glass nav-float">
+      <nav className="fixed bottom-0 inset-x-0 z-30 bg-surface border-t border-line safe-bottom" aria-label="ניווט ראשי">
+        <ul className="mx-auto max-w-xl grid grid-cols-5">
           {TABS.map(t => (
             <li key={t.id}>
               <button type="button" onClick={() => setTab(t.id)} aria-current={tab === t.id ? 'page' : undefined}
-                className={`w-full min-h-[62px] flex flex-col items-center justify-center gap-0.5 text-[12px] font-semibold transition-colors ${tab === t.id ? 'text-accent' : 'text-muted'}`}>
-                <span className={`relative px-4 py-1 rounded-full transition-colors ${tab === t.id ? 'bg-accentSoft' : ''}`}><Icon name={t.icon} size={22} />
+                className={`w-full min-h-[62px] flex flex-col items-center justify-center gap-0.5 text-[12px] font-semibold transition-colors ${t.id === 'discover' ? 'nav-discover font-bold' : tab === t.id ? 'text-accent' : 'text-muted'}`}>
+                <span className={`relative px-4 py-1 rounded-full transition-colors nav-pill ${t.id === 'discover' && tab === t.id ? 'ring-2 ring-offset-2 ring-accent ring-offset-[var(--surface)]' : tab === t.id ? 'bg-accentSoft' : ''}`}><Icon name={t.icon} size={22} />
                   {t.id === 'friends' && friendsBadge > 0 && <span className="absolute -top-0.5 left-2 min-w-[18px] h-[18px] px-1 rounded-full bg-brass text-accentInk text-[11px] font-bold grid place-items-center tabular" aria-label={`${friendsBadge} חדשים`}>{friendsBadge}</span>}</span>
                 {t.label}
               </button>

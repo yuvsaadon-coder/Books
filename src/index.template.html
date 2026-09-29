@@ -15,71 +15,97 @@
   <meta name="apple-mobile-web-app-title" content="מה שנקרא">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <link rel="preload" href="fonts/frank-ruhl-libre-hebrew-400-normal.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="fonts/assistant-hebrew-400-normal.woff2" as="font" type="font/woff2" crossorigin>
   <!-- נבנה מראש: Tailwind + קוד האפליקציה (tools/build.mjs) -->
   <style>
+    /* ערכות עיצוב ספרותיות (data-palette) בגרסה בהירה וכהה (data-mode): צבעים מושתקים, ניגודיות טקסט AA לפחות */
     :root {
-      --bg: #F6F1E7; --surface: #FFFDF8; --surface-2: #EFE8DA; --ink: #1B1A28; --muted: #6A6577;
-      --line: #E6DCCB; --accent: #3446B0; --accent-2: #5E6FDB; --accent-ink: #FFFDF8; --accent-soft: #E7EAFB;
-      --brass: #DF8A1F; --rose: #D4506C; --teal: #14897F; --danger: #C0473C; --ok: #2E8B57; --warn: #A86B10;
-      --shadow: 0 1px 0 rgba(27,26,40,.03), 0 10px 24px -18px rgba(27,26,40,.35);
-      color-scheme: light;
+      --bg: #F4EEE3; --surface: #FBF8F1; --surface-2: #EAE2D3; --ink: #2B2520; --muted: #5F564C; --line: #DDD2BF;
+      --accent: #8A3B2B; --accent-2: #A4513F; --accent-ink: #FFFFFF; --accent-soft: #F2E1DA;
+      --brass: #946A22; --rose: #9A4A5C; --teal: #3F6F63; --danger: #A93A2E; --ok: #3B7A4A; --warn: #8A6116;
+      --shadow: 0 1px 0 rgba(40,30,20,.04), 0 6px 16px -14px rgba(40,30,20,.35); color-scheme: light;
     }
-    @media (prefers-color-scheme: dark) {
-      :root:not([data-theme="light"]) {
-        --bg: #100F17; --surface: #191823; --surface-2: #232231; --ink: #EDE8DF; --muted: #A39EB0;
-        --line: #2D2B3B; --accent: #9DAEFF; --accent-2: #C3CCFF; --accent-ink: #100F17; --accent-soft: #262B52;
-        --brass: #F4AE52; --rose: #F07A92; --teal: #4CC3B6; --danger: #F08C80; --ok: #7ED3A0; --warn: #F0C06A;
-        --shadow: 0 1px 0 rgba(0,0,0,.2), 0 12px 28px -18px rgba(0,0,0,.8);
-        color-scheme: dark;
-      }
+    :root[data-mode="dark"] {
+      --bg: #1C1916; --surface: #25211D; --surface-2: #302B26; --ink: #EEE6DA; --muted: #B3A899; --line: #3D362F;
+      --accent: #E0A08C; --accent-2: #EBB8A6; --accent-ink: #1C1916; --accent-soft: #3D2C25;
+      --brass: #D9AE62; --rose: #D992A2; --teal: #86BFAF; --danger: #EE9A8C; --ok: #8FCB9C; --warn: #E3BF72;
+      --shadow: 0 1px 0 rgba(0,0,0,.25), 0 8px 20px -16px rgba(0,0,0,.7); color-scheme: dark;
     }
-    :root[data-theme="dark"] {
-      --bg: #100F17; --surface: #191823; --surface-2: #232231; --ink: #EDE8DF; --muted: #A39EB0;
-      --line: #2D2B3B; --accent: #9DAEFF; --accent-2: #C3CCFF; --accent-ink: #100F17; --accent-soft: #262B52;
-      --brass: #F4AE52; --rose: #F07A92; --teal: #4CC3B6; --danger: #F08C80; --ok: #7ED3A0; --warn: #F0C06A;
-      --shadow: 0 1px 0 rgba(0,0,0,.2), 0 12px 28px -18px rgba(0,0,0,.8);
-      color-scheme: dark;
+    :root[data-palette="library"] {
+      --bg: #EDEFE7; --surface: #FAFBF6; --surface-2: #DFE4D6; --ink: #1E2A22; --muted: #536057; --line: #CFD7C4;
+      --accent: #2E5B45; --accent-2: #3F7458; --accent-ink: #FFFFFF; --accent-soft: #DAE7DE;
+      --brass: #8F6B22; --rose: #914E54; --teal: #2F6E6A; --danger: #A53A30; --ok: #2F7A45; --warn: #845F12;
+      --shadow: 0 1px 0 rgba(40,30,20,.04), 0 6px 16px -14px rgba(40,30,20,.35); color-scheme: light;
     }
+    :root[data-palette="library"][data-mode="dark"] {
+      --bg: #121814; --surface: #1A221D; --surface-2: #242E27; --ink: #E6EEE7; --muted: #A5B3A8; --line: #33403A;
+      --accent: #93C8A9; --accent-2: #B2DCC3; --accent-ink: #121814; --accent-soft: #203A2C;
+      --brass: #D6B064; --rose: #D7969B; --teal: #83C4BE; --danger: #EE9A8C; --ok: #8FCB9C; --warn: #E3BF72;
+      --shadow: 0 1px 0 rgba(0,0,0,.25), 0 8px 20px -16px rgba(0,0,0,.7); color-scheme: dark;
+    }
+    :root[data-palette="ink"] {
+      --bg: #F2F2EE; --surface: #FDFDFB; --surface-2: #E5E6E0; --ink: #1C2230; --muted: #545B69; --line: #D6D9D0;
+      --accent: #2C4677; --accent-2: #3E5C94; --accent-ink: #FFFFFF; --accent-soft: #DFE5F1;
+      --brass: #8D6A24; --rose: #924B5F; --teal: #33696A; --danger: #A53A30; --ok: #2F7A45; --warn: #845F12;
+      --shadow: 0 1px 0 rgba(40,30,20,.04), 0 6px 16px -14px rgba(40,30,20,.35); color-scheme: light;
+    }
+    :root[data-palette="ink"][data-mode="dark"] {
+      --bg: #11141B; --surface: #181C25; --surface-2: #222733; --ink: #E5E8EF; --muted: #A4ABB8; --line: #2F3544;
+      --accent: #A3B7E0; --accent-2: #C0CFEE; --accent-ink: #11141B; --accent-soft: #222D47;
+      --brass: #D5B067; --rose: #D597A8; --teal: #84BDBD; --danger: #EE9A8C; --ok: #8FCB9C; --warn: #E3BF72;
+      --shadow: 0 1px 0 rgba(0,0,0,.25), 0 8px 20px -16px rgba(0,0,0,.7); color-scheme: dark;
+    }
+    :root[data-palette="stone"] {
+      --bg: #F1EADC; --surface: #FBF7EE; --surface-2: #E6DCC8; --ink: #33291F; --muted: #66594A; --line: #DACDB5;
+      --accent: #5E5E26; --accent-2: #767633; --accent-ink: #FFFFFF; --accent-soft: #E6E5CE;
+      --brass: #93661F; --rose: #94503F; --teal: #45705F; --danger: #A53A30; --ok: #3B7A4A; --warn: #8A6116;
+      --shadow: 0 1px 0 rgba(40,30,20,.04), 0 6px 16px -14px rgba(40,30,20,.35); color-scheme: light;
+    }
+    :root[data-palette="stone"][data-mode="dark"] {
+      --bg: #1B1813; --surface: #24201A; --surface-2: #2F2A22; --ink: #EFE7D8; --muted: #B2A794; --line: #3D362C;
+      --accent: #C9C98A; --accent-2: #DADAA6; --accent-ink: #1B1813; --accent-soft: #34341E;
+      --brass: #D9AE62; --rose: #D99A8A; --teal: #8FBFAC; --danger: #EE9A8C; --ok: #8FCB9C; --warn: #E3BF72;
+      --shadow: 0 1px 0 rgba(0,0,0,.25), 0 8px 20px -16px rgba(0,0,0,.7); color-scheme: dark;
+    }
+    /* גופן אחד לכל האפליקציה (לבחירה בהגדרות), וגודל תצוגה (--zoom) */
+    :root { --font: "Frank Ruhl Libre", "David Libre", Georgia, serif; --zoom: 1; }
+    :root[data-font="david"] { --font: "David Libre", "Frank Ruhl Libre", Georgia, serif; }
+    :root[data-font="assistant"] { --font: Assistant, "Segoe UI", Arial, sans-serif; }
+    :root[data-font="alef"] { --font: Alef, Assistant, Arial, sans-serif; }
     html, body { background: var(--bg); color: var(--ink); }
-    /* אווירה: זוהר עדין של דיו בפינה, כמו אור מנורת קריאה על נייר */
-    body { background: radial-gradient(900px 520px at 110% -8%, var(--accent-soft), transparent 62%), radial-gradient(700px 420px at -20% 108%, color-mix(in srgb, var(--brass) 12%, transparent), transparent 60%), var(--bg); background-attachment: fixed; }
+    body { zoom: var(--zoom); }
     .bg-surface.border, .bg-surface.border-line { box-shadow: var(--shadow); }
-    .btn-primary { background: linear-gradient(135deg, var(--accent-2), var(--accent)); box-shadow: 0 8px 18px -10px color-mix(in srgb, var(--accent) 70%, transparent); }
-    .glass { background: color-mix(in srgb, var(--surface) 84%, transparent); -webkit-backdrop-filter: blur(16px) saturate(1.2); backdrop-filter: blur(16px) saturate(1.2); }
+    .btn-primary { background: var(--accent); }
+    .glass { background: var(--surface); }
     .eyebrow { font-size: 12px; letter-spacing: .08em; font-weight: 700; color: var(--brass); }
     .wordmark { font-family: "Frank Ruhl Libre", Georgia, serif; font-weight: 700; letter-spacing: -.01em; }
-    .rounded-xl { border-radius: 14px; }
-    /* נגיעות צבע: קו מעבר צבע מתחת לכותרות הלשוניות, ופס עליון צבעוני לכרטיסי המלצה */
-    /* שפה עיצובית: אריח צבעוני לכל מסך, כרטיסים עם עומק, סרגל ניווט צף */
-    .hero-tile { width: 48px; height: 48px; border-radius: 16px; display: grid; place-items: center; color: #fff; box-shadow: 0 10px 22px -12px color-mix(in srgb, var(--accent) 80%, transparent), inset 0 1px 0 rgba(255,255,255,.25); }
-    .summary-card { background: linear-gradient(120deg, var(--accent) 0%, var(--rose) 58%, var(--brass) 100%); box-shadow: 0 14px 28px -16px color-mix(in srgb, var(--rose) 80%, transparent); }
-    .stat-tile { transition: transform .15s; }
-    .shelf-tab.is-on { box-shadow: 0 10px 20px -14px rgba(0,0,0,.6); }
-    .nav-float { margin: 0 10px calc(env(safe-area-inset-bottom, 0px) + 8px); border: 1px solid var(--line); border-radius: 22px; box-shadow: 0 16px 36px -18px rgba(27,26,40,.45); }
+    .rounded-xl { border-radius: 10px; }
+    .hero-tile { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }
     .sync-dot { width: 8px; height: 8px; border-radius: 99px; display: inline-block; }
-    .bg-surface.border, .bg-surface.border-line { border-color: color-mix(in srgb, var(--line) 75%, transparent); }
     .step-line { position: relative; padding-inline-start: 18px; } .step-line::before { content: ''; position: absolute; inset-inline-start: 5px; top: .7em; width: 7px; height: 7px; border-radius: 9px; background: var(--accent); opacity: .55; }
     .settings-group > h2 { display: flex; align-items: center; gap: 8px; }
-    .bg-tealSoft { background: color-mix(in srgb, var(--teal) 15%, transparent); } .bg-brassSoft { background: color-mix(in srgb, var(--brass) 17%, transparent); } .bg-roseSoft { background: color-mix(in srgb, var(--rose) 15%, transparent); }
-    .toast-in { animation: toastIn .35s cubic-bezier(.2,.9,.3,1.3); } @keyframes toastIn { from { opacity: 0; transform: translateY(16px) scale(.96); } to { opacity: 1; transform: none; } }
-    .story-bar { height: 3px; border-radius: 3px; background: rgba(255,255,255,.35); overflow: hidden; } .story-bar > i { display: block; height: 100%; background: #fff; width: 0; }
-    .story-bar > i.run { animation: storyFill var(--dur, 6s) linear forwards; } .story-bar > i.full { width: 100%; } @keyframes storyFill { to { width: 100%; } }
-    @media (prefers-reduced-motion: reduce) { .toast-in { animation: none; } .story-bar > i.run { animation-duration: .01s; } }
-    .accent-top { border-top: 3px solid transparent; border-image: linear-gradient(90deg, var(--accent), var(--rose), var(--brass)) 1; }
+    .bg-tealSoft { background: color-mix(in srgb, var(--teal) 14%, transparent); } .bg-brassSoft { background: color-mix(in srgb, var(--brass) 15%, transparent); } .bg-roseSoft { background: color-mix(in srgb, var(--rose) 13%, transparent); }
+    .toast-in { animation: toastIn .25s ease-out; } @keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+    @media (prefers-reduced-motion: reduce) { .toast-in { animation: none; } }
+    .accent-top { border-top: 2px solid var(--accent); }
+    /* "גלה ספר חדש" בסרגל הניווט: תמיד בולט, גם כשלא נבחר */
+    .nav-discover .nav-pill { background: var(--accent); color: var(--accent-ink); }
+    .nav-discover { color: var(--accent); }
+    /* מצב נגישות (לפי ת"י 5568 / WCAG 2.0 AA): ניגודיות גבוהה, טקסט גדול יותר, קישורים עם קו תחתון, מיקוד בולט, בלי אנימציות */
+    :root[data-a11y] { --muted: color-mix(in srgb, var(--ink) 82%, var(--surface)); --line: color-mix(in srgb, var(--ink) 45%, var(--surface)); }
+    :root[data-a11y] a { text-decoration: underline; text-underline-offset: 3px; }
+    :root[data-a11y] :focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; box-shadow: 0 0 0 6px var(--surface); }
+    :root[data-a11y] *, :root[data-a11y] *::before, :root[data-a11y] *::after { animation: none !important; transition: none !important; }
+    :root[data-a11y] body { line-height: 1.7; letter-spacing: .01em; }
+    :root[data-a11y] button, :root[data-a11y] a, :root[data-a11y] [role=tab] { min-height: 44px; }
+    :root[data-a11y] .text-muted { font-weight: 500; }
     /* מצב קורא אלקטרוני: שחור-לבן בניגודיות מלאה, בלי אנימציות, צללים, שקיפויות ותמונות כבדות */
     :root[data-eink] { --bg: #fff; --surface: #fff; --surface-2: #efefef; --ink: #000; --muted: #2b2b2b; --line: #000; --accent: #000; --accent-2: #000; --accent-ink: #fff; --accent-soft: #e6e6e6; --brass: #000; --rose: #000; --teal: #000; --danger: #000; --ok: #000; --warn: #000; --shadow: none; color-scheme: light; }
     :root[data-eink] body { background: #fff; font-size: 18px; }
     :root[data-eink] *, :root[data-eink] *::before, :root[data-eink] *::after { animation: none !important; transition: none !important; box-shadow: none !important; }
-    :root[data-eink] .glass { background: #fff; -webkit-backdrop-filter: none; backdrop-filter: none; }
-    :root[data-eink] .btn-primary { background: #000; }
-    :root[data-eink] .hero-tile, :root[data-eink] .summary-card { background: #000 !important; }
-    :root[data-eink] .accent-top { border-image: none; border-top-color: #000; }
     :root[data-eink] .font-reading { font-size: 18.5px; line-height: 1.8; }
-        nav .bg-accentSoft { background: linear-gradient(135deg, var(--accent-soft), color-mix(in srgb, var(--rose) 16%, var(--accent-soft))); }
-    body { margin: 0; font-family: Assistant, "Segoe UI", Arial, sans-serif; font-size: 16px; line-height: 1.55; -webkit-tap-highlight-color: transparent; -webkit-font-smoothing: antialiased; }
+    body { margin: 0; font-family: var(--font); font-size: 16px; line-height: 1.55; -webkit-tap-highlight-color: transparent; -webkit-font-smoothing: antialiased; }
     /* טקסט לקריאה: תקצירים, הערות, שיחה */
-    .font-reading { font-family: "Frank Ruhl Libre", "David Libre", Georgia, serif; font-size: 16.5px; line-height: 1.75; }
+    .font-reading { font-family: var(--font); font-size: 16.5px; line-height: 1.75; }
     h1, h2, h3 { text-wrap: balance; }
     .tabular { font-variant-numeric: tabular-nums; }
     .grid > *, main { min-width: 0; }
@@ -108,6 +134,11 @@
     // אירוע ההתקנה עלול להגיע לפני ש-React נטען, לכן תופסים אותו כאן
     // מצב קורא אלקטרוני (הגדרה של המכשיר): מופעל לפני הציור הראשון, בלי הבהוב
     try { if (localStorage.getItem('vrt-eink') === '1') document.documentElement.setAttribute('data-eink', ''); } catch (e) {}
+    // ערכת העיצוב, הגופן, הגודל והנגישות (נשמרים גם במכשיר): לפני הציור הראשון, בלי הבהוב
+    try { var L = JSON.parse(localStorage.getItem('vrt-look') || '{}'), R = document.documentElement;
+      if (L.palette) R.setAttribute('data-palette', L.palette); if (L.font) R.setAttribute('data-font', L.font); if (L.a11y) R.setAttribute('data-a11y', '');
+      if (L.zoom) R.style.setProperty('--zoom', L.zoom);
+      if (L.mode === 'dark' || (L.mode !== 'light' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches)) R.setAttribute('data-mode', 'dark'); } catch (e) {}
     window.__installPrompt = null;
     window.addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); window.__installPrompt = e; window.dispatchEvent(new Event('vrt-install-ready')); });
     window.addEventListener('appinstalled', function () { window.__installPrompt = null; window.dispatchEvent(new Event('vrt-install-ready')); });

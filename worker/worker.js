@@ -735,16 +735,18 @@ const DIGEST_TOOL = {
 };
 const ADDRESS_RULE = { f: ' Address the reader in the Hebrew feminine singular.', m: ' Address the reader in the Hebrew masculine singular.', n: ' Address the reader in gender-neutral Hebrew.' };
 function digestPrompt(db, prior) {
-  const read = (db.books || []).filter(b => !['want', 'reading'].includes(b.status)).sort((a, b) => b.rating - a.rating).slice(0, 60);
-  const lib = read.map(b => `- ${b.title}${b.year ? ` (${b.year})` : ''} — ${(b.authors || [])[0] || '?'} | ${b.rating}${b.note ? ' | ' + String(b.note).slice(0, 120) : ''}`).join('\n');
+  const read = (db.books || []).filter(b => !['want', 'reading'].includes(b.status)).sort((a, b) => (b.readAt || 0) - (a.readAt || 0) || b.rating - a.rating).slice(0, 60);
+  // מתי נקרא ביחס להיום: הקריאה האחרונה מראה את הטעם העכשווי
+  const when = (b) => { if (!b.readAt) return 'date unknown'; const d = (Date.now() - b.readAt) / 86400000; return d < 45 ? `${Math.round(d)} days ago` : d < 540 ? `${Math.round(d / 30)} months ago` : `${Math.round(d / 365)} years ago`; };
+  const lib = read.map(b => `- ${b.title}${b.year ? ` (${b.year})` : ''} — ${(b.authors || [])[0] || '?'} | ${b.rating} | read ${when(b)}${b.note ? ' | ' + String(b.note).slice(0, 120) : ''}`).join('\n');
   const p = db.litProfile;
   const exclude = [...new Set([...(db.books || []).map(b => b.title), ...(db.history || []).flatMap(h => (h.recs || []).map(r => r.title)),
     ...prior.flatMap(d => d.books.map(b => b.title)), ...(db.rejections || []).map(r => r.title)])].slice(0, 700);
-  return `${p && p.text ? `READER PROFILE:\n${p.brief || p.text}` : `READER'S LIBRARY (title — author | rating | notes):\n${lib || '(empty)'}`}${db.profileNote ? `\nREADER'S NOTE: ${db.profileNote}` : ''}
+  return `${p && p.text ? `READER PROFILE:\n${p.brief || p.text}${lib ? `\nRECENT READING (newest first):\n${lib.split('\n').slice(0, 12).join('\n')}` : ''}` : `READER'S LIBRARY (title — author | rating | when read | notes), newest first:\n${lib || '(empty)'}`}${db.profileNote ? `\nREADER'S NOTE: ${db.profileNote}` : ''}
 WISHLIST / READING NOW (current interests; do not suggest these): ${(db.books || []).filter(b => ['want', 'reading'].includes(b.status)).slice(0, 40).map(b => b.title).join('; ') || 'none'}
 DO NOT SUGGEST (already read, owned, suggested before, or rejected): ${exclude.join('; ') || 'none'}
 
-Suggest 14 books this reader has not read that would interest them now — a varied mix (not all by the same author), including some recent books. Prefer books with a Hebrew edition.`;
+Recent reading (by when read) shows current interests and where the taste is heading; weigh it more than old favourites.\nSuggest 14 books this reader has not read that would interest them now — a varied mix (not all by the same author), including some recent books. Prefer books with a Hebrew edition.`;
 }
 export async function generateDigest(env, ctx, pid, db) {
   const prior = (await env.LIBRARY.get('digest:' + pid, 'json')) || [];

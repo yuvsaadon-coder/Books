@@ -9,8 +9,8 @@ module.exports = Object.assign({
             brass: 'var(--brass)', rose: 'var(--rose)', teal: 'var(--teal)', danger: 'var(--danger)', ok: 'var(--ok)', warn: 'var(--warn)'
           },
           fontFamily: {
-            display: ['"Frank Ruhl Libre"', '"David Libre"', 'Georgia', 'serif'],
-            body: ['Assistant', '"Segoe UI"', 'Arial', 'sans-serif']
+            display: ['var(--font)'],
+            body: ['var(--font)']
           }
         }
       }

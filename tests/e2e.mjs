@@ -467,26 +467,41 @@ try {
     const jp = jobBodies.at(-1).messages[0].content;
     assert.ok(jp.includes('GIFT MODE') && !jp.includes("READER'S LIBRARY") && !jp.includes('READER PROFILE'), 'gift request does not carry my taste');
   });
-  await step('biweekly Wrapped summary: banner, story, seen', async () => {
+  await step('reading summary: always reachable, genres, years, authors, periods', async () => {
     await A.click('nav >> text=ספרים שלי');
     // כרטיס קבוע בראש הספרייה, עם תג "חדש" כשיש סיכום שלא נצפה
     const card = A.locator('button.summary-card');
     await card.locator('text=חדש').waitFor();
     await card.click();
-    const story = A.locator('[role=dialog][aria-label="הסיכום הדו-שבועי"]');
-    await story.waitFor();
-    await story.locator('button:has-text("הבא")').click();
-    await story.locator('text=/ספרים? (הסתיים|הסתיימו)/').waitFor();
-    await story.locator('button:has-text("הבא")').click();
-    await story.locator('text=הספר של התקופה').waitFor();
-    for (let i = 0; i < 6 && await story.locator('button:has-text("הבא")').count(); i++) await story.locator('button:has-text("הבא")').click();
-    await story.locator('text=סוג הקריאה שלך').or(story.locator('button:has-text("שיתוף כתמונה")')).first().waitFor();
-    await story.locator('button[aria-label="סגירה"]').click();
+    const rep = A.locator('[role=dialog][aria-label="סיכום הקריאה"]');
+    await rep.waitFor();
+    await rep.locator('text=ספרים שהסתיימו').waitFor();
+    for (const t of ['סוג הקריאה שלך', 'הספר של התקופה', 'סוגות', 'מתי נכתבו', 'סופרים', 'דירוגים', 'שפה ומקור']) await rep.locator(`h3:has-text("${t}")`).waitFor();
+    assert.ok(await rep.locator('button:has-text("שיתוף כתמונה")').count() > 0);
+    assert.equal(await rep.locator('text=Wrapped').count(), 0);
+    await A.waitForTimeout(500); await shot(A, 'summary', false); await rep.locator('h3:has-text("מתי נכתבו")').scrollIntoViewIfNeeded(); await shot(A, 'summary2', false);
+    await rep.locator('button:has-text("כל הזמן")').click(); await rep.locator('p:has-text("כל הזמן")').waitFor(); await rep.locator('h3:has-text("סוגות")').waitFor();
+    await rep.locator('button[aria-label="סגירה"]').click();
     assert.equal(await card.locator('text=חדש').count(), 0, 'no "new" badge after seen');
-    // בחירת תקופה: השנה
-    await card.click(); await story.locator('button:has-text("השנה")').click();
-    await story.locator('text=השנה שלך בספרים').waitFor();
-    await story.locator('button[aria-label="סגירה"]').click();
+  });
+  await step('display: literary palettes, font, text size, accessibility; Discover stands out', async () => {
+    await A.click('nav >> text=הגדרות');
+    const R = () => A.evaluate(() => ({ p: document.documentElement.getAttribute('data-palette'), f: document.documentElement.getAttribute('data-font'), a: document.documentElement.hasAttribute('data-a11y'), z: getComputedStyle(document.documentElement).getPropertyValue('--zoom').trim() }));
+    await A.click('[role=radio]:has-text("ספרייה ישנה")'); assert.equal((await R()).p, 'library');
+    await A.click('[role=radio]:has-text("דוד")'); assert.equal((await R()).f, 'david');
+    assert.ok((await A.evaluate(() => getComputedStyle(document.body).fontFamily)).includes('David Libre'));
+    await A.click('[aria-label="הגדלת הטקסט"]'); assert.equal((await R()).z, '1.1');
+    await A.click('[role=switch][aria-label="מצב נגישות"]'); const r = await R(); assert.ok(r.a && Number(r.z) >= 1.15, JSON.stringify(r));
+    await shot(A, 'settings-look');
+    // נשמר גם אחרי רענון (לפני שהאפליקציה נטענת, בלי הבהוב)
+    await A.reload(); assert.deepEqual(await R(), r);
+    await A.click('nav >> text=הגדרות');
+    await A.click('[role=switch][aria-label="מצב נגישות"]'); await A.click('[aria-label="הקטנת הטקסט"]'); await A.click('[role=radio]:has-text("נייר וקלף")'); await A.click('[role=radio]:has-text("פרנק רוהל")');
+    assert.deepEqual(await R(), { p: null, f: null, a: false, z: '1' });
+    assert.equal(await A.locator('nav li button.nav-discover').count(), 1, 'Discover is highlighted in the nav');
+    // המודל רואה מתי כל ספר נקרא ביחס להיום
+    const jp = jobBodies.map(j => j.messages[0].content).find(c => !c.includes('GIFT MODE') && c.includes('REQUEST:')) || '';
+    assert.ok(jp.includes('READING TIMELINE') && /read (in the last days|\d+ days ago|\d+ months ago)/.test(jp), 'reading dates reach the model');
   });
   await step('export CSV for other apps, import from Goodreads', async () => {
     await A.click('nav >> text=הגדרות');

@@ -7,7 +7,9 @@
     "test": "npm --prefix tests test"
   },
   "devDependencies": {
+    "@fontsource/alef": "^5.3.0",
     "@fontsource/assistant": "^5.3.0",
+    "@fontsource/david-libre": "^5.3.0",
     "@fontsource/frank-ruhl-libre": "^5.3.0",
     "esbuild": "0.25.10",
     "lucide": "^0.469.0",
