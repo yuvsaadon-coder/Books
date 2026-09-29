@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '21';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '22';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -1012,6 +1012,9 @@ const AI_MODEL = 'claude-sonnet-4-6';
 const ANTHROPIC_SDK_URL = 'https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.129.0/+esm';
 // מחירי מחירון: Sonnet 4.6 ‏$3 / $15 למיליון טוקנים, חיפוש ברשת ‏$10 לאלף חיפושים
 const PRICE = { in: 3 / 1e6, out: 15 / 1e6, cacheRead: 0.3 / 1e6, search: 10 / 1000 };
+// מודל זול ומהיר למשימות פשוטות (שאלות המשך, עדכון פרופיל, חילוץ ספרים מטקסט, תרגום). ההמלצה עצמה נשארת על AI_MODEL
+const FAST_MODEL = 'claude-haiku-4-5-20251001';
+const PRICE_FAST = { in: 1 / 1e6, out: 5 / 1e6, cacheRead: 0.1 / 1e6, search: 10 / 1000 };
 let sdkPromise = null;
 async function aiClient() {
   const c = loadCloud();
@@ -1042,16 +1045,16 @@ function echoable(content) {
   if (idx < 0) return content;
   return content.filter((b, i) => i > idx || !['thinking', 'redacted_thinking', 'tool_use', 'fallback'].includes(b.type));
 }
-function costOf(usage) {
+function costOf(usage, P = PRICE) {
   if (!usage) return 0;
   const st = usage.server_tool_use || {};
-  return (usage.input_tokens || 0) * PRICE.in + (usage.cache_creation_input_tokens || 0) * PRICE.in * 1.25 +
-    (usage.cache_read_input_tokens || 0) * PRICE.cacheRead + (usage.output_tokens || 0) * PRICE.out +
-    (st.web_search_requests || 0) * PRICE.search;
+  return (usage.input_tokens || 0) * P.in + (usage.cache_creation_input_tokens || 0) * P.in * 1.25 +
+    (usage.cache_read_input_tokens || 0) * P.cacheRead + (usage.output_tokens || 0) * P.out +
+    (st.web_search_requests || 0) * P.search;
 }
 // הרצה עם כלי "הגשה" במבנה קבוע: המודל מסיים בקריאה לכלי, ואנחנו קוראים את הקלט שלו
 // web: false | true | { sites, searches, fetches } — תקציב חיפושים כולל לכל הריצה (לא לכל פנייה)
-async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', onProgress }) {
+async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', onProgress, fast = false }) {
   const { client, Anthropic } = await aiClient();
   const cfg = web === true ? { searches: 6, fetches: 4 } : web || null;
   let searchesLeft = cfg ? cfg.searches : 0, fetchesLeft = cfg ? cfg.fetches || 0 : 0;
@@ -1067,8 +1070,8 @@ async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', 
     let msg;
     for (let attempt = 0; ; attempt++) try {
       const stream = client.messages.stream({
-        model: AI_MODEL, max_tokens: 32000,
-        thinking: { type: 'adaptive', display: 'summarized' }, output_config: { effort },
+        // Haiku: בלי חשיבה מורחבת ובלי effort (משימות פשוטות, תשובה במבנה קבוע)
+        ...(fast ? { model: FAST_MODEL, max_tokens: 8000 } : { model: AI_MODEL, max_tokens: 32000, thinking: { type: 'adaptive', display: 'summarized' }, output_config: { effort } }),
         system, tools: toolsNow(), messages
       });
       if (onProgress) stream.on('contentBlock', (b) => { const d = describeBlock(b); if (d) onProgress(d); });
@@ -1084,7 +1087,7 @@ async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', 
       }
       throw new Error('אין חיבור לשרת המשפחתי. בדקו אינטרנט ונסו שוב.');
     }
-    cost += costOf(msg.usage);
+    cost += costOf(msg.usage, fast ? PRICE_FAST : PRICE);
     msg.content.forEach(b => {
       if (b.type === 'server_tool_use' && b.name === 'web_search') searchesLeft--;
       if (b.type === 'server_tool_use' && b.name === 'web_fetch') fetchesLeft--;
@@ -1104,7 +1107,7 @@ const HEBREW_OUT = 'Write every free-text field in Hebrew (except original-langu
 // 1. פסקה חופשית ← רשימת ספרים
 async function aiExtractBooks(paragraph) {
   const { input, cost } = await aiRun({
-    web: false, effort: 'medium',
+    web: false, fast: true,
     system: 'You extract the books a reader mentions in free text (Hebrew or English). Fix obvious misspellings and use the official published title (the Hebrew edition title if the text is in Hebrew and a Hebrew edition exists). Include the author when stated or when you are confident. Do not invent books that are not mentioned. ' + HEBREW_OUT,
     prompt: paragraph,
     submitTool: {
@@ -1267,7 +1270,7 @@ async function aiBookDetails(book, onProgress) {
 // תרגום תקציר לעברית (בלי חיפוש ברשת, זול)
 async function aiTranslate(text) {
   const { input, cost } = await aiRun({
-    web: false, effort: 'low',
+    web: false, fast: true,
     system: 'Translate the book synopsis into natural, literary Hebrew. Keep names of people and places in their common Hebrew spelling. Do not add or remove content.',
     prompt: text,
     submitTool: { name: 'submit_translation', description: 'Return the Hebrew translation.',
@@ -1311,7 +1314,7 @@ function focusSummary(focus) {
 // שאלות המשך קצרות לדיוק הבקשה (2–4), לפני ההמלצה
 async function aiClarify({ books, request, focus, profile }) {
   const { input } = await aiRun({
-    effort: 'low', web: false,
+    fast: true, web: false,
     system: 'You help a reader find their next book. Before recommending, ask 2 to 4 short follow-up questions that would most change which books you pick, given their library and request. Do not ask what they already answered. Each question gets 2–5 short answer options. ' + HEBREW_OUT,
     prompt: `${profile && profile.text ? `READER PROFILE:\n${profile.brief || profile.text}` : `READER'S LIBRARY (title — author | rating 1-5 | tags | notes):\n${libraryForPrompt(books).split('\n').slice(0, 40).join('\n') || '(empty)'}`}\n\nREQUEST: ${request || '(none)'}\nPREFERENCES: ${focusSummary(focus).join('; ') || '(none)'}`,
     submitTool: {
@@ -1359,7 +1362,7 @@ async function aiBuildProfile(db) {
     ? `CURRENT PROFILE:\n${p.text}${note}\n\nCHANGES SINCE IT WAS WRITTEN (title — author | rating | tags | notes):\n${libraryForPrompt(changedSince(db, p.at), 60) || '(none)'}${wish ? `\nWISHLIST NOW: ${wish}` : ''}${rej ? `\nREJECTED RECOMMENDATIONS WITH REASONS: ${rej}` : ''}\n\nUpdate the profile: keep what still holds, add what the changes show.`
     : `READER'S LIBRARY (title — author | rating 1-5 | tags | notes):\n${libraryForPrompt(db.books, 200)}${note}${wish ? `\nWISHLIST: ${wish}` : ''}${rej ? `\nREJECTED RECOMMENDATIONS WITH REASONS: ${rej}` : ''}\n\nWrite the profile.`;
   const { input, cost } = await aiRun({
-    effort: 'low', web: false, prompt, submitTool: PROFILE_TOOL,
+    fast: true, web: false, prompt, submitTool: PROFILE_TOOL,
     system: 'You are a literary advisor. Build a concise, specific literary taste profile of this reader from what they read, how they rated it, their notes, their wishlist and the recommendations they rejected (with reasons). Name authors, themes, qualities of writing, emotional register and pace. profile_he is written in Hebrew for the reader; brief_en is in English for another model.'
   });
   return { text: input.profile_he, brief: input.brief_en, at: Date.now(), count: db.books.length, cost };

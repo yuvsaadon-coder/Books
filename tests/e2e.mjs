@@ -249,8 +249,13 @@ try {
     await A.fill('#clarify-other', 'בעיקר קלאסיקה אמריקאית'); await A.click('button:has-text("שליחה")');
     await A.waitForSelector('text=ההמלצות שלך', { timeout: 20000 });
     assert.deepEqual(await texts(A.locator('section li .font-display.text-\\[18px\\]')), ['יש ואין']);
+    // משימות פשוטות על המודל הזול, ההמלצה עצמה על המודל הגדול
+    const clarify = aiCalls.find(c => (c.tools || []).some(t => t.name === 'submit_questions'));
+    assert.equal(clarify.model, 'claude-haiku-4-5-20251001'); assert.equal(clarify.thinking, undefined);
+    if (profileCalls.length) assert.equal(profileCalls[0].model, 'claude-haiku-4-5-20251001');
+    assert.equal(aiCalls.find(c => (c.tools || []).some(t => t.name === 'submit_translation')).model, 'claude-haiku-4-5-20251001');
     const job = jobBodies.at(-1);
-    assert.equal(job.submit, 'submit_recommendations'); assert.equal(job.tools.length, 1, 'no web tools in the recommendation job');
+    assert.equal(job.submit, 'submit_recommendations'); assert.equal(job.model, 'claude-sonnet-4-6'); assert.equal(job.tools.length, 1, 'no web tools in the recommendation job');
     const jp = job.messages[0].content;
     assert.ok(jp.includes('מקור: ספרות מתורגמת') && jp.includes('כמה עצוב מותר? → אפשר לבכות') && jp.includes('בעיקר קלאסיקה אמריקאית'), 'focus and follow-up answers reach the model');
     assert.ok(await A.locator('section li >> text=זמינות').count() > 0);
