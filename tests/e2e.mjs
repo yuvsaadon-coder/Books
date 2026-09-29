@@ -288,6 +288,12 @@ try {
     await A.click('[role=dialog] button:has-text("הוספה לרשימת")');
     await A.click('nav >> text=ספרים שלי'); await A.click('button[role=tab]:has-text("רוצה לקרוא")');
     await A.waitForSelector('main li:has-text("קפקא על החוף")');
+    // תצוגת קוביות
+    await A.click('[aria-label="תצוגת קוביות"]');
+    await A.waitForSelector('ul[aria-label="הספרים בקוביות"] li:has-text("קפקא על החוף")');
+    const [sw, w] = await A.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
+    assert.ok(sw <= w, `grid overflow ${sw} > ${w}`);
+    await A.click('[aria-label="תצוגת רשימה"]');
     await B.click('nav >> text=ספרים שלי'); await B.click('main ul li button >> nth=0');
     await B.click('[role=dialog] button:has-text("להמליץ לחבר")'); await B.click('[role=dialog] button:has-text("יובל")');
     await B.fill('#rec-note', 'חובה לקרוא!'); await B.click('[role=dialog] button:has-text("שליחה")'); await B.keyboard.press('Escape');

@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '19';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '20';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -2312,6 +2312,9 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
   const [open, setOpen] = useState(null);
   const [confirmDel, setConfirmDel] = useState(false);
   const [shelf, setShelf] = useState(() => { try { return sessionStorage.getItem('vrt_shelf') || 'read'; } catch (e) { return 'read'; } });
+  // תצוגה: רשימה או קוביות (נשמר במכשיר)
+  const [layout, setLayout] = useState(() => { try { return localStorage.getItem('vrt_layout') || 'list'; } catch (e) { return 'list'; } });
+  useEffect(() => { try { localStorage.setItem('vrt_layout', layout); } catch (e) { /* */ } }, [layout]);
   useEffect(() => { try { sessionStorage.setItem('vrt_shelf', shelf); } catch (e) { /* */ } }, [shelf]);
   const readBooks = db.books.filter(b => b.status !== 'want'), wantBooks = db.books.filter(b => b.status === 'want');
   const books = shelf === 'want' ? wantBooks : readBooks;
@@ -2367,6 +2370,12 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
           <input id="lib-search" value={q} onChange={e => setQ(e.target.value)} placeholder="חיפוש לפי שם, מחבר או תגית"
             className="w-full min-h-[48px] pr-10 pl-3 rounded-xl border border-line bg-surface text-[16px]" />
         </div>
+        <div className="flex rounded-xl border border-line bg-surface overflow-hidden shrink-0" role="group" aria-label="תצוגה">
+          {[['list', 'List', 'תצוגת רשימה'], ['grid', 'LayoutGrid', 'תצוגת קוביות']].map(([k, ic, l]) => (
+            <button key={k} type="button" aria-label={l} aria-pressed={layout === k} onClick={() => setLayout(k)}
+              className={`w-11 min-h-[48px] grid place-items-center ${layout === k ? 'bg-accentSoft text-accent' : 'text-muted'}`}><Icon name={ic} size={19} /></button>
+          ))}
+        </div>
         <label htmlFor="lib-sort" className="sr-only">מיון</label>
         <select id="lib-sort" value={sort} onChange={e => setSort(e.target.value)} className="min-h-[48px] px-2 rounded-xl border border-line bg-surface text-[15px]">
           <option value="recent">חדשים</option>
@@ -2380,6 +2389,24 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
           {allTags.map(([t, n]) => <Chip key={t} active={tag === t} onClick={() => setTag(tag === t ? '' : t)} className="shrink-0">{t} <span className="tabular opacity-70">{n}</span></Chip>)}
         </div>
       )}
+      {layout === 'grid' ? (
+        <ul className="grid grid-cols-3 gap-x-3 gap-y-4" aria-label="הספרים בקוביות">
+          {list.map(b => (
+            <li key={b.id}>
+              <button type="button" onClick={() => { setOpen(b.id); setConfirmDel(false); }} className="w-full text-right grid gap-1.5 active:scale-[.98] transition-transform">
+                <span className="relative block">
+                  <Cover book={b} className="w-full aspect-[2/3] h-auto rounded-lg" />
+                  {b.status === 'want'
+                    ? <span className="absolute top-1.5 left-1.5 w-6 h-6 rounded-full glass grid place-items-center text-brass"><Icon name="Bookmark" size={14} /></span>
+                    : <span className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-full glass text-[11px] font-bold tabular inline-flex items-center gap-0.5"><Icon name="Star" size={11} className="text-brass" />{b.rating}</span>}
+                </span>
+                <span className="font-display font-medium text-[14px] leading-snug clamp-2">{b.title}</span>
+                <span className="text-muted text-[12px] truncate -mt-1">{(b.authors || [])[0] || ''}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
       <ul className="grid gap-2.5">
         {list.map(b => (
           <li key={b.id}>
@@ -2396,6 +2423,7 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
           </li>
         ))}
       </ul>
+      )}
       {!list.length && <p className="text-center text-muted py-8">{shelf === 'want' && !wantBooks.length ? 'עוד אין ספרים ברשימה. אפשר להוסיף מהחיפוש, מההמלצות או מהסוויפ.' : 'אין ספרים שתואמים לחיפוש.'}</p>}
 
       {current && (
