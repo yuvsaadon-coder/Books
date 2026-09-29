@@ -108,3 +108,36 @@ console.log('worker page verification: ok');
   assert.ok(!('submit' in sentBodies[0]), 'internal field is not sent to Anthropic');
   console.log('worker background job: ok');
 }
+// זמינות + תקציר: מאגרים → סטימצקי לפי ISBN (דף שמכיל את ה-ISBN) → תקציר עברי מהחנות כי במאגר יש רק אנגלית → מטמון 4 ימים
+{
+  const { bookInfo, pageHasIsbn } = await import('../worker/worker.js');
+  assert.ok(pageHasIsbn('<span>ISBN: 978-965-00-0002-8</span>', '9789650000028'));
+  assert.ok(!pageHasIsbn('<span>ISBN: 978-965-00-0003-5</span>', '9789650000028'));
+  const store = new Map();
+  globalThis.caches = { default: { match: async (r) => store.get(r.url) ? new Response(store.get(r.url)) : undefined, put: async (r, res) => { store.set(r.url, await res.text()); } } };
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    url = String(url); calls.push(url);
+    if (url.startsWith('https://www.googleapis.com/')) return new Response(JSON.stringify({ items: [{ volumeInfo: { title: 'יש ואין', authors: ['ארנסט המינגוויי'], description: 'Harry Morgan runs contraband.', industryIdentifiers: [{ type: 'ISBN_13', identifier: '9789650000028' }] }, saleInfo: { isEbook: false } }] }));
+    if (url.startsWith('https://openlibrary.org/')) return new Response(JSON.stringify({ docs: [] }));
+    if (url.startsWith('https://www.steimatzky.co.il/catalogsearch')) return new Response('<a href="/yesh-veein-123">יש ואין</a><a href="/cart">עגלה</a>');
+    if (url === 'https://www.steimatzky.co.il/yesh-veein-123') return new Response('<html><head><meta property="og:title" content="יש ואין"><meta property="og:description" content="הארי מורגן, דייג מקי ווסט, נאלץ להבריח סחורות כדי לפרנס את משפחתו בשנות השפל הגדול, ונקלע לעולם מסוכן."></head><body>יש ואין ארנסט המינגוויי ISBN 978-965-00-0002-8</body></html>');
+    return new Response('blocked', { status: 403 });
+  };
+  const kv = new Map();
+  const envB = { LIBRARY: { get: async (k, t) => kv.has(k) ? JSON.parse(kv.get(k)) : null, put: async (k, v, o) => { kv.set(k, v); assert.equal(o.expirationTtl, 4 * 86400); } } };
+  const waits = []; const ctx = { waitUntil: (p) => waits.push(p) };
+  const info = await bookInfo(envB, ctx, { isbn: '', title: 'יש ואין', author: 'ארנסט המינגוויי' });
+  assert.equal(info.isbn, '9789650000028'); assert.ok(info.found);
+  assert.deepEqual(info.urls, [{ site: 'steimatzky.co.il', url: 'https://www.steimatzky.co.il/yesh-veein-123', kinds: ['print'] }]);
+  assert.ok(info.available.print && !info.available.ebook);
+  assert.ok(info.synopsis.startsWith('הארי מורגן') && info.synopsisSource === 'steimatzky.co.il', 'Hebrew synopsis from the store because the catalogue has only English');
+  assert.ok(!calls.some(u => u.includes('api.anthropic.com')), 'no paid search when the store page is found directly');
+  // המטמון: הבקשה השנייה לא יוצאת לרשת
+  const res1 = await (await worker.fetch(new Request('https://w/bookinfo?title=' + encodeURIComponent('יש ואין') + '&author=' + encodeURIComponent('ארנסט המינגוויי')), envB, ctx)).json();
+  await Promise.all(waits);
+  const n = calls.length;
+  const res2 = await (await worker.fetch(new Request('https://w/bookinfo?title=' + encodeURIComponent('יש ואין') + '&author=' + encodeURIComponent('ארנסט המינגוויי')), envB, ctx)).json();
+  assert.equal(calls.length, n); assert.ok(res2.cached); assert.equal(res2.isbn, res1.isbn);
+  console.log('worker book info: ok');
+}

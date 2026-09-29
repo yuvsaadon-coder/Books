@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '20';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '21';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -1469,19 +1469,29 @@ function kindsOf(site, text) {
   if (site === 'steimatzky.co.il') return /דיגיטלי|e-?book/i.test(t) ? ['ebook'] : /קולי|אודיו/.test(t) ? ['audio'] : ['print'];
   return ['print'];
 }
+// זמינות + קישורים + תקציר מהשרת (מאגרים → סטימצקי/צומת לפי ISBN → חנויות לפי שם), נשמר בשרת ל-4 ימים
+async function fetchBookInfo(book) {
+  const c = loadCloud();
+  if (!c) return null;
+  const isbns = (book.isbns || []).map(x => String(x).replace(/[^\dXx]/g, ''));
+  const isbn = isbns.find(x => /^(978)?965/.test(x)) || isbns[0] || '';
+  return fetchJSON(c.url + '/bookinfo?' + new URLSearchParams({ isbn, title: book.title || '', author: (book.authors || [])[0] || '' }), 40000);
+}
 async function enrichRec(rec) {
+  const info = await fetchBookInfo(rec).catch(() => null);
   const offers = [];
-  if (rec.source === 'web' && rec.link) offers.push({ site: rec.verifiedVia, url: rec.link, kinds: kindsOf(rec.verifiedVia, `${rec.title} ${rec.description}`) });
   if (rec.ebook) offers.push({ site: 'Google Play', url: rec.ebookLink || rec.link, kinds: ['ebook'] });
+  if (rec.source === 'web' && rec.link) offers.push({ site: rec.verifiedVia, url: rec.link, kinds: kindsOf(rec.verifiedVia, `${rec.title} ${rec.description}`) });
   let out = { ...rec };
-  if (hasHebrew(rec.title)) {
-    const st = await storeSearch(rec.title, (rec.authors || [])[0] || '').catch(() => []);
-    st.forEach(x => { if (!offers.some(o => o.url === x.link)) offers.push({ site: x.verifiedVia, url: x.link, kinds: kindsOf(x.verifiedVia, `${x.title} ${x.description}`) }); });
-    const src = st.find(x => x.description && hasHebrew(x.description) && x.description.length > 60);
-    if (src && (!out.description || !hasHebrew(out.description))) out = { ...out, description: src.description, descSource: STORE_NAMES[src.verifiedVia] || src.verifiedVia, descriptionHe: '' };
-    if (!out.cover) { const im = st.find(x => x.cover); if (im) out.cover = im.cover; }
+  if (info) {
+    (info.urls || []).forEach(u => { if (!offers.some(o => o.url === u.url)) offers.push(u); });
+    // תקציר: מה שכבר יש מהמאגרים קודם; תקציר עברי מהשרת רק אם חסר תקציר עברי
+    if (info.synopsis && hasHebrew(info.synopsis) && !hasHebrew(out.description || '')) out = { ...out, description: info.synopsis, descSource: STORE_NAMES[info.synopsisSource] || info.synopsisSource, descriptionHe: '' };
+    else if (info.synopsis && !out.description) out = { ...out, description: info.synopsis, descSource: info.synopsisSource };
+    if (!out.cover && info.cover) out.cover = info.cover;
+    if (info.isbn && !(out.isbns || []).length) out.isbns = [info.isbn];
   }
-  return { ...out, offers };
+  return { ...out, offers, availability: info ? info.available : null };
 }
 
 /* ============================================================
@@ -2511,9 +2521,8 @@ function Synopsis({ book, onChange, className = '', fetchSource = false }) {
     try { if (sessionStorage.getItem(k)) return; sessionStorage.setItem(k, '1'); } catch (e) { /* */ }
     let alive = true;
     setSrcBusy(true);
-    storeSearch(book.title, (book.authors || [])[0] || '').then(st => {
-      const src = st.find(x => x.description && hasHebrew(x.description) && x.description.length > 60);
-      if (alive && src && onChange) onChange({ description: src.description, descSource: STORE_NAMES[src.verifiedVia] || src.verifiedVia, descriptionHe: '' });
+    fetchBookInfo(book).then(info => {
+      if (alive && info && info.synopsis && hasHebrew(info.synopsis) && onChange) onChange({ description: info.synopsis, descSource: STORE_NAMES[info.synopsisSource] || info.synopsisSource, descriptionHe: '' });
     }).catch(() => {}).finally(() => alive && setSrcBusy(false));
     return () => { alive = false; };
   }, [book.key]);
@@ -3304,7 +3313,7 @@ function FocusGroup({ id, focus, onToggle }) {
 function RecAvailability({ r }) {
   const offers = r.offers || [];
   const KIND = { print: 'מודפס', ebook: 'דיגיטלי', audio: 'קולי' };
-  const has = (k) => offers.some(o => (o.kinds || []).includes(k));
+  const has = (k) => offers.some(o => (o.kinds || []).includes(k)) || !!(r.availability && r.availability[k === 'audio' ? 'audio' : k]);
   const site = (s) => STORE_NAMES[s] || s;
   return (
     <div className="mt-2.5 border border-line rounded-xl p-2.5 grid gap-1.5">
@@ -3502,7 +3511,7 @@ function DiscoverTab({ db, update, onPick, notify }) {
     language: r.language, isbns: (r.isbns || []).slice(0, 3), link: r.link, publisher: r.publisher || '', reasons: r.reasons || [],
     verifiedAt: r.verifiedAt, verifiedVia: r.verifiedVia || '', ebook: !!r.ebook, ebookLink: r.ebookLink || '', olEbook: !!r.olEbook,
     sources: r.sources || [], aiFormats: r.aiFormats || null, genres: r.genres || [], descSource: r.descSource || '', descriptionHe: (r.descriptionHe || '').slice(0, 1500),
-    offers: (r.offers || []).slice(0, 8)
+    offers: (r.offers || []).slice(0, 8), availability: r.availability || null
   });
   const saveSession = (ans, usedLang, allRecs) => {
     if (!st.session.id) st.session = { id: uid(), at: Date.now() };

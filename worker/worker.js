@@ -295,7 +295,7 @@ async function fetchHtml(url, ctx, ttl = 86400) {
     return html;
   } catch (e) { return null; } finally { clearTimeout(timer); }
 }
-async function storeSearchViaClaude(env, q) {
+async function storeSearchViaClaude(env, q, sites = STORE_SITES) {
   if (!env.ANTHROPIC_API_KEY) return [];
   const day = new Date().toISOString().slice(0, 10);
   const counterKey = 'store-count:' + day;
@@ -310,7 +310,7 @@ async function storeSearchViaClaude(env, q) {
       headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001', max_tokens: 200,
-        tools: [{ type: 'web_search_20250305', name: 'web_search', allowed_domains: STORE_SITES.filter(d => !blocked.includes(d)), max_uses: 1 }],
+        tools: [{ type: 'web_search_20250305', name: 'web_search', allowed_domains: sites.filter(d => !blocked.includes(d)), max_uses: 1 }],
         messages: [{ role: 'user', content: `Run exactly one web search for the book page of: ${q}. Do not search again. Then reply only: done` }]
       })
     });
@@ -458,6 +458,148 @@ async function handleJobs(req, env, cors, path) {
   return json({ error: 'not_found' }, 404, cors);
 }
 
+// ---------- זמינות + תקציר לספר (נשמר לכולם ל-4 ימים) ----------
+// 1. במקביל: Google Books + הספרייה הלאומית + Open Library → ISBN, כריכה, תקציר.
+// 2. יש ISBN → זמינות בסטימצקי ובצומת ספרים לפי ה-ISBN בלבד (דף מוצר שמכיל את ה-ISBN).
+// 3. הספר לא נמצא באף אחד משלושת המאגרים → חיפוש בחנויות ובהוצאות לפי שם עברי מדויק + מחבר.
+// 4. תקציר: קודם מהמאגרים. רק אם אין תקציר עברי → מדף הספר בחנות.
+// 5. מטמון: לפי ISBN או שם+מחבר, 4 ימים.
+const BOOKINFO_TTL = 4 * 86400;
+const ISBN_STORES = ['steimatzky.co.il', 'booknet.co.il'];
+const ISBN_SEARCH_URLS = [
+  (isbn) => 'https://www.steimatzky.co.il/catalogsearch/result/?q=' + isbn,
+  (isbn) => 'https://www.booknet.co.il/search?q=' + isbn
+];
+const hasHeb = (s) => /[֐-׿]/.test(s || '');
+const digits = (s) => String(s || '').replace(/[^\dXx]/g, '').toUpperCase();
+export function pageHasIsbn(html, isbn) {
+  const flat = String(html || '').replace(/[-\s]/g, '');
+  return !!isbn && flat.includes(isbn);
+}
+async function nliQuery(env, { isbn, title, author }) {
+  if (!env.NLI_API_KEY) return [];
+  const clean = (s) => s.replace(/[,;]/g, ' ').replace(/\s+/g, ' ').trim();
+  const u = new URL('https://api.nli.org.il/openlibrary/search');
+  u.searchParams.set('query', isbn ? `any,contains,${isbn}` : `title,contains,${clean(title)}` + (author ? `,AND;creator,contains,${clean(author)}` : ''));
+  u.searchParams.set('output_format', 'json'); u.searchParams.set('material_type', 'books'); u.searchParams.set('rows', '10');
+  u.searchParams.set('api_key', env.NLI_API_KEY);
+  try { const r = await fetch(u.toString(), { headers: { accept: 'application/json' } }); return r.ok ? parseNli(await r.json()) : []; } catch (e) { return []; }
+}
+async function googleQuery(env, { isbn, title, author }) {
+  const u = new URL('https://www.googleapis.com/books/v1/volumes');
+  const surname = (author || '').trim().split(/\s+/).pop();
+  u.searchParams.set('q', isbn ? `isbn:${isbn}` : `intitle:${title}${surname ? ` inauthor:${surname}` : ''}`);
+  u.searchParams.set('maxResults', '5'); u.searchParams.set('country', 'IL'); u.searchParams.set('printType', 'books');
+  if (env.GOOGLE_BOOKS_KEY) u.searchParams.set('key', env.GOOGLE_BOOKS_KEY);
+  try {
+    const r = await fetch(u.toString(), { headers: { Referer: GOOGLE_REFERER } });
+    if (!r.ok) return [];
+    const d = await r.json();
+    return (d.items || []).map(it => {
+      const v = it.volumeInfo || {}, s = it.saleInfo || {};
+      return {
+        title: v.title || '', authors: v.authors || [], language: v.language || '', description: v.description || '',
+        isbns: (v.industryIdentifiers || []).map(x => digits(x.identifier)).filter(x => x.length === 10 || x.length === 13),
+        cover: ((v.imageLinks && (v.imageLinks.thumbnail || v.imageLinks.smallThumbnail)) || '').replace(/^http:/, 'https:'),
+        ebook: !!s.isEbook, link: v.canonicalVolumeLink || v.infoLink || ''
+      };
+    });
+  } catch (e) { return []; }
+}
+async function olQuery({ isbn, title, author }) {
+  try {
+    const u = new URL('https://openlibrary.org/search.json');
+    if (isbn) u.searchParams.set('isbn', isbn); else { u.searchParams.set('title', title); if (author) u.searchParams.set('author', author); }
+    u.searchParams.set('limit', '3'); u.searchParams.set('fields', 'title,author_name,isbn,cover_i,key,first_sentence');
+    const r = await fetch(u.toString());
+    if (!r.ok) return [];
+    const d = await r.json();
+    return (d.docs || []).map(x => ({
+      title: x.title || '', authors: x.author_name || [], isbns: (x.isbn || []).map(digits).slice(0, 10), language: '',
+      cover: x.cover_i ? `https://covers.openlibrary.org/b/id/${x.cover_i}-M.jpg` : '', description: '', link: x.key ? 'https://openlibrary.org' + x.key : ''
+    }));
+  } catch (e) { return []; }
+}
+const storeKinds = (site, text) => {
+  const t = text || '';
+  if (site === 'e-vrit.co.il') return /קולי|אודיו|audio|האזנה/i.test(t) ? ['audio'] : ['ebook'];
+  if (site === 'steimatzky.co.il') return /דיגיטלי|e-?book/i.test(t) ? ['ebook'] : /קולי|אודיו/.test(t) ? ['audio'] : ['print'];
+  return ['print'];
+};
+export async function bookInfo(env, ctx, { isbn, title, author }) {
+  // שלב 1: שלושת המאגרים במקביל
+  const q = { isbn, title, author };
+  const [g, n, o] = await Promise.all([googleQuery(env, q), nliQuery(env, q), olQuery(q)]);
+  const matches = (r) => isbn ? (r.isbns || []).includes(isbn) || !title || titleHas(r.title, title) : titleHas(r.title, title);
+  const recs = [...g, ...n, ...o].filter(matches);
+  const found = recs.length > 0;
+  const isbns = [...new Set([isbn, ...recs.flatMap(r => r.isbns || [])].filter(Boolean))]
+    .sort((a, b) => (b.startsWith('978965') || b.startsWith('965')) - (a.startsWith('978965') || a.startsWith('965'))).slice(0, 2);
+  const heTitle = (hasHeb(title) && title) || (recs.find(r => hasHeb(r.title)) || {}).title || '';
+  const synopsisRec = recs.find(r => r.description && hasHeb(r.description)) || recs.find(r => r.description);
+  const out = {
+    isbn: isbns[0] || '', title: title || (recs[0] || {}).title || '', cover: (recs.find(r => r.cover) || {}).cover || '',
+    synopsis: synopsisRec ? synopsisRec.description : '', synopsisSource: synopsisRec ? (g.includes(synopsisRec) ? 'Google Books' : 'Open Library') : '',
+    urls: [], available: { print: false, ebook: g.some(r => matches(r) && r.ebook), audio: false }, found, checked_at: Date.now()
+  };
+  const pages = [];   // דפי מוצר שנמצאו, לתקציר
+  // שלב 2: זמינות לפי ISBN בסטימצקי ובצומת ספרים
+  for (const code of isbns) {
+    const direct = await Promise.all(ISBN_SEARCH_URLS.map(f => f(code)).map(async u => {
+      const html = await fetchHtml(u, ctx, 3600);
+      if (!html) return [];
+      // בדף התוצאות לחיפוש לפי ISBN: קישורים לדפי מוצר ששמם מכיל את שם הספר
+      return heTitle ? storeLinksFromHtml(html, u, heTitle) : [];
+    }));
+    let cands = direct.flat();
+    if (!cands.length) cands = (await storeSearchViaClaude(env, `"${code}"`, ISBN_STORES)).filter(x => ISBN_STORES.includes(x.site));
+    for (const c of cands.slice(0, 4)) {
+      if (out.urls.some(u => u.url === c.url)) continue;
+      const html = await fetchHtml(c.url, ctx);
+      // אימות: דף המוצר מכיל את ה-ISBN (אם אי אפשר להיכנס לדף, מספיקה התאמת שם בתוצאה)
+      if (html ? !pageHasIsbn(html, code) : !(heTitle && titleHas(c.title, heTitle))) continue;
+      const page = html ? checkPage(html, heTitle || title || '', '') : {};
+      out.urls.push({ site: c.site, url: c.url, kinds: storeKinds(c.site, `${c.title} ${page.title || ''}`) });
+      if (html) pages.push({ site: c.site, ...page });
+    }
+    if (out.urls.length) break;
+  }
+  // שלב 3: הספר לא במאגרים → חנויות והוצאות לפי שם עברי מדויק + מחבר
+  if (!found && heTitle) {
+    const qq = author ? `${heTitle} ${author}` : heTitle;
+    let cands = (await Promise.all(STORE_SEARCH_URLS.map(f => f(heTitle)).map(u => fetchHtml(u, ctx, 3600).then(h => h ? storeLinksFromHtml(h, u, heTitle) : [])))).flat();
+    if (!cands.length) cands = (await storeSearchViaClaude(env, qq)).filter(x => titleHas(x.title, heTitle));
+    for (const c of cands.slice(0, 4)) {
+      if (out.urls.some(u => u.url === c.url)) continue;
+      const html = await fetchHtml(c.url, ctx);
+      const page = html ? checkPage(html, heTitle, author || '') : null;
+      if (page && !page.ok) continue;
+      out.urls.push({ site: c.site, url: c.url, kinds: storeKinds(c.site, `${c.title} ${page ? page.title : ''}`) });
+      if (page) pages.push({ site: c.site, ...page });
+    }
+    out.found = out.urls.length > 0;
+  }
+  out.urls.forEach(u => u.kinds.forEach(k => { out.available[k] = true; }));
+  // שלב 4: תקציר עברי מהחנות רק אם אין תקציר עברי מהמאגרים
+  if (!hasHeb(out.synopsis)) {
+    const p = pages.find(x => x.description && hasHeb(x.description) && x.description.length > 60);
+    if (p) { out.synopsis = p.description; out.synopsisSource = p.site; }
+  }
+  if (!out.cover) out.cover = (pages.find(x => x.image) || {}).image || '';
+  return out;
+}
+async function handleBookInfo(req, env, cors, ctx) {
+  const p = new URL(req.url).searchParams;
+  const isbn = digits(p.get('isbn')).slice(0, 13), title = (p.get('title') || '').slice(0, 150).trim(), author = (p.get('author') || '').slice(0, 80).trim();
+  if (!isbn && !title) return json({ error: 'missing' }, 400, cors);
+  const key = 'bookinfo:' + (isbn || `${title}|${author}`.toLowerCase());
+  const cached = env.LIBRARY ? await env.LIBRARY.get(key, 'json') : null;
+  if (cached) return json({ ...cached, cached: true }, 200, cors);
+  const info = await bookInfo(env, ctx, { isbn: isbn.length === 10 || isbn.length === 13 ? isbn : '', title, author });
+  if (env.LIBRARY) ctx.waitUntil(env.LIBRARY.put(key, JSON.stringify(info), { expirationTtl: BOOKINFO_TTL }));
+  return json(info, 200, cors);
+}
+
 async function handleSync(req, env, cors) {
   if (req.method === 'GET') {
     const cur = await env.LIBRARY.get('state', 'json');
@@ -489,6 +631,7 @@ export default {
       if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY, gbooks: !!env.GOOGLE_BOOKS_KEY, nli: !!env.NLI_API_KEY, jobs: !!env.JOBS }, 200, cors);
       if (path === '/gbooks' && req.method === 'GET') return await handleGoogleBooks(req, env, cors, ctx);
       if (path === '/jobs' || path.startsWith('/jobs/')) return await handleJobs(req, env, cors, path);
+      if (path === '/bookinfo' && req.method === 'GET') return await handleBookInfo(req, env, cors, ctx);
       if (path === '/stores' && req.method === 'GET') return await handleStores(req, env, cors, ctx);
       if (path === '/nli' && req.method === 'GET') return await handleNli(req, env, cors, ctx);
       if (path === '/page' && req.method === 'GET') return await handlePage(req, cors, ctx);

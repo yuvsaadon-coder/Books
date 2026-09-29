@@ -63,6 +63,12 @@ async function phone(browser, name) {
     if (u.origin === WORKER) {
       if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
       if (u.pathname === '/ping') return route.fulfill({ headers: cors, json: { ok: true, ai: true, sync: true, gbooks: true, nli: true, jobs: true } });
+      if (u.pathname === '/bookinfo') {
+        const t = u.searchParams.get('title') || '';
+        return route.fulfill({ headers: cors, json: t === 'יש ואין'
+          ? { isbn: '9789650000028', found: true, urls: [{ site: 'steimatzky.co.il', url: 'https://www.steimatzky.co.il/yesh-veein', kinds: ['print'] }], available: { print: true, ebook: false, audio: false }, synopsis: '', synopsisSource: '', cover: '', checked_at: Date.now() }
+          : { isbn: '', found: false, urls: [], available: { print: false, ebook: false, audio: false }, synopsis: '', synopsisSource: '', cover: '', checked_at: Date.now() } });
+      }
       if (u.pathname === '/stores') {
         storeCalls++;
         const t = u.searchParams.get('title') || '';
@@ -248,6 +254,7 @@ try {
     const jp = job.messages[0].content;
     assert.ok(jp.includes('מקור: ספרות מתורגמת') && jp.includes('כמה עצוב מותר? → אפשר לבכות') && jp.includes('בעיקר קלאסיקה אמריקאית'), 'focus and follow-up answers reach the model');
     assert.ok(await A.locator('section li >> text=זמינות').count() > 0);
+    await A.waitForSelector('section li a:has-text("לדף הספר בסטימצקי")');
     await A.click('nav >> text=ספרים שלי'); await A.click('nav >> text=גלה ספר חדש');
     assert.deepEqual(await texts(A.locator('section li .font-display.text-\\[18px\\]')), ['יש ואין']);
     // שלילה לתמיד עם הערה: נעלם מהרשימה, וההערה מגיעה להמלצה הבאה
