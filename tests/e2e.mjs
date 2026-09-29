@@ -482,7 +482,27 @@ try {
     await A.waitForTimeout(500); await shot(A, 'summary', false); await rep.locator('h3:has-text("מתי נכתבו")').scrollIntoViewIfNeeded(); await shot(A, 'summary2', false);
     await rep.locator('button:has-text("כל הזמן")').click(); await rep.locator('p:has-text("כל הזמן")').waitFor(); await rep.locator('h3:has-text("סוגות")').waitFor();
     await rep.locator('button[aria-label="סגירה"]').click();
-    assert.equal(await card.locator('text=חדש').count(), 0, 'no "new" badge after seen');
+    // אחרי הצפייה: הכרטיס הבולט נעלם, ונשאר קישור צנוע "סיכום הקריאה"
+    assert.equal(await A.locator('button.summary-card').count(), 0, 'big card gone after seen');
+    await A.click('button.summary-link'); await rep.waitFor(); await rep.locator('button[aria-label="סגירה"]').click();
+  });
+  await step('user guide: from the top of every screen, search, jump to a topic, answers open on tap', async () => {
+    await A.click('nav >> text=חברים');
+    await A.click('button[aria-label="מדריך למשתמש"]');
+    const g = A.locator('[role=dialog][aria-label="מדריך למשתמש"]');
+    await g.waitFor();
+    assert.equal(await g.locator('nav[aria-label="נושאים"] button').count(), 9);
+    await g.locator('nav[aria-label="נושאים"] button:has-text("התראות")').click();
+    const q = g.locator('details:has-text("איך מפעילים התראות?")');
+    assert.equal(await q.getAttribute('open'), null);
+    await q.locator('summary').click(); await q.locator('p:has-text("ומאשרים בחלון של הטלפון")').waitFor();
+    await A.waitForTimeout(400); await shot(A, 'guide', false);
+    await g.locator('#guide-search').fill('Goodreads');
+    await g.locator('text=ייבוא מקובץ CSV').first().waitFor();
+    assert.equal(await g.locator('section').count(), 2, 'only topics with matches');
+    await g.locator('#guide-search').fill('זזזזז'); await g.locator('text=לא נמצאה תשובה').waitFor();
+    await g.locator('button[aria-label="סגירת המדריך"]').click();
+    assert.equal(await g.count(), 0);
   });
   await step('display: literary palettes, font, text size, accessibility; Discover stands out', async () => {
     await A.click('nav >> text=הגדרות');

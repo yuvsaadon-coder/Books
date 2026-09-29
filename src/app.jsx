@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '31';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '32';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -2682,6 +2682,7 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
   }, [books, q, tag, sort]);
   const avg = readBooks.length ? (readBooks.reduce((s, b) => s + b.rating, 0) / readBooks.length).toFixed(1) : '–';
   const loved = readBooks.filter(b => b.rating >= 4).length;
+  const summaryFresh = db.settings.summarySeen !== summaryPeriod() && summaryStats(db.books).active;
   const thisYear = readBooks.filter(b => b.readAt && new Date(b.readAt).getFullYear() === new Date().getFullYear()).length;   // רק ספרים עם תאריך סיום (כמו בסיכום)
   const current = open ? db.books.find(b => b.id === open) : null;
 
@@ -2717,8 +2718,12 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
           </div>
         ))}
       </div>
-      {readBooks.length > 0 && <MySummaryCard books={db.books} onOpen={onSummary} fresh={db.settings.summarySeen !== summaryPeriod()} />}
-      {readBooks.length > 0 && <button type="button" className="text-accent font-semibold text-[14px] mb-2 min-h-[36px] inline-flex items-center gap-1" aria-expanded={showStats} onClick={() => setShowStats(!showStats)}><Icon name="ChartBar" size={16} />סטטיסטיקות לפי ז'אנר{showStats ? ' ▴' : ' ▾'}</button>}
+      {/* סיכום חדש שעוד לא נצפה: כרטיס בולט. אחרי הצפייה: קישור צנוע ליד הסטטיסטיקות */}
+      {readBooks.length > 0 && summaryFresh && <MySummaryCard books={db.books} onOpen={onSummary} fresh />}
+      {readBooks.length > 0 && <div className="flex items-center gap-4 flex-wrap mb-2">
+        <button type="button" className="text-accent font-semibold text-[14px] min-h-[36px] inline-flex items-center gap-1" aria-expanded={showStats} onClick={() => setShowStats(!showStats)}><Icon name="ChartBar" size={16} />סטטיסטיקות לפי ז'אנר{showStats ? ' ▴' : ' ▾'}</button>
+        {!summaryFresh && <button type="button" className="summary-link text-accent font-semibold text-[14px] min-h-[36px] inline-flex items-center gap-1" onClick={onSummary}><Icon name="ChartColumn" size={16} />סיכום הקריאה</button>}
+      </div>}
       {showStats && <LibraryStats books={db.books} onSummary={onSummary} />}
       <div className="grid grid-cols-2 gap-2 mb-3" role="tablist" aria-label="מדף">
         {STATUSES.map(([k, l, ic]) => (
@@ -5505,6 +5510,103 @@ function SummaryStory({ db, onClose, onOpenDigest, notify }) {
   ), document.body);
 }
 
+/* ---------- מדריך למשתמש: מרכז עזרה עם חיפוש, קפיצה בין נושאים, הסבר קצר לכל נושא ושאלות ותשובות שנפתחות בלחיצה ---------- */
+const GUIDE = [
+  { id: 'start', title: 'צעדים ראשונים', icon: 'Compass', intro: 'מה שנקרא שומרת את הספרים שקראת, לומדת את הטעם שלך וממליצה על הספר הבא. כל ספר נבדק מול מאגרים אמיתיים, כך שאין ספרים מומצאים.', qa: [
+    ['איך מתחילים?', 'בוחרים שם (בלי סיסמה). בכניסה הראשונה נפתחת רשימה של 400 ספרים מוכרים: החלקה ימינה = קראתי, שמאלה = לא קראתי, והסימנייה = רוצה לקרוא. אפשר לדלג ולחזור אליה מהכרטיס שבראש "הספרים שלי".'],
+    ['איך מתקינים את האפליקציה על מסך הבית?', 'באייפון: פותחים ב-Safari, לוחצים על כפתור השיתוף ובוחרים "הוספה למסך הבית". באנדרואיד: בכרום, בתפריט ⋮ בוחרים "התקנת האפליקציה", או לוחצים על ההודעה שמופיעה באפליקציה.'],
+    ['כמה משתמשים יכולים להשתמש בה?', 'כל אחד במשפחה מקבל ספרייה, דירוגים והמלצות משלו. מחליפים משתמש בלחיצה על השם שבראש המסך.'],
+    ['הנתונים שלי נשמרים?', 'הכול נשמר בטלפון ומסתנכרן אוטומטית, כך שהספרייה זמינה בכל מכשיר. הנקודה הירוקה ליד השם אומרת שהכול מסונכרן; כתומה = אין חיבור כרגע, והנתונים יסונכרנו כשיחזור.']] },
+  { id: 'library', title: 'הספרים שלי', icon: 'Library', intro: 'הספרייה האישית: ארבעה מדפים, חיפוש, מיון, תגיות וסטטיסטיקות.', qa: [
+    ['מה ההבדל בין המדפים?', '"קראתי" – ספרים שסיימת, עם דירוג. "קורא עכשיו" – ספרים שבאמצע. "רוצה לקרוא" – רשימת המשאלות. "קראתי חלקית" – ספרים שהפסקת באמצע (הדירוג רשות, ועוזר להמלצות).'],
+    ['איך מסמנים שסיימתי ספר?', 'בספר שנמצא ב"קורא עכשיו" יש כפתור "סיימתי". בוחרים מתי (היום, אתמול או חודש) ומדרגים.'],
+    ['איך עורכים או מוחקים ספר?', 'לוחצים על הספר, ובחלון שנפתח בוחרים "עריכה" או "מחיקה".'],
+    ['אפשר לראות את הספרים כקוביות?', 'כן. ליד החיפוש יש מתג בין רשימה לקוביות, ותפריט מיון (חדשים, מתי קראתי, שנת הוצאה, דירוג, א–ת).'],
+    ['איפה הסטטיסטיקות?', 'בראש "הספרים שלי": מספר הספרים, הדירוג הממוצע, האהובים והשנה, ו"סטטיסטיקות לפי ז\'אנר" עם פירוט לפי סוגה, שנה וסופר.']] },
+  { id: 'add', title: 'הוספת ספרים', icon: 'BookPlus', intro: 'שלוש דרכים להוסיף: ספר אחד, רשימה, או טקסט חופשי. רק ספרים שנמצאו במאגרים נכנסים לספרייה.', qa: [
+    ['איך מוסיפים ספר אחד?', 'בלשונית "הוספת ספר" כותבים שם בעברית או באנגלית, ISBN או קישור לדף הספר. בוחרים את הספר (ואם רוצים, את המהדורה המדויקת), ואז את המדף והדירוג.'],
+    ['יש לי רשימה של הרבה ספרים', 'בוחרים "רשימה" ומדביקים ספר בכל שורה (אפשר להוסיף מחבר אחרי מקף). עוברים על הספרים אחד אחרי השני, ואפשר לדייק או לחפש מחדש.'],
+    ['אפשר פשוט לכתוב מה קראתי?', 'כן. ב"טקסט חופשי" כותבים בחופשיות, ו-Claude מזהה את הספרים. אחר כך בוחרים ומדרגים כל אחד.'],
+    ['למה ספר לא נמצא?', 'כל ספר נבדק מול Google Books, הספרייה הלאומית, Open Library והחנויות. אפשר לנסות את השם המלא, איות אחר, את השם בשפת המקור, ISBN מהכריכה האחורית, או "זיהוי חכם".'],
+    ['אפשר לייבא מ-Goodreads או StoryGraph?', 'כן: הגדרות ← "ייצוא וייבוא" ← "ייבוא מקובץ CSV". כל ספר נבדק, ומה שלא אומת מחכה ברשימה בלשונית ההוספה.']] },
+  { id: 'recs', title: 'המלצות', icon: 'Sparkles', intro: 'Claude קורא את הפרופיל הספרותי שלך וממליץ, וכל המלצה נבדקת מול המאגרים והחנויות לפני שהיא מוצגת.', qa: [
+    ['איך מקבלים המלצה?', 'בלשונית "גלה ספר חדש" כותבים מה בא לך, בוחרים מיקוד (מצב רוח, ז\'אנר, תקופה ועוד) ולוחצים "המלצה חכמה". Claude ישאל 2–4 שאלות קצרות לדיוק (אפשר לדלג או להחליף שאלה).'],
+    ['כמה זמן זה לוקח?', 'בדרך כלל דקה-שתיים. אפשר לצאת מהאפליקציה: ההמלצה ממשיכה בשרת, ואפשר לקבל התראה כשהיא מוכנה.'],
+    ['למה אפשר לסמוך על ההמלצות?', 'כל ספר שהמודל מציע נבדק מול הספרייה הלאומית, Google Books והחנויות; ספר שלא נמצא נפסל. בכל המלצה מופיעים זמינות (מודפס, דיגיטלי, קולי), קישורים לרכישה וביקורות מאתרים מוכרים.'],
+    ['ההמלצות לא מתאימות לי', 'כותבים בתיבה "לא בדיוק זה?" מה לא מתאים, ומקבלים הצעות מעודכנות. על ספר מסוים לוחצים "לא בשבילי" ובוחרים לחודש או לתמיד, עם הערה שמדייקת את הפרופיל.'],
+    ['באיזו שפה הספרים?', 'כברירת מחדל רק ספרים שיש להם מהדורה בעברית. אפשר לשנות ל"עברית ואנגלית", "אנגלית" או "כל שפה".'],
+    ['מה זה "ספר בשביל מישהו אחר"?', 'מצב מתנה: מתארים את מי שמקבל את הספר, וההמלצה לא נשענת על הטעם שלך ולא משנה אותו. ספר שנשמר נכנס ל"רוצה לקרוא" עם התגית "מתנה".'],
+    ['מה זה הפרופיל הספרותי?', 'תקציר של הטעם שלך, שנבנה מהספרים, מהדירוגים ומההערות, ומתעדכן לבד. הוא לוקח בחשבון מתי קראת כל ספר, כדי לזהות לאן הטעם מתפתח. אפשר להוסיף לו הערה משלך.'],
+    ['מה ההצעות הדו-שבועיות?', 'כל שבועיים נבחרים 10 ספרים חדשים לפי מה שקראת, בלי ספרים שכבר הוצעו או שקראת. הם מופיעים בראש המסך, ואפשר לקבל התראה.']] },
+  { id: 'summary', title: 'סיכום הקריאה', icon: 'ChartColumn', intro: 'דוח על הקריאה שלך: כמה, מה, מתי ואיך, לשבועיים, לחודש, לשנה או לכל הזמן.', qa: [
+    ['איפה הסיכום?', 'כשיש סיכום חדש מופיע כרטיס בראש "הספרים שלי". אחרי שצפית בו, הוא עובר לקישור "סיכום הקריאה" ליד הסטטיסטיקות.'],
+    ['מה יש בו?', 'ספרים ועמודים (בהשוואה לתקופה הקודמת), דירוג ממוצע וקצב, סוג הקריאה, הספר של התקופה, סוגות, עשורי כתיבה, סופרים, התפלגות דירוגים, אורך, שפה ומקור, וקצב לאורך התקופה.'],
+    ['למה חלק מהספרים לא נספרים?', 'הסיכום סופר רק ספרים עם תאריך סיום. ספרים שסומנו מרשימת המוכרים אין להם תאריך; אפשר לערוך ספר ולבחור מתי קראת אותו.'],
+    ['אפשר לשתף?', 'כן: "שיתוף כתמונה" בסוף הסיכום יוצר תמונה לשיתוף או לשמירה.']] },
+  { id: 'friends', title: 'חברים', icon: 'Users', intro: 'רואים מה החברים קוראים ואוהבים, ממליצים אחד לשני ומגלים ספרים דרכם.', qa: [
+    ['איך מוסיפים חבר?', 'בלשונית "חברים" ← "להוסיף חברים" ← "בקשת חברות". אחרי שהחבר מאשר, רואים את המדפים שלו.'],
+    ['מה החברים רואים עליי?', 'בוחרים בהגדרות ← "פרטיות וחברים": ספרים שקראת ודירוגים, רשימת "רוצה לקרוא", הערות, והופעה בלי שם ב"אהובים בקהילה".'],
+    ['איך ממליצים לחבר?', 'במדף של חבר או בספר שלך לוחצים "להמליץ", בוחרים חבר (או כל החברים) ומוסיפים משפט.']] },
+  { id: 'notify', title: 'התראות', icon: 'Bell', intro: 'התראה כשההמלצה מוכנה, וכשמגיעים הסיכום וההצעות הדו-שבועיות.', qa: [
+    ['איך מפעילים התראות?', 'בהגדרות ← "התראות" ← "התראה כשיש הצעות חדשות", ומאשרים בחלון של הטלפון. אפשר גם מהשורה שמופיעה בזמן שההמלצה מתגבשת.'],
+    ['באייפון לא מגיעות התראות', 'באייפון התראות עובדות רק אחרי התקנה על מסך הבית (iOS 16.4 ומעלה), ורק כשפותחים את האפליקציה משם.']] },
+  { id: 'look', title: 'תצוגה ונגישות', icon: 'Palette', intro: 'אפשר להתאים את המראה, הגופן והגודל, ולהפעיל מצב נגישות.', qa: [
+    ['איך משנים צבעים?', 'בהגדרות ← "תצוגה ונגישות": ארבע ערכות (נייר וקלף, ספרייה ישנה, דיו כחול, אבן ירושלמית) או "מתחלף כל יום", ובחירה בין בהיר, כהה או לפי המכשיר.'],
+    ['איך מגדילים את הטקסט?', 'בהגדרות ← "גודל הטקסט": א+ להגדלה וא- להקטנה, מ-90% עד 150%. אפשר גם לבחור גופן: פרנק רוהל, דוד, אסיסטנט או אלף.'],
+    ['מה עושה מצב נגישות?', 'ניגודיות גבוהה, טקסט גדול יותר, קישורים עם קו תחתון, מסגרת מיקוד בולטת, בלי אנימציות ואזורי לחיצה גדולים, לפי ת"י 5568 ו-WCAG 2.0 AA. האפליקציה עובדת גם עם קורא מסך ומקלדת.'],
+    ['יש לי קורא ספרים אלקטרוני', '"מצב קורא אלקטרוני" בהגדרות: שחור-לבן, טקסט גדול, בלי אנימציות ותמונות כבדות. נשמר רק במכשיר שבו הופעל.'],
+    ['איך האפליקציה פונה אליי?', 'בהגדרות ← "החשבון שלי" ← "איך לפנות אליך?": לשון נקבה, זכר או רבים. כל הטקסטים וההמלצות מתאימים את עצמם.']] },
+  { id: 'data', title: 'הנתונים והפרטיות', icon: 'Shield', intro: 'רואים מה האפליקציה יודעת, מוחקים, מייצאים ומייבאים.', qa: [
+    ['מה האפליקציה יודעת עליי?', 'בהגדרות ← "מה האפליקציה יודעת עליי": הפרופיל הספרותי, ההערה שלך, המשובים והספרים שנשללו. אפשר למחוק כל פריט.'],
+    ['איך מייצאים את הנתונים?', 'בהגדרות ← "ייצוא וייבוא": קובץ CSV שמתאים ל-Goodreads ול-StoryGraph. ב"גיבוי ידני" יש גם גיבוי מלא (JSON) ורשימה כטקסט.'],
+    ['משהו לא עובד', 'בהגדרות ← "💬 משוב" כותבים מה קרה, וזה מגיע ישר ליובל.']] }
+];
+function UserGuide({ onClose }) {
+  const [q, setQ] = useState('');
+  const refs = useRef({});
+  useEffect(() => { const k = (e) => { if (e.key === 'Escape') onClose(); }; document.addEventListener('keydown', k); return () => document.removeEventListener('keydown', k); }, []);
+  const nq = norm(q.trim());
+  const topics = GUIDE.map(t => ({ ...t, qa: nq ? t.qa.filter(([qq, a]) => norm(qq + ' ' + a + ' ' + t.title).includes(nq)) : t.qa })).filter(t => !nq || t.qa.length);
+  const jump = (id) => { setQ(''); setTimeout(() => { const el = refs.current[id]; if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); el.querySelector('h3') && el.querySelector('h3').focus({ preventScroll: true }); } }, 30); };
+  return ReactDOM.createPortal((
+    <div className="fixed inset-0 z-50 overflow-y-auto fade-in" style={{ background: 'var(--bg)' }} role="dialog" aria-modal="true" aria-label="מדריך למשתמש">
+      <div className="mx-auto max-w-xl px-4 pb-12 safe-top">
+        <div className="sticky top-0 z-10 pt-3 pb-2 -mx-4 px-4 border-b border-line" style={{ background: 'var(--bg)' }}>
+          <div className="flex items-center gap-2">
+            <h2 className="font-display font-bold text-[24px] flex-1">מדריך למשתמש</h2>
+            <button type="button" aria-label="סגירת המדריך" onClick={onClose} className="w-11 h-11 rounded-full bg-surface border border-line grid place-items-center text-muted"><Icon name="X" size={20} /></button>
+          </div>
+          <div className="relative mt-2">
+            <span className="absolute top-1/2 -translate-y-1/2 right-3 text-muted"><Icon name="Search" size={18} /></span>
+            <label htmlFor="guide-search" className="sr-only">חיפוש במדריך</label>
+            <input id="guide-search" value={q} onChange={e => setQ(e.target.value)} placeholder="חיפוש: למשל התראות, ייבוא, גודל טקסט" className="w-full min-h-[46px] pr-10 pl-3 rounded-xl border border-line bg-surface text-[16px]" />
+          </div>
+          <nav className="flex gap-1.5 overflow-x-auto mt-2 pb-1" aria-label="נושאים">
+            {GUIDE.map(t => <Chip key={t.id} className="shrink-0" onClick={() => jump(t.id)}><span className="inline-flex items-center gap-1"><Icon name={t.icon} size={14} />{t.title}</span></Chip>)}
+          </nav>
+        </div>
+        {nq && !topics.length && <p className="text-[15px] text-muted text-center py-8">{T('לא נמצאה תשובה. אפשר לכתוב לנו בתיבת המשוב שבהגדרות.')}</p>}
+        <div className="grid gap-4 mt-4">
+          {topics.map(t => (
+            <section key={t.id} ref={el => { refs.current[t.id] = el; }} className="scroll-mt-44 bg-surface border border-line rounded-xl p-3.5 grid gap-2" aria-labelledby={'g-' + t.id}>
+              <h3 id={'g-' + t.id} tabIndex={-1} className="font-display font-bold text-[19px] flex items-center gap-2"><span className="w-8 h-8 rounded-lg grid place-items-center bg-accentSoft text-accent"><Icon name={t.icon} size={17} /></span>{t.title}</h3>
+              {!nq && <p className="text-[15px] font-reading">{T(t.intro)}</p>}
+              <div className="grid">
+                {t.qa.map(([qq, a]) => (
+                  <details key={qq} open={!!nq} className="border-t border-line py-1">
+                    <summary className="cursor-pointer font-semibold text-[15px] min-h-[44px] flex items-center gap-2"><Icon name="ChevronLeft" size={16} className="text-muted shrink-0" />{T(qq)}</summary>
+                    <p className="text-[15px] font-reading pb-2 pr-6">{T(a)}</p>
+                  </details>
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      </div>
+    </div>
+  ), document.body);
+}
+
 function DigestBanner({ db, update, onOpen }) {
   const { digests } = useDigest();
   const latest = digests[0];
@@ -5587,6 +5689,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
   const friendsBadge = useFriends().badge;
   const [digestOpen, setDigestOpen] = useState(null);
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
   // פתיחה מהתראה: ?view=digest
   useEffect(() => {
     if (/[?&]view=summary/.test(location.search)) { setSummaryOpen(true); update(d => ({ ...d, settings: { ...d.settings, summarySeen: summaryPeriod() } })); try { history.replaceState(null, '', location.pathname); } catch (e) { /* */ } return; }
@@ -5683,10 +5786,14 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
             <Logo size={32} />
             <span className="wordmark text-[23px] leading-none">מה שנקרא</span>
           </div>
+          <div className="flex items-center gap-2 shrink-0">
+          <button type="button" onClick={() => setGuideOpen(true)} aria-label="מדריך למשתמש" title="מדריך למשתמש"
+            className="w-10 h-10 rounded-full border border-line bg-surface grid place-items-center text-accent"><Icon name="CircleHelp" size={20} /></button>
           <button type="button" onClick={onSwitch} aria-label="החלפת משתמש" title="החלפת משתמש"
             className="shrink-0 min-h-[40px] ps-1 pe-2.5 rounded-full border border-line bg-surface inline-flex items-center gap-1.5 text-[14px] font-semibold">
             <Avatar profile={profile} size={30} /><span className="truncate max-w-[110px]">{profile.name}</span><SyncDot /><Icon name="ChevronsUpDown" size={15} className="text-muted" />
           </button>
+          </div>
         </div>
         <InstallPrompt />
         {tab !== 'library' && <SummaryBanner db={db} update={update} onOpen={() => setSummaryOpen(true)} />}
@@ -5725,6 +5832,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
         </ul>
       </nav>
 
+      {guideOpen && <UserGuide onClose={() => setGuideOpen(false)} />}
       {summaryOpen && <SummaryStory db={db} notify={notify} onClose={() => setSummaryOpen(false)} onOpenDigest={setDigestOpen} />}
       {celebrate && <PickCard pick={celebrate} onClose={() => setCelebrate(null)} />}
       {digestOpen && <DigestSheet digest={digestOpen} db={db} update={update} onPick={pick} notify={notify} onClose={() => setDigestOpen(null)} />}
