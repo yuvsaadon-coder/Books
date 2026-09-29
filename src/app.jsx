@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '24';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '25';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -714,6 +714,8 @@ function sanitizeDB(raw) {
     // הפרופיל הספרותי: סיכום הטעם שנבנה מהספרים, ומתעדכן רק עם מה שהשתנה
     litProfile: raw.litProfile && typeof raw.litProfile === 'object' && raw.litProfile.text ? raw.litProfile : null,
     profileNote: typeof raw.profileNote === 'string' ? raw.profileNote.slice(0, 1500) : '',
+    // ביקורת על המלצות מהצ'אט: חומר לפרופיל (בזהירות: חלק מזה מצב רוח רגעי)
+    feedback: Array.isArray(raw.feedback) ? raw.feedback.filter(x => x && x.id && x.text).slice(0, 200) : [],
     profileNoteAt: Number(raw.profileNoteAt) || 0,
     updatedAt: Number(raw.updatedAt) || 0,
     lastBackupAt: Number(raw.lastBackupAt) || 0
@@ -896,6 +898,7 @@ function mergeDB(a, b) {
     tagLibrary: uniq([...(a.tagLibrary || []), ...(b.tagLibrary || [])]),
     dismissed: uniq([...(a.dismissed || []), ...(b.dismissed || [])]),
     rejections: mergeByIdNewest(a.rejections, b.rejections, x => x.editedAt || x.at || 0).sort((x, y) => (y.at || 0) - (x.at || 0)),
+    feedback: mergeByIdNewest(a.feedback, b.feedback, x => x.at || 0).sort((x, y) => (y.at || 0) - (x.at || 0)).slice(0, 200),
     litProfile: ((a.litProfile && a.litProfile.at) || 0) >= ((b.litProfile && b.litProfile.at) || 0) ? a.litProfile || null : b.litProfile || null,
     lastBackupAt: Math.max(a.lastBackupAt || 0, b.lastBackupAt || 0),
     updatedAt: Math.max(a.updatedAt || 0, b.updatedAt || 0)
@@ -1364,16 +1367,18 @@ function profileStale(db) {
   if (read.length < 3) return false;
   const p = db.litProfile;
   if (!p) return true;
-  return changedSince(db, p.at).length + (db.rejections || []).filter(x => (x.at || 0) > p.at && x.note).length + ((db.profileNoteAt || 0) > p.at ? 3 : 0) >= 3;
+  return changedSince(db, p.at).length + (db.rejections || []).filter(x => (x.at || 0) > p.at && x.note).length + (db.feedback || []).filter(x => (x.at || 0) > p.at).length + ((db.profileNoteAt || 0) > p.at ? 3 : 0) >= 3;
 }
 async function aiBuildProfile(db) {
   const p = db.litProfile;
   const wish = db.books.filter(b => b.status === 'want').slice(0, 40).map(b => b.title).join('; ');
   const rej = (db.rejections || []).filter(x => x.note).slice(0, 30).map(x => `${x.title} (${x.note})`).join('; ');
   const note = db.profileNote ? `\nREADER'S OWN NOTE ABOUT THEIR TASTE: ${db.profileNote}` : '';
+  const fbs = (db.feedback || []).filter(x => !p || (x.at || 0) > p.at).slice(0, 20).map(x => `"${x.text}"${x.request ? ` (when asking for: ${x.request})` : ''}`).join('; ');
+  const fb = fbs ? `\nFEEDBACK THE READER GAVE ON RECOMMENDATIONS: ${fbs}\nTreat feedback carefully: a single remark may reflect a passing mood or a specific request. Turn it into a lasting trait only if it repeats or matches their ratings; otherwise record it as a situational preference (e.g. "sometimes wants lighter books").` : '';
   const prompt = p && p.text
-    ? `CURRENT PROFILE:\n${p.text}${note}\n\nCHANGES SINCE IT WAS WRITTEN (title (published) — author | rating | year read | tags | notes):\n${libraryForPrompt(changedSince(db, p.at), 60) || '(none)'}${wish ? `\nWISHLIST NOW: ${wish}` : ''}${rej ? `\nREJECTED RECOMMENDATIONS WITH REASONS: ${rej}` : ''}\n\nUpdate the profile: keep what still holds, add what the changes show.`
-    : `READER'S LIBRARY (title (published) — author | rating 1-5 | year read | tags | notes):\n${libraryForPrompt(db.books, 200)}${note}${wish ? `\nWISHLIST: ${wish}` : ''}${rej ? `\nREJECTED RECOMMENDATIONS WITH REASONS: ${rej}` : ''}\n\nWrite the profile.`;
+    ? `CURRENT PROFILE:\n${p.text}${note}${fb}\n\nCHANGES SINCE IT WAS WRITTEN (title (published) — author | rating | year read | tags | notes):\n${libraryForPrompt(changedSince(db, p.at), 60) || '(none)'}${wish ? `\nWISHLIST NOW: ${wish}` : ''}${rej ? `\nREJECTED RECOMMENDATIONS WITH REASONS: ${rej}` : ''}\n\nUpdate the profile: keep what still holds, add what the changes show.`
+    : `READER'S LIBRARY (title (published) — author | rating 1-5 | year read | tags | notes):\n${libraryForPrompt(db.books, 200)}${note}${fb}${wish ? `\nWISHLIST: ${wish}` : ''}${rej ? `\nREJECTED RECOMMENDATIONS WITH REASONS: ${rej}` : ''}\n\nWrite the profile.`;
   const { input, cost } = await aiRun({
     fast: true, web: false, prompt, submitTool: PROFILE_TOOL,
     system: 'You are a literary advisor. Build a concise, specific literary taste profile of this reader from what they read, how they rated it, their notes, their wishlist and the recommendations they rejected (with reasons). Name authors, themes, qualities of writing, emotional register and pace. profile_he is written in Hebrew for the reader; brief_en is in English for another model.' + addressRule(db.settings && db.settings.address)
@@ -1381,7 +1386,7 @@ async function aiBuildProfile(db) {
   return { text: input.profile_he, brief: input.brief_en, at: Date.now(), count: db.books.length, cost };
 }
 
-function recRequest({ books, request, focus, qa, lang, exclude, dismissed, history, want, profile, profileNote, rejections = [], friendsLoved = [] }) {
+function recRequest({ books, request, focus, qa, lang, exclude, dismissed, history, want, profile, profileNote, rejections = [], friendsLoved = [], feedback = [], genreMix = '' }) {
   const langText = { he: 'Hebrew only (books available in a Hebrew edition)', en: 'English only', both: 'Hebrew or English editions', any: 'any language', auto: 'Hebrew or English' }[lang] || 'Hebrew or English';
   const excludeTitles = uniq([...books.map(b => b.title), ...exclude, ...(history || []).flatMap(h => (h.recs || []).map(r => r.title))]).slice(0, 300);
   const prefs = focusSummary(focus);
@@ -1392,6 +1397,8 @@ function recRequest({ books, request, focus, qa, lang, exclude, dismissed, histo
     : `READER'S LIBRARY (title (published) — author | rating 1-5 | year read | tags | notes):\n${libraryForPrompt(read) || '(empty)'}`;
   const wishBlock = wish.length ? `\nWISHLIST (they already plan to read these; do not recommend them, but they show current interests): ${wish.slice(0, 40).map(b => b.title).join('; ')}` : '';
   const rejBlock = rejections.length ? `\nREJECTED RECOMMENDATIONS (do not recommend; learn from the reasons): ${rejections.slice(0, 30).map(x => `${x.title}${x.note ? ` (${x.note})` : ''}`).join('; ')}` : '';
+  const fbBlock = feedback.length ? `\nRECENT FEEDBACK ON EARLIER SUGGESTIONS (may be a passing mood; weigh it for this request): ${feedback.slice(0, 5).map(x => `"${x.text}"`).join('; ')}` : '';
+  const mixBlock = genreMix ? `\nGENRE MIX OF WHAT THEY READ: ${genreMix}` : '';
   const friendsBlock = friendsLoved.length ? `\nLOVED BY THEIR FRIENDS (optional signal, not a must): ${friendsLoved.join('; ')}` : '';
   return {
     system: [
@@ -1404,7 +1411,7 @@ function recRequest({ books, request, focus, qa, lang, exclude, dismissed, histo
       '`why` must connect the book to specific books and notes from the reader\'s library, to their answers, and to how critics describe it, in 2–4 sentences.',
       `Language: ${langText}. ` + HEBREW_OUT + addressRule(addressOf())
     ].join('\n'),
-    prompt: `${readerBlock}${profileNote ? `\nREADER'S NOTE ABOUT THEIR TASTE: ${profileNote}` : ''}${wishBlock}${rejBlock}${friendsBlock}\n\nALREADY READ, OWNED OR SEEN (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 450).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history.slice(0, profile ? 3 : 6), books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs.length ? `\nPREFERENCES: ${prefs.join('; ')}` : ''}${qa && qa.length ? `\nFOLLOW-UP ANSWERS:\n${qa.map(x => `- ${x.q} → ${x.a}`).join('\n')}` : ''}\n\nRecommend ${want + 2} books.`
+    prompt: `${readerBlock}${profileNote ? `\nREADER'S NOTE ABOUT THEIR TASTE: ${profileNote}` : ''}${mixBlock}${wishBlock}${rejBlock}${fbBlock}${friendsBlock}\n\nALREADY READ, OWNED OR SEEN (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 450).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history.slice(0, profile ? 3 : 6), books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs.length ? `\nPREFERENCES: ${prefs.join('; ')}` : ''}${qa && qa.length ? `\nFOLLOW-UP ANSWERS:\n${qa.map(x => `- ${x.q} → ${x.a}`).join('\n')}` : ''}\n\nRecommend ${want + 2} books.`
   };
 }
 
@@ -2343,12 +2350,95 @@ function AiDetailsButton({ book, onUpdate }) {
   );
 }
 
+/* ---------- קטלוג פנימי: ז'אנר אחיד לכל ספר ----------
+   לכל מקור יש סיווג משלו (Google: "Fiction / Thrillers", Open Library: subjects באנגלית, הספרייה הלאומית: נושאים בעברית,
+   החנויות וההוצאות: "מתח ופעולה", "ספרות מקור" וכו'). כאן כל אחד מהם ממופה ל-15 הז'אנרים של האפליקציה,
+   כדי שההמלצות והסטטיסטיקות ידברו באותה שפה. */
+const SOURCE_GENRE_MAP = {
+  google: [
+    ['מתח', /thriller|suspense|mystery|detective|crime|noir/i], ['פנטזיה', /fantasy|magic|dragons/i], ['מד"ב', /science fiction|dystop|space opera|cyberpunk/i],
+    ['רומנטיקה', /romance|love stor/i], ['היסטורי', /historical fiction|fiction \/ historical/i], ['שואה', /holocaust|shoah/i],
+    ['ביוגרפיה', /biography|autobiography|memoir/i], ['פסיכולוגיה', /psychology|self-help|personal growth|spiritual|mindfulness/i],
+    ['נוער', /juvenile|young adult|children/i], ['הומור', /humor|humour|comic fiction|satire/i],
+    ['עיון', /history|science|economics|politics|philosophy|social science|business|nature/i], ['ספרות מופת', /classics/i], ['ספרות עכשווית', /fiction \/ literary|literary fiction|fiction \/ general/i]
+  ],
+  openlibrary: [
+    ['מתח', /thriller|suspense|detective|crime|murder/i], ['פנטזיה', /fantasy|wizard|magic/i], ['מד"ב', /science fiction|dystopia/i], ['רומנטיקה', /love stories|romance/i],
+    ['היסטורי', /historical fiction/i], ['שואה', /holocaust/i], ['ביוגרפיה', /biography|autobiography/i], ['נוער', /juvenile|children|young adult/i],
+    ['הומור', /humorous|humor/i], ['ספרות מופת', /classic literature|classics/i]
+  ],
+  nli: [
+    ['שואה', /שואה|השואה/], ['ספרות ישראלית', /סיפורת עברית|ספרות עברית|ספרות ישראלית/], ['מתח', /מתח|בלש|פשע/], ['ביוגרפיה', /ביוגרפיה|זכרונות|אוטוביוגרפיה/],
+    ['נוער', /ספרות ילדים|ספרות נוער/], ['עיון', /היסטוריה|מדע|פילוסופיה|כלכלה/]
+  ],
+  stores: [
+    ['ספרות ישראלית', /ספרות מקור|ספרות ישראלית|סיפורת עברית/], ['ספרות עכשווית', /ספרות מתורגמת|ספרות יפה|פרוזה/], ['מתח', /מתח|מותחן|בלש|פעולה/],
+    ['פנטזיה', /פנטזיה/], ['מד"ב', /מדע בדיוני|דיסטופיה/], ['רומנטיקה', /רומנטי|רומנטיקה|אהבה/], ['היסטורי', /היסטורי/], ['שואה', /שואה/],
+    ['עיון', /עיון|מדע|היסטוריה|כלכלה|פילוסופיה/], ['ביוגרפיה', /ביוגרפי|זכרונות|ממואר/], ['פסיכולוגיה', /פסיכולוגיה|העצמה|התפתחות אישית|רוחניות|מיינדפולנס/],
+    ['נוער', /נוער|ילדים/], ['הומור', /הומור|סאטירה/], ['קליל', /קליל|מחמם לב|feel ?good/i]
+  ]
+};
+const GENRE_OF_TAG = Object.fromEntries(STARTER.map(g => [g.tag, g.genre]));
+function classifyBook(b) {
+  const out = new Map();
+  const add = (tag, w) => { if (GENRE_OF_TAG[tag]) out.set(tag, (out.get(tag) || 0) + w); };
+  (b.tags || []).forEach(t => add(t, 3));
+  const text = [...(b.categories || []), ...(b.genres || [])].join(' | ');
+  if (text) Object.values(SOURCE_GENRE_MAP).forEach(rules => rules.forEach(([tag, re]) => { if (re.test(text)) add(tag, 1); }));
+  if (!out.size && hasHebrew(b.title)) add(b.subtitle && !hasHebrew(b.subtitle) ? 'ספרות עכשווית' : 'ספרות ישראלית', 0.5);
+  return [...out.entries()].sort((a, c) => c[1] - a[1]).slice(0, 2).map(([t]) => t);
+}
+function genreStats(books) {
+  const m = new Map();
+  books.filter(b => b.status !== 'want').forEach(b => {
+    const [g] = classifyBook(b);
+    const k = g || 'לא מסווג';
+    const cur = m.get(k) || { tag: k, count: 0, sum: 0 };
+    cur.count++; cur.sum += b.rating; m.set(k, cur);
+  });
+  return [...m.values()].sort((a, b) => b.count - a.count);
+}
+function genreMixText(books) {
+  const st = genreStats(books).filter(x => x.tag !== 'לא מסווג');
+  const total = st.reduce((a, x) => a + x.count, 0);
+  if (total < 5) return '';
+  return st.slice(0, 6).map(x => `${GENRE_OF_TAG[x.tag] || x.tag} ${Math.round(x.count * 100 / total)}% (avg ${(x.sum / x.count).toFixed(1)}★)`).join(', ');
+}
+function LibraryStats({ books }) {
+  const read = books.filter(b => b.status !== 'want');
+  const gs = genreStats(read);
+  const years = new Map();
+  read.forEach(b => { const y = new Date(b.readAt || b.addedAt).getFullYear(); years.set(y, (years.get(y) || 0) + 1); });
+  const ys = [...years.entries()].sort((a, b) => b[0] - a[0]).slice(0, 6);
+  const authors = new Map();
+  read.forEach(b => (b.authors || []).slice(0, 1).forEach(a => authors.set(a, (authors.get(a) || 0) + 1)));
+  const topA = [...authors.entries()].filter(([, n]) => n > 1).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const max = Math.max(1, ...gs.map(x => x.count));
+  const tagIndex = (t) => Math.max(0, STARTER.findIndex(g => g.tag === t));
+  return (
+    <section className="bg-surface border border-line rounded-2xl p-3 mb-3 grid gap-3" aria-label="סטטיסטיקות קריאה">
+      <div>
+        <div className="text-[13px] font-semibold text-muted mb-1.5">לפי ז'אנר</div>
+        <ul className="grid gap-1.5">{gs.map(x => (
+          <li key={x.tag} className="grid grid-cols-[7.5rem_1fr_auto] items-center gap-2 text-[13px]">
+            <span className="truncate">{GENRE_OF_TAG[x.tag] || x.tag}</span>
+            <span className="h-2.5 rounded-full bg-surface2 overflow-hidden"><span className="block h-full rounded-full" style={{ width: `${(x.count / max) * 100}%`, background: x.tag === 'לא מסווג' ? 'var(--muted)' : GENRE_HUES[tagIndex(x.tag) % GENRE_HUES.length] }} /></span>
+            <span className="tabular text-muted">{x.count} · {(x.sum / x.count).toFixed(1)}★</span>
+          </li>))}</ul>
+      </div>
+      {ys.length > 0 && <div className="text-[13px]"><span className="font-semibold text-muted">לפי שנת קריאה: </span><span className="tabular">{ys.map(([y, n]) => `${y}: ${n}`).join(' · ')}</span></div>}
+      {topA.length > 0 && <div className="text-[13px]"><span className="font-semibold text-muted">הסופרים שקראת הכי הרבה: </span>{topA.map(([a, n]) => `${a} (${n})`).join(' · ')}</div>}
+    </section>
+  );
+}
+
 function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
   const [q, setQ] = useState('');
   const [tag, setTag] = useState('');
   const [sort, setSort] = useState('recent');
   const [open, setOpen] = useState(null);
   const [confirmDel, setConfirmDel] = useState(false);
+  const [showStats, setShowStats] = useState(false);
   const [shelf, setShelf] = useState(() => { try { return sessionStorage.getItem('vrt_shelf') || 'read'; } catch (e) { return 'read'; } });
   // תצוגה: רשימה או קוביות (נשמר במכשיר)
   const [layout, setLayout] = useState(() => { try { return localStorage.getItem('vrt_layout') || 'list'; } catch (e) { return 'list'; } });
@@ -2393,8 +2483,11 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
     <div className="fade-in">
       <header className="pt-4 pb-3">
         <h1 className="font-display font-medium text-[26px] leading-snug">הספרים שלי</h1>
-        <p className="text-muted text-[15px] tabular">{readBooks.length} ספרים · ממוצע {avg}★ · {loved} אהובים (4★+)</p>
+        <p className="text-muted text-[15px] tabular">{readBooks.length} ספרים · ממוצע {avg}★ · {loved} אהובים (4★+)
+          {readBooks.length > 0 && <button type="button" className="text-accent font-semibold text-[14px] mr-2 min-h-[36px] inline-flex items-center gap-1" aria-expanded={showStats} onClick={() => setShowStats(!showStats)}>סטטיסטיקות{showStats ? ' ▴' : ' ▾'}</button>}
+        </p>
       </header>
+      {showStats && <LibraryStats books={db.books} />}
       <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2 mb-3" role="tablist" aria-label="מדף">
         {[['read', `קראתי (${readBooks.length})`, 'BookCheck'], ['want', `רוצה לקרוא (${wantBooks.length})`, 'Bookmark']].map(([k, l, ic]) => (
           <button key={k} type="button" role="tab" aria-selected={shelf === k} onClick={() => { setShelf(k); setTag(''); }}
@@ -3603,7 +3696,7 @@ function DiscoverTab({ db, update, onPick, notify }) {
       const { recs: r, interpretation } = await aiRecommend({
         books: db.books, request: ans.request, focus: ans.focus, qa, lang, exclude: excludeNow(),
         dismissed: db.dismissed, history: db.history, want: 5, onProgress: progress, ctx: { ans, qa },
-        profile: db.litProfile, profileNote: db.profileNote, rejections: activeRejections(db).concat((db.rejections || []).filter(x => x.note && x.until && x.until <= Date.now())), friendsLoved: friendsLovedTitles(db.books)
+        profile: db.litProfile, profileNote: db.profileNote, rejections: activeRejections(db).concat((db.rejections || []).filter(x => x.note && x.until && x.until <= Date.now())), friendsLoved: friendsLovedTitles(db.books), feedback: db.feedback || [], genreMix: genreMixText(db.books)
       });
       applyRecs(ans, r, interpretation);
     } catch (e) { progress(e.message); }
@@ -3623,6 +3716,19 @@ function DiscoverTab({ db, update, onPick, notify }) {
     } else runAi(ans, []);
   };
   const [swapping, setSwapping] = useState(false);
+  const [fbText, setFbText] = useState('');
+  // ביקורת בצ'אט: נשמרת, ומיד מביאה הצעות מעודכנות במקום הקודמות
+  const critique = () => {
+    const text = fbText.trim();
+    if (!text) return;
+    const shownTitles = st.recs.map(x => x.title);
+    pushLog({ from: 'me', text });
+    update(d => ({ ...d, feedback: [{ id: uid(), text, at: Date.now(), request: st.answers.request || '', about: shownTitles.slice(0, 8) }, ...(d.feedback || [])].slice(0, 200) }));
+    setFbText('');
+    const sh = new Set(st.shown); shownTitles.forEach(t => sh.add(t));
+    recSet(st, { recs: [], shown: sh });
+    runAi(st.answers, [...(st.qa || []), { q: `Feedback on the previous suggestions (${shownTitles.join(', ')})`, a: text }]);
+  };
   // החלפת השאלה הנוכחית בשאלה אחרת (המודל המהיר), בלי לאבד את התשובות הקודמות
   const swapQ = async () => {
     setSwapping(true);
@@ -3776,6 +3882,16 @@ function DiscoverTab({ db, update, onPick, notify }) {
         </section>
       )}
 
+      {recs.length > 0 && !running && answers.mode === 'ai' && (
+        <form className="mt-4 bg-surface border border-line rounded-2xl p-3 grid gap-2" onSubmit={(e) => { e.preventDefault(); critique(); }}>
+          <label htmlFor="rec-feedback" className="font-semibold text-[15px] flex items-center gap-1.5"><Icon name="MessageCircle" size={17} />לא בדיוק זה? ספרו מה לא מתאים</label>
+          <textarea id="rec-feedback" rows={2} value={fbText} onChange={e => setFbText(e.target.value)} maxLength={600}
+            placeholder="למשל: כבדים מדי בשבילי עכשיו; רוצה משהו עם הומור; פחות מלחמה"
+            className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px]" />
+          <Btn type="submit" variant="soft" disabled={!fbText.trim()}><Icon name="RefreshCw" size={17} />עדכון ההמלצות</Btn>
+          <p className="text-[12px] text-muted">ההערה נשמרת ומדייקת את הפרופיל הספרותי בהדרגה, כדי שמצב רוח של רגע לא ישנה אותו לתמיד.</p>
+        </form>
+      )}
       {rejecting && <RejectSheet book={rejecting} onClose={() => setRejecting(null)} onDone={(o) => {
         rejectBook(update, rejecting, o);
         recSet(st, { recs: st.recs.filter(x => x.key !== rejecting.key) });
@@ -4146,6 +4262,13 @@ function useProfilesList() {
   useEffect(() => { const f = () => setP(loadProfiles().profiles); window.addEventListener('vrt-profiles-changed', f); return () => window.removeEventListener('vrt-profiles-changed', f); }, []);
   return p;
 }
+// מה חברים רואים עליי (הגדרה של כל משתמש, מסתנכרנת): ספרים שקראתי, רשימת "רוצה לקרוא", הערות, והופעה ב"אהובים בקהילה"
+const shareOf = (d) => ({ read: true, want: true, notes: true, community: true, ...((d && d.settings && d.settings.share) || {}) });
+function visibleBooks(d) {
+  if (!d) return [];
+  const sh = shareOf(d);
+  return d.books.filter(b => b.status === 'want' ? sh.want : sh.read).map(b => sh.notes ? b : { ...b, note: '' });
+}
 function useFriends() {
   const social = useSocial();
   const me = ACTIVE.id;
@@ -4153,16 +4276,20 @@ function useFriends() {
   const accepted = [...rel.entries()].filter(([, x]) => x.status === 'accepted').map(([pid]) => pid);
   const incoming = [...rel.values()].filter(x => x.status === 'pending' && x.to === me);
   const outgoing = [...rel.values()].filter(x => x.status === 'pending' && x.from === me);
-  const inbox = social.items.filter(x => x.type === 'rec' && x.to === me && x.status !== 'dismissed');
+  const accepted0 = [...rel.entries()].filter(([, x]) => x.status === 'accepted').map(([pid]) => pid);
+  const hidden = new Set(((loadDBOf(me) || {}).settings || {}).hiddenRecs || []);
+  // המלצה אישית אליי, או המלצה של חבר לכל החברים שלו
+  const inbox = social.items.filter(x => x.type === 'rec' && x.status !== 'dismissed' && !hidden.has(x.id) && (x.to === me || (x.to === '*' && x.from !== me && accepted0.includes(x.from))));
   return { social, me, rel, accepted, incoming, outgoing, inbox, badge: incoming.length + inbox.filter(x => x.status === 'new').length };
 }
 // ספרים שחברים (או כל המשתמשים) אהבו ועוד לא אצלי
-function lovedBy(pids, myBooks, { minFans = 1 } = {}) {
+function lovedBy(pids, myBooks, { minFans = 1, community = false } = {}) {
   const m = new Map();
   pids.forEach(pid => {
     const d = loadDBOf(pid);
     if (!d) return;
-    d.books.forEach(b => {
+    if (community && shareOf(d).community === false) return;
+    visibleBooks(d).forEach(b => {
       const loved = b.status !== 'want' && b.rating >= 4, wanted = b.status === 'want';
       if (!loved && !wanted) return;
       if (findInLibrary(b, myBooks)) return;
@@ -4179,7 +4306,7 @@ function friendsLovedTitles(myBooks) {
   return lovedBy(accepted, myBooks).filter(x => x.fans.length).slice(0, 20).map(x => `${x.book.title} — ${(x.book.authors || [])[0] || ''}`);
 }
 
-function FriendsTab({ db, onPick, notify }) {
+function FriendsTab({ db, update, onPick, notify }) {
   const profiles = useProfilesList();
   const { me, rel, accepted, incoming, outgoing, inbox } = useFriends();
   const [view, setView] = useState(null);   // מזהה חבר שהמדף שלו פתוח
@@ -4188,11 +4315,15 @@ function FriendsTab({ db, onPick, notify }) {
   const now = () => Date.now();
   const request = (pid) => { socialChange(items => [...items, { id: uid(), type: 'friend', from: me, to: pid, status: 'pending', at: now(), editedAt: now() }]); notify(`נשלחה בקשת חברות ל${nameOf(pid)}`); };
   const setRel = (item, status) => socialChange(items => items.map(x => x.id === item.id ? { ...x, status, editedAt: now() } : x));
-  const setRec = (item, status) => socialChange(items => items.map(x => x.id === item.id ? { ...x, status, editedAt: now() } : x));
-  useEffect(() => { if (inbox.some(x => x.status === 'new')) socialChange(items => items.map(x => x.type === 'rec' && x.to === me && x.status === 'new' ? { ...x, status: 'seen', editedAt: now() } : x)); }, [inbox.length]);
+  const setRec = (item, status) => item.to === '*'
+    ? update(d => ({ ...d, settings: { ...d.settings, hiddenRecs: uniq([...(d.settings.hiddenRecs || []), item.id]).slice(-300) } }))
+    : socialChange(items => items.map(x => x.id === item.id ? { ...x, status, editedAt: now() } : x));
+  useEffect(() => { if (inbox.some(x => x.status === 'new' && x.to === me)) socialChange(items => items.map(x => x.type === 'rec' && x.to === me && x.status === 'new' ? { ...x, status: 'seen', editedAt: now() } : x)); }, [inbox.length]);
+  const sh = shareOf(db);
+  const setShare = (k) => update(d => ({ ...d, settings: { ...d.settings, share: { ...shareOf(d), [k]: !shareOf(d)[k] } } }));
   const others = profiles.filter(p => p.id !== me && !(rel.get(p.id) && ['accepted', 'pending'].includes(rel.get(p.id).status)));
   const fromFriends = useMemo(() => lovedBy(accepted, db.books).slice(0, 15), [accepted.join(), db.books]);
-  const community = useMemo(() => lovedBy(profiles.map(p => p.id).filter(p => p !== me), db.books, { minFans: 2 }).slice(0, 10), [profiles.length, db.books]);
+  const community = useMemo(() => lovedBy(profiles.map(p => p.id).filter(p => p !== me), db.books, { minFans: 2, community: true }).slice(0, 10), [profiles.length, db.books]);
 
   if (view) return <FriendShelf pid={view} profile={profOf(view)} myBooks={db.books} onBack={() => setView(null)} onPick={onPick} />;
   const BookRow = ({ book, children }) => (
@@ -4240,7 +4371,7 @@ function FriendsTab({ db, onPick, notify }) {
           <h2 className="font-semibold text-[15px] mb-2">חברים המליצו לך</h2>
           <ul className="grid gap-2">{inbox.map(x => (
             <BookRow key={x.id} book={x.book}>
-              <div className="text-[13px] mt-1"><span className="font-semibold">{nameOf(x.from)}</span>{x.note ? `: "${x.note}"` : ' המליץ/ה'}</div>
+              <div className="text-[13px] mt-1"><span className="font-semibold">{nameOf(x.from)}</span>{x.to === '*' ? <span className="text-muted"> (לכל החברים)</span> : null}{x.note ? `: "${x.note}"` : ' המליץ/ה'}</div>
               <div className="flex items-center gap-1.5"><AddButtons book={x.book} />
                 <button type="button" className="text-[13px] text-muted underline mt-2 min-h-[32px]" onClick={() => setRec(x, 'dismissed')}>הסתרה</button></div>
             </BookRow>))}</ul>
@@ -4252,7 +4383,8 @@ function FriendsTab({ db, onPick, notify }) {
         {accepted.length
           ? <ul className="grid grid-cols-2 gap-2">{accepted.map(pid => {
               const d = loadDBOf(pid);
-              const read = d ? d.books.filter(b => b.status !== 'want').length : 0, want = d ? d.books.filter(b => b.status === 'want').length : 0;
+              const vis = visibleBooks(d);
+              const read = vis.filter(b => b.status !== 'want').length, want = vis.filter(b => b.status === 'want').length;
               return (
                 <li key={pid}>
                   <button type="button" onClick={() => setView(pid)} className="w-full text-right bg-surface border border-line rounded-2xl p-3 grid gap-1">
@@ -4292,6 +4424,16 @@ function FriendsTab({ db, onPick, notify }) {
         </section>
       )}
 
+      <section className="mb-5 bg-surface border border-line rounded-2xl p-3 grid gap-2">
+        <h2 className="font-semibold text-[15px]">מה החברים רואים עליי</h2>
+        {[['read', 'הספרים שקראתי והדירוגים'], ['want', 'רשימת "רוצה לקרוא"'], ['notes', 'ההערות שכתבתי על ספרים'], ['community', 'להיכלל (בלי שם) ב"אהובים בקהילה"']].map(([k, l]) => (
+          <label key={k} className="flex items-center justify-between gap-3 min-h-[40px]">
+            <span className="text-[14px]">{l}</span>
+            <input type="checkbox" checked={!!sh[k]} onChange={() => setShare(k)} className="w-5 h-5 accent-[var(--accent)]" aria-label={l} />
+          </label>
+        ))}
+      </section>
+
       <section className="mb-5">
         <h2 className="font-semibold text-[15px] mb-2">להוסיף חברים</h2>
         {others.length
@@ -4308,7 +4450,7 @@ function FriendsTab({ db, onPick, notify }) {
 function FriendShelf({ pid, profile, myBooks, onBack, onPick }) {
   const d = loadDBOf(pid);
   const [shelf, setShelf] = useState('read');
-  const books = d ? d.books.filter(b => shelf === 'want' ? b.status === 'want' : b.status !== 'want').sort((a, b) => (b.rating - a.rating) || (b.addedAt - a.addedAt)) : [];
+  const books = d ? visibleBooks(d).filter(b => shelf === 'want' ? b.status === 'want' : b.status !== 'want').sort((a, b) => (b.rating - a.rating) || (b.addedAt - a.addedAt)) : [];
   return (
     <div className="fade-in">
       <header className="pt-4 pb-3 flex items-center gap-2">
@@ -4355,13 +4497,16 @@ function RecommendToFriend({ book, notify }) {
   const send = () => {
     const now = Date.now();
     socialChange(items => [...items, ...to.map(pid => ({ id: uid(), type: 'rec', from: me, to: pid, book: slimBook(book), note: note.trim().slice(0, 300), status: 'new', at: now, editedAt: now }))]);
-    notify(`ההמלצה נשלחה ל-${to.length} חברים`); setOpen(false); setTo([]); setNote('');
+    notify(to.includes('*') ? 'ההמלצה נשלחה לכל החברים' : `ההמלצה נשלחה ל-${to.length} חברים`); setOpen(false); setTo([]); setNote('');
   };
   if (!open) return <Btn variant="ghost" className="w-full mb-3" onClick={() => setOpen(true)}><Icon name="Send" size={18} />להמליץ לחבר</Btn>;
   return (
     <div className="mb-3 border border-line rounded-2xl p-3 grid gap-2">
       <div className="text-[14px] font-semibold">למי להמליץ?</div>
-      <div className="flex flex-wrap gap-1.5">{accepted.map(pid => <Chip key={pid} active={to.includes(pid)} onClick={() => setTo(t => t.includes(pid) ? t.filter(x => x !== pid) : [...t, pid])}>{(profiles.find(p => p.id === pid) || {}).name || 'חבר'}</Chip>)}</div>
+      <div className="flex flex-wrap gap-1.5">
+        <Chip active={to.includes('*')} onClick={() => setTo(t => t.includes('*') ? [] : ['*'])}><Icon name="Users" size={14} />כל החברים</Chip>
+        {!to.includes('*') && accepted.map(pid => <Chip key={pid} active={to.includes(pid)} onClick={() => setTo(t => t.includes(pid) ? t.filter(x => x !== pid) : [...t, pid])}>{(profiles.find(p => p.id === pid) || {}).name || 'חבר'}</Chip>)}
+      </div>
       <label htmlFor="rec-note" className="sr-only">מה לכתוב</label>
       <input id="rec-note" value={note} onChange={e => setNote(e.target.value)} placeholder="כמה מילים: למה זה בשבילו/ה (רשות)" className="min-h-[44px] px-3 rounded-xl border border-line bg-bg text-[16px]" />
       <div className="grid grid-cols-2 gap-2"><Btn disabled={!to.length} onClick={send}>שליחה</Btn><Btn variant="ghost" onClick={() => setOpen(false)}>ביטול</Btn></div>
@@ -4467,7 +4612,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
           onUpdateBook={(id, patch) => update(d => ({ ...d, books: d.books.map(b => b.id === id ? sanitizeBook({ ...b, ...patch, editedAt: Date.now() }) : b) }))} goAdd={() => setTab('add')} notify={notify} />}
         {tab === 'add' && <AddTab db={db} onPick={pick} goSettings={() => setTab('backup')} />}
         {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} />}
-        {tab === 'friends' && <FriendsTab db={db} onPick={pick} notify={notify} />}
+        {tab === 'friends' && <FriendsTab db={db} update={update} onPick={pick} notify={notify} />}
         {tab === 'backup' && <BackupTab onOpenStarter={() => { setStarterOpen(true); setTab('library'); }} db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
       </main>
 

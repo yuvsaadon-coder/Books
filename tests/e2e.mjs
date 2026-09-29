@@ -319,6 +319,25 @@ try {
     await A.click('nav >> text=חברים'); await A.waitForSelector('text=חברים המליצו לך'); await A.waitForSelector('text=חובה לקרוא!');
     await A.click('nav >> text=גלה ספר חדש');
   });
+  await step('critique in the chat: saved, and brings updated suggestions', async () => {
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 't8', name: 'submit_recommendations', input: { interpretation: 'הבנתי, משהו אחר.', recommendations: [] } }], stop: 'tool_use' });
+    const before = jobBodies.length;
+    await A.fill('#rec-feedback', 'פחות עצוב בבקשה'); await A.click('button:has-text("עדכון ההמלצות")');
+    await A.waitForFunction((n) => true, before);
+    await A.waitForSelector('text=הבנתי, משהו אחר.');
+    const jp = jobBodies.at(-1).messages[0].content;
+    assert.ok(jobBodies.length > before && jp.includes('Feedback on the previous suggestions (קפקא על החוף') && jp.includes('פחות עצוב בבקשה'));
+  });
+  await step('privacy: a friend who hides their read books', async () => {
+    await B.click('nav >> text=חברים'); await B.click('label:has-text("הספרים שקראתי והדירוגים") input');
+    await syncBoth();
+    await A.click('nav >> text=חברים'); await A.click('main button:has-text("יעל")');
+    await A.waitForSelector('text=אין כאן ספרים עדיין.');
+    await A.click('[aria-label="חזרה"]');
+    await A.click('nav >> text=ספרים שלי'); await A.click('button:has-text("סטטיסטיקות")');
+    await A.waitForSelector('[aria-label="סטטיסטיקות קריאה"]');
+    await A.click('nav >> text=גלה ספר חדש');
+  });
   await step('service error is shown briefly and stays on screen', async () => {
     aiScript.push({ error: 400 }); aiScript.push({ error: 400 });
     await A.click('button:has-text("שאלון חדש")'); await A.fill('#ai-request', 'בדיקה'); await A.click('button:has-text("המלצה חכמה")');
