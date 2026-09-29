@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '26';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '27';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -73,6 +73,12 @@ const normTitle = (t) => norm((t || '').split(/[:：]/)[0]);
 const dedupeKey = (b) => normTitle(b.title) + '|' + norm((b.authors || [])[0] || '');
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const fmtDate = (ts) => { try { return new Date(ts).toLocaleDateString(DEFAULT_LOCALE, { day: 'numeric', month: 'short', year: 'numeric' }); } catch (e) { return ''; } };
+// סטטוסים של ספר: קראתי / קורא עכשיו / רוצה לקרוא / קראתי חלקית
+const STATUSES = [['read', 'קראתי', 'BookCheck'], ['reading', 'קורא עכשיו', 'BookOpen'], ['want', 'רוצה לקרוא', 'Bookmark'], ['partial', 'קראתי חלקית', 'BookX']];
+const statusOf = (b) => (b && ['want', 'reading', 'partial'].includes(b.status)) ? b.status : 'read';
+// ספר שיש בו אות על הטעם (קראתי, או קראתי חלקית עם דירוג)
+const libLabel = (b) => ({ want: 'ברשימת "רוצה לקרוא"', reading: 'בקריאה עכשיו', partial: 'קראת חלקית' }[statusOf(b)] || `כבר בספרייה (${b.rating}★)`);
+const isRated = (b) => statusOf(b) === 'read' || (statusOf(b) === 'partial' && b.rating > 0);
 const fmtMonth = (ts) => { try { return new Date(ts).toLocaleDateString(DEFAULT_LOCALE, { month: 'long', year: 'numeric' }); } catch (e) { return ''; } };
 const fmtDateTime = (ts) => { try { return new Date(ts).toLocaleString(DEFAULT_LOCALE, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; } };
 const langLabel = (l) => ({ iw: 'עברית', he: 'עברית', heb: 'עברית', en: 'אנגלית', eng: 'אנגלית' }[l] || (l ? l.toUpperCase() : ''));
@@ -683,10 +689,12 @@ function sanitizeBook(b) {
     title: str(b.title), subtitle: str(b.subtitle), authors: arr(b.authors), year: str(b.year),
     description: str(b.description), categories: arr(b.categories), cover: str(b.cover),
     pageCount: Number(b.pageCount) || 0, language: str(b.language), isbns: arr(b.isbns), link: str(b.link),
-    publisher: str(b.publisher), status: b.status === 'want' ? 'want' : 'read',
-    rating: b.status === 'want' ? Math.min(5, Math.max(0, Number(b.rating) || 0)) : Math.min(5, Math.max(1, Number(b.rating) || 1)), tags: arr(b.tags),
+    publisher: str(b.publisher), status: statusOf(b),
+    rating: statusOf(b) !== 'read' ? Math.min(5, Math.max(0, Number(b.rating) || 0)) : Math.min(5, Math.max(1, Number(b.rating) || 1)), tags: arr(b.tags),
     addedAt: Number(b.addedAt) || Date.now(), verifiedAt: Number(b.verifiedAt) || 0,
-    readAt: Number(b.readAt) || 0,   // מתי נקרא (0 = לא הוזן; ברירת המחדל היא מועד ההוספה)
+    readAt: Number(b.readAt) || 0, startedAt: Number(b.startedAt) || 0,
+    // נבחר מתוך המלצה: מתי ולמה, כדי לשאול אחר כך איך היה
+    fromRec: b.fromRec && typeof b.fromRec === 'object' ? { at: Number(b.fromRec.at) || 0, why: str(b.fromRec.why).slice(0, 400), asked: Number(b.fromRec.asked) || 0 } : null,   // מתי נקרא (0 = לא הוזן; ברירת המחדל היא מועד ההוספה)
     verifiedVia: str(b.verifiedVia), descSource: str(b.descSource),
     ebook: !!b.ebook, ebookLink: str(b.ebookLink), olEbook: !!b.olEbook,
     note: str(b.note).slice(0, 4000), descriptionHe: str(b.descriptionHe), editedAt: Number(b.editedAt) || Number(b.addedAt) || 0,
@@ -1296,8 +1304,8 @@ async function aiTranslate(text) {
 
 // 4. המלצות: המודל קורא את הספרייה, מחפש ביקורות וניתוחים באתרים המאושרים, וחושב
 function libraryForPrompt(books, n = 80) {
-  const list = books.filter(b => b.status !== 'want').sort((a, b) => b.rating - a.rating || (b.addedAt || 0) - (a.addedAt || 0)).slice(0, n);
-  return list.map(b => `- ${b.title}${b.year ? ` (${b.year})` : ''} — ${(b.authors || [])[0] || '?'} | ${b.rating} | read ${new Date(b.readAt || b.addedAt || Date.now()).getFullYear()}${b.tags.length ? ' | ' + b.tags.slice(0, 3).join(', ') : ''}${b.note ? ' | ' + b.note.replace(/\s+/g, ' ').slice(0, 160) : ''}`).join('\n');
+  const list = books.filter(isRated).sort((a, b) => b.rating - a.rating || (b.addedAt || 0) - (a.addedAt || 0)).slice(0, n);
+  return list.map(b => `- ${b.title}${b.year ? ` (${b.year})` : ''} — ${(b.authors || [])[0] || '?'} | ${b.rating} | read ${new Date(b.readAt || b.addedAt || Date.now()).getFullYear()}${statusOf(b) === 'partial' ? ' | stopped midway' : ''}${b.tags.length ? ' | ' + b.tags.slice(0, 3).join(', ') : ''}${b.note ? ' | ' + b.note.replace(/\s+/g, ' ').slice(0, 160) : ''}`).join('\n');
 }
 function historyForPrompt(history, books) {
   return (history || []).slice(0, 6).map(h => {
@@ -1351,8 +1359,66 @@ const REC_TOOL = {
       required: ['title_he', 'title_original', 'author', 'isbn', 'why', 'genres'], properties: {
         title_he: { type: 'string', description: 'exact title of a Hebrew edition you know exists; empty if none. Never translate a title yourself.' },
         title_original: { type: 'string' }, author: { type: 'string' }, isbn: { type: 'string', description: 'only if sure, else empty' },
+        candidate: { type: 'integer', description: 'the number of the book in CANDIDATES, or 0 for a book of your own' },
         why: { type: 'string' }, genres: { type: 'array', items: { type: 'string' } } } } } } }
 };
+REC_TOOL.input_schema.properties.recommendations.items.required.push('candidate');
+
+/* ---------- שכבה אלגוריתמית לפני ה-AI ----------
+   לפני שפונים ל-Claude, האפליקציה אוספת בעצמה 30 ספרים אמיתיים (כבר מאומתים) שמתאימים לקורא, ומדרגת אותם לפי אותות:
+   1. ספרים אחרים של סופרים שדירגת גבוה (Google Books, עברית קודם)
+   2. מה שחברים אהבו (4★+) או רוצים לקרוא
+   3. ספרים מרשימת 400 הספרים המוכרים, מהז'אנרים שאתה הכי אוהב (לפי הקטלוג הפנימי)
+   4. התאמה למיקוד שנבחר (ז'אנר, תקופה), מהדורה עברית/ישראלית
+   Claude בוחר מהם ומסביר, ויכול להוסיף עד 2 ספרים משלו. ספר שנבחר מהרשימה לא צריך בדיקה נוספת. */
+async function buildCandidates(db, focus = {}, limit = 30) {
+  const books = db.books;
+  const owned = (b) => !!findInLibrary(b, books);
+  const rej = new Set(rejectedKeys(db).map(x => normTitle(x)));
+  const neg = new Set(books.filter(b => isRated(b) && b.rating <= 2).flatMap(b => (b.authors || []).map(a => norm(a))));
+  const out = new Map();
+  const add = (item, score, signal) => {
+    const title = item.book ? item.book.title : item.seed[0];
+    const author = item.book ? (item.book.authors || [])[0] || '' : item.seed[1];
+    const k = normTitle(title) + '|' + norm(author).split(' ').pop();
+    if (rej.has(normTitle(title)) || neg.has(norm(author))) return;
+    const cur = out.get(k) || { ...item, title, author, score: 0, signals: [] };
+    if (item.book && !cur.book) cur.book = item.book;
+    cur.score += score; if (!cur.signals.includes(signal)) cur.signals.push(signal);
+    out.set(k, cur);
+  };
+  const eraOk = (y) => { const n = parseInt(y, 10); if (!n || !focus.era) return 0; const now = new Date().getFullYear();
+    return focus.era === 'new' ? (n >= now - 5 ? 1.5 : -2) : focus.era === 'modern' ? (n >= 1950 && n <= 2000 ? 1 : -1) : (n < 1950 ? 1 : -1); };
+  // 1. סופרים אהובים
+  const aScore = new Map();
+  books.filter(b => isRated(b) && b.rating >= 4).forEach(b => (b.authors || []).slice(0, 1).forEach(a => aScore.set(a, (aScore.get(a) || 0) + b.rating - 3)));
+  const topAuthors = [...aScore.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const jobs = topAuthors.map(([a, w]) => (googleAvailable() ? googleSearch(`inauthor:"${a}"`, { lang: hasHebrew(a) ? 'iw' : undefined, max: 15 }) : Promise.resolve([])).catch(() => []).then(list => {
+    const sur = norm(a).split(' ').pop();
+    list.filter(c => (c.authors || []).some(x => norm(x).includes(sur)) && !owned(c) && c.title).slice(0, 6).forEach(c =>
+      add({ book: c }, 2 + w * 0.5 + (isHebrewEdition(c) ? 1 : 0) + (isIsraeliRecord(c) ? 0.5 : 0) + eraOk(c.year), `סופר/ת שאהבת: ${a}`));
+  }));
+  // 2. חברים
+  try {
+    const s = loadSocial(); const rel = friendsOf(s.items, ACTIVE.id);
+    const fr = [...rel.entries()].filter(([, x]) => x.status === 'accepted').map(([p]) => p);
+    lovedBy(fr, books).slice(0, 15).forEach(x => add({ book: x.book }, 1.5 + x.fans.length + (x.fans[0] ? (x.fans[0].rating - 4) : 0) + eraOk(x.book.year), x.fans.length ? `חברים אהבו (${x.fans.length})` : 'חברים רוצים לקרוא'));
+  } catch (e) { /* בלי חברים */ }
+  // 3. ז'אנרים אהובים מתוך רשימת הספרים המוכרים (+ ז'אנר שנבחר במיקוד)
+  const gs = genreStats(books).filter(x => GENRE_OF_TAG[x.tag] && x.count >= 1).map(x => ({ tag: x.tag, w: (x.sum / x.count) - 3 + Math.min(x.count, 10) / 10 }));
+  const focusG = new Set(focus.genre || []);
+  const topG = [...gs.filter(x => x.w > 0.3), ...[...focusG].map(t => ({ tag: t, w: 2 }))];
+  topG.forEach(({ tag, w }) => {
+    const g = STARTER.find(x => x.tag === tag);
+    if (!g) return;
+    g.books.filter(b => !owned({ title: b[0], authors: [b[1]] }) && !(b[2] && owned({ title: b[2], authors: [b[1]] })))
+      .slice(0, 8).forEach(b => add({ seed: b, genre: tag }, 1 + w + (focusG.has(tag) ? 2 : 0), focusG.has(tag) ? `הז'אנר שביקשת: ${g.genre}` : `ז'אנר שאתה אוהב: ${g.genre}`));
+  });
+  await withTimeout(Promise.all(jobs), 8000).catch(() => {});
+  return [...out.values()].sort((a, b) => b.score - a.score).slice(0, limit);
+}
+const candidateLine = (c, i) => `${i + 1}. ${c.title} — ${c.author || '?'}${c.book && c.book.year ? ` (${c.book.year})` : ''} | ${c.signals.join('; ')}`;
+const slimCandidate = (c) => ({ title: c.title, author: c.author, signals: c.signals, seed: c.seed || null, book: c.book ? slimBook(c.book) : null });
 /* ---------- הפרופיל הספרותי: נבנה פעם אחת מכל הספרייה, ואחר כך מתעדכן רק עם מה שהשתנה ----------
    ההמלצה שולחת את הפרופיל המתומצת + רק הספרים שנוספו מאז, במקום את כל הספרייה עם כל ההערות בכל פעם */
 const PROFILE_TOOL = {
@@ -1363,7 +1429,7 @@ const PROFILE_TOOL = {
 };
 const changedSince = (db, at) => db.books.filter(b => (b.editedAt || b.addedAt || 0) > at);
 function profileStale(db) {
-  const read = db.books.filter(b => b.status !== 'want');
+  const read = db.books.filter(isRated);
   if (read.length < 3) return false;
   const p = db.litProfile;
   if (!p) return true;
@@ -1386,11 +1452,12 @@ async function aiBuildProfile(db) {
   return { text: input.profile_he, brief: input.brief_en, at: Date.now(), count: db.books.length, cost };
 }
 
-function recRequest({ books, request, focus, qa, lang, exclude, dismissed, history, want, profile, profileNote, rejections = [], friendsLoved = [], feedback = [], genreMix = '' }) {
+function recRequest({ books, request, focus, qa, lang, exclude, dismissed, history, want, profile, profileNote, rejections = [], friendsLoved = [], feedback = [], genreMix = '', candidates = [] }) {
+  const candBlock = candidates.length ? `\n\nCANDIDATES (real books already found in the catalogues for this reader, with the signals that surfaced them). Prefer choosing from these by number when they fit the request; you may add up to 2 books of your own (candidate 0):\n${candidates.map(candidateLine).join('\n')}` : '';
   const langText = { he: 'Hebrew only (books available in a Hebrew edition)', en: 'English only', both: 'Hebrew or English editions', any: 'any language', auto: 'Hebrew or English' }[lang] || 'Hebrew or English';
   const excludeTitles = uniq([...books.map(b => b.title), ...exclude, ...(history || []).flatMap(h => (h.recs || []).map(r => r.title))]).slice(0, 300);
   const prefs = focusSummary(focus);
-  const read = books.filter(b => b.status !== 'want'), wish = books.filter(b => b.status === 'want');
+  const read = books.filter(isRated), wish = books.filter(b => ['want', 'reading'].includes(statusOf(b)));
   const recent = profile ? libraryForPrompt(read.filter(b => (b.editedAt || b.addedAt || 0) > profile.at), 25) : '';
   const readerBlock = profile && profile.text
     ? `READER PROFILE (built from their whole library):\n${profile.brief || profile.text}${recent ? `\n\nADDED OR CHANGED SINCE THE PROFILE (title (published) — author | rating | year read | tags | notes):\n${recent}` : ''}`
@@ -1411,7 +1478,7 @@ function recRequest({ books, request, focus, qa, lang, exclude, dismissed, histo
       '`why` must connect the book to specific books and notes from the reader\'s library, to their answers, and to how critics describe it, in 2–4 sentences.',
       `Language: ${langText}. ` + HEBREW_OUT + addressRule(addressOf())
     ].join('\n'),
-    prompt: `${readerBlock}${profileNote ? `\nREADER'S NOTE ABOUT THEIR TASTE: ${profileNote}` : ''}${mixBlock}${wishBlock}${rejBlock}${fbBlock}${friendsBlock}\n\nALREADY READ, OWNED OR SEEN (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 450).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history.slice(0, profile ? 3 : 6), books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs.length ? `\nPREFERENCES: ${prefs.join('; ')}` : ''}${qa && qa.length ? `\nFOLLOW-UP ANSWERS:\n${qa.map(x => `- ${x.q} → ${x.a}`).join('\n')}` : ''}\n\nRecommend ${want + 2} books.`
+    prompt: `${readerBlock}${profileNote ? `\nREADER'S NOTE ABOUT THEIR TASTE: ${profileNote}` : ''}${mixBlock}${wishBlock}${rejBlock}${fbBlock}${friendsBlock}\n\nALREADY READ, OWNED OR SEEN (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 450).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history.slice(0, profile ? 3 : 6), books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs.length ? `\nPREFERENCES: ${prefs.join('; ')}` : ''}${qa && qa.length ? `\nFOLLOW-UP ANSWERS:\n${qa.map(x => `- ${x.q} → ${x.a}`).join('\n')}` : ''}${candBlock}\n\nRecommend ${want + 2} books.`
   };
 }
 
@@ -1422,7 +1489,7 @@ async function startJob({ system, prompt, submitTool, effort }) {
   const c = loadCloud();
   const r = await fetch(c.url + '/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
     model: AI_MODEL, max_tokens: 16000, thinking: { type: 'adaptive' }, output_config: { effort }, system,
-    tools: [{ ...submitTool, strict: true }], messages: [{ role: 'user', content: prompt }], submit: submitTool.name
+    tools: [{ ...submitTool, strict: true }], messages: [{ role: 'user', content: prompt }], submit: submitTool.name, pid: ACTIVE.id
   }) });
   if (r.status === 429) throw new Error('הגעתם למגבלת השימוש היומית ב-AI. נסו שוב מחר.');
   if (!r.ok) throw new Error('השרת לא הצליח להתחיל את ההמלצה (' + r.status + ').');
@@ -1435,7 +1502,9 @@ async function pollJob(id, onProgress) {
   for (;;) {
     await sleep(1500);
     let s = null;
-    try { s = await (await fetch(c.url + '/jobs/' + id, { cache: 'no-store' })).json(); } catch (e) { continue; }   // רשת נפלה לרגע: ממשיכים לחכות
+    try { s = await fetchJSON(c.url + '/jobs/' + id + '?t=' + Date.now(), 10000); } catch (e) { continue; }   // רשת נפלה לרגע: ממשיכים לחכות
+    // השרת קיבל את הבקשה אבל לא התחיל לעבוד: לא מחכים לנצח, עוברים לעבודה ישירה מהטלפון
+    if (s.status === 'running' && !s.started && Date.now() - started > 20000) { const e = new Error('stalled'); e.stalled = true; throw e; }
     if (s.status === 'done') return { input: s.input, cost: (s.usage || []).reduce((a, u) => a + costOf(u), 0), hits: s.hits || [] };
     if (s.status === 'error') throw new Error(/daily|429/.test(s.error) ? 'הגעתם למגבלת השימוש היומית ב-AI.' : 'השירות החזיר שגיאה ' + String(s.error || '').slice(0, 140));
     if (s.status === 'missing') throw new Error('ההמלצה כבר לא שמורה בשרת. נסו שוב.');
@@ -1453,26 +1522,38 @@ async function aiRecommend(opts) {
   const { books, onProgress } = opts;
   const { system, prompt } = recRequest(opts);
   onProgress && onProgress(`שולח ל-Claude את הספרייה שלך (${books.length} ספרים), הבקשה והתשובות. זה לוקח בדרך כלל דקה או שתיים.`);
-  let res;
+  let res = null;
   if (jobsAvailable()) {
-    const id = await startJob({ system, prompt, submitTool: REC_TOOL, effort: 'low' });
-    savePending({ id, at: Date.now(), ctx: opts.ctx || null });
-    res = await pollJob(id, onProgress);
-  } else {
-    res = await aiRun({ effort: 'low', web: false, onProgress, system, prompt, submitTool: REC_TOOL });
+    try {
+      const id = await startJob({ system, prompt, submitTool: REC_TOOL, effort: 'low' });
+      savePending({ id, at: Date.now(), ctx: { ...(opts.ctx || {}), candidates: (opts.candidates || []).map(slimCandidate) } });
+      res = await pollJob(id, onProgress);
+    } catch (e) {
+      // שגיאת רשת בשליחה, או שהשרת לא התחיל: ממשיכים ישירות (כל עוד האפליקציה פתוחה)
+      if (!(e.stalled || e instanceof TypeError || /fetch|network|timeout/i.test(e.message || ''))) throw e;
+      savePending(null);
+      onProgress && onProgress('ההמלצה ברקע לא התחילה, ממשיך ישירות מהטלפון. כדאי להשאיר את האפליקציה פתוחה עד שזה מסתיים.');
+    }
   }
+  if (!res) res = await aiRun({ effort: 'low', web: false, onProgress, system, prompt, submitTool: REC_TOOL });
   savePending(null);
   return finishRecs({ ...opts, ...res });
 }
 async function resumeRecommend(pending, opts) {
   const res = await pollJob(pending.id, opts.onProgress);
   savePending(null);
-  return finishRecs({ ...opts, ...res });
+  return finishRecs({ ...opts, candidates: (pending.ctx && pending.ctx.candidates) || [], ...res });
 }
-async function finishRecs({ input, cost, books, exclude, want = 5, onProgress }) {
+async function finishRecs({ input, cost, books, exclude, want = 5, onProgress, candidates = [] }) {
   onProgress && onProgress(`Claude הציע ${input.recommendations.length} ספרים. בודק כל אחד מול הספרייה הלאומית, Google Books והחנויות…`);
-  // כל ההצעות נבדקות במקביל, כל אחת עם תקרת זמן, כדי שספר אחד איטי לא יתקע את כולן
-  const checked = await Promise.all(input.recommendations.map(r => withTimeout(verifyRec(r), 15000).catch(() => null)));
+  // ספר שנבחר מרשימת המועמדים כבר אומת; השאר נבדקים במקביל, כל אחד עם תקרת זמן
+  const fromCand = (r) => { const c = candidates[(r.candidate || 0) - 1]; return c ? c : null; };
+  const checked = await Promise.all(input.recommendations.map(r => {
+    const c = fromCand(r);
+    if (c && c.book) return Promise.resolve(c.book);
+    const q = c && c.seed ? { ...r, title_he: c.seed[0], title_original: c.seed[2] || r.title_original, author: c.seed[1] } : r;
+    return withTimeout(verifyRec(q), 15000).catch(() => null);
+  }));
   const recs = [];
   let rejected = 0;
   input.recommendations.forEach((r, i) => {
@@ -1500,8 +1581,14 @@ async function fetchBookInfo(book) {
   const isbn = isbns.find(x => /^(978)?965/.test(x)) || isbns[0] || '';
   return fetchJSON(c.url + '/bookinfo?' + new URLSearchParams({ isbn, title: book.title || '', author: (book.authors || [])[0] || '' }), 40000);
 }
+// ביקורות ודירוג מאתרי ביקורת אמינים (רק לספרים הסופיים; נשמר בשרת ל-30 יום)
+async function fetchReviews(book) {
+  const c = loadCloud();
+  if (!c) return null;
+  return fetchJSON(c.url + '/reviews?' + new URLSearchParams({ title: book.title || '', author: (book.authors || [])[0] || '', original: book.subtitle || '' }), 40000);
+}
 async function enrichRec(rec) {
-  const info = await fetchBookInfo(rec).catch(() => null);
+  const [info, rv] = await Promise.all([fetchBookInfo(rec).catch(() => null), fetchReviews(rec).catch(() => null)]);
   const offers = [];
   if (rec.ebook) offers.push({ site: 'Google Play', url: rec.ebookLink || rec.link, kinds: ['ebook'] });
   if (rec.source === 'web' && rec.link) offers.push({ site: rec.verifiedVia, url: rec.link, kinds: kindsOf(rec.verifiedVia, `${rec.title} ${rec.description}`) });
@@ -1514,14 +1601,14 @@ async function enrichRec(rec) {
     if (!out.cover && info.cover) out.cover = info.cover;
     if (info.isbn && !(out.isbns || []).length) out.isbns = [info.isbn];
   }
-  return { ...out, offers, availability: info ? info.available : null };
+  return { ...out, offers, availability: info ? info.available : null, reviews: rv ? { list: (rv.reviews || []).filter(x => x.quote), rating: rv.rating || null } : null };
 }
 
 /* ============================================================
    מנוע ההמלצות הדטרמיניסטי
    ============================================================ */
 function buildProfile(allBooks) {
-  const books = allBooks.filter(b => b.status !== 'want');
+  const books = allBooks.filter(isRated);
   const authors = new Map(), cats = new Map(), tags = new Map();
   const negAuthors = new Set();
   const add = (map, name, w, book) => {
@@ -1921,21 +2008,21 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose, initialStatus 
         </div>
       </div>
       <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2 mb-4" role="tablist" aria-label="סטטוס">
-        {[['read', 'קראתי', 'BookCheck'], ['want', 'רוצה לקרוא', 'Bookmark']].map(([k, l, ic]) => (
+        {STATUSES.map(([k, l, ic]) => (
           <button key={k} type="button" role="tab" aria-selected={status === k} onClick={() => setStatus(k)}
             className={`min-h-[44px] rounded-xl font-semibold text-[15px] inline-flex items-center justify-center gap-1.5 ${status === k ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}><Icon name={ic} size={17} />{l}</button>
         ))}
       </div>
-      {status === 'read' && (
+      {(status === 'read' || status === 'partial') && (
         <div className="mb-4 flex items-center gap-2 flex-wrap">
-          <label htmlFor="read-month" className="text-[13px] font-semibold tracking-wide text-muted">מתי קראתי?</label>
+          <label htmlFor="read-month" className="text-[13px] font-semibold tracking-wide text-muted">{status === 'partial' ? 'מתי הפסקתי?' : 'מתי קראתי?'}</label>
           <input id="read-month" type="month" value={readMonth} max={monthOf()} onChange={e => setReadMonth(e.target.value)}
             className="min-h-[44px] px-2 rounded-xl border border-line bg-bg text-[15px]" />
         </div>
       )}
-      {status === 'read' && (
+      {(status === 'read' || status === 'partial') && (
         <fieldset className="mb-4">
-          <legend className="text-[13px] font-semibold tracking-wide text-muted mb-1">דירוג (חובה)</legend>
+          <legend className="text-[13px] font-semibold tracking-wide text-muted mb-1">{status === 'partial' ? 'דירוג (לא חובה)' : 'דירוג (חובה)'}</legend>
           <div className="flex items-center gap-3 flex-wrap">
             <Stars value={rating} onChange={setRating} size={28} label="דירוג הספר" />
             <span className="text-[15px] font-semibold text-muted min-h-[1.5em]">{ratingText}</span>
@@ -1956,13 +2043,13 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose, initialStatus 
         </form>
       </fieldset>
       <div className="mb-4">
-        <label htmlFor="book-note" className="block text-[13px] font-semibold tracking-wide text-muted mb-1.5">{status === 'want' ? 'למה בא לך לקרוא אותו? (רשות)' : 'מה חשבת על הספר? (רשות)'}</label>
+        <label htmlFor="book-note" className="block text-[13px] font-semibold tracking-wide text-muted mb-1.5">{{ want: 'למה בא לך לקרוא אותו? (רשות)', reading: 'רשמים בינתיים (רשות)', partial: 'למה הפסקת, ועד איפה הגעת? (רשות, עוזר להמלצות)' }[status] || 'מה חשבת על הספר? (רשות)'}</label>
         <textarea id="book-note" value={note} onChange={e => setNote(e.target.value)} rows={3} maxLength={4000}
           placeholder="מה אהבת, מה פחות, למי היית ממליץ… ההמלצות החכמות משתמשות בזה."
           className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px] leading-relaxed" />
       </div>
-      <Btn className="w-full" disabled={status === 'read' && !rating} onClick={() => onSave({ status, rating: status === 'want' ? 0 : rating, tags, note: note.trim(), readAt: status === 'read' && /^\d{4}-\d{2}$/.test(readMonth) ? new Date(readMonth + '-15T12:00:00').getTime() : 0 })}>
-        <Icon name="Check" size={20} />{existing ? 'שמירת שינויים' : status === 'want' ? 'הוספה לרשימת "רוצה לקרוא"' : 'שמירה לספרייה'}
+      <Btn className="w-full" disabled={status === 'read' && !rating} onClick={() => onSave({ status, rating: ['want', 'reading'].includes(status) ? 0 : rating, tags, note: note.trim(), readAt: (status === 'read' || status === 'partial') && /^\d{4}-\d{2}$/.test(readMonth) ? new Date(readMonth + '-15T12:00:00').getTime() : 0 })}>
+        <Icon name="Check" size={20} />{existing ? 'שמירת שינויים' : { want: 'הוספה לרשימת "רוצה לקרוא"', reading: 'הוספה ל"קורא עכשיו"', partial: 'שמירה כ"קראתי חלקית"' }[status] || 'שמירה לספרייה'}
       </Btn>
       {status === 'read' && !rating && <p className="text-center text-muted text-[13px] mt-2">בחרו דירוג כדי לשמור</p>}
     </Sheet>
@@ -2390,7 +2477,7 @@ function classifyBook(b) {
 }
 function genreStats(books) {
   const m = new Map();
-  books.filter(b => b.status !== 'want').forEach(b => {
+  books.filter(isRated).forEach(b => {
     const [g] = classifyBook(b);
     const k = g || 'לא מסווג';
     const cur = m.get(k) || { tag: k, count: 0, sum: 0 };
@@ -2405,7 +2492,7 @@ function genreMixText(books) {
   return st.slice(0, 6).map(x => `${GENRE_OF_TAG[x.tag] || x.tag} ${Math.round(x.count * 100 / total)}% (avg ${(x.sum / x.count).toFixed(1)}★)`).join(', ');
 }
 function LibraryStats({ books }) {
-  const read = books.filter(b => b.status !== 'want');
+  const read = books.filter(isRated);
   const gs = genreStats(read);
   const years = new Map();
   read.forEach(b => { const y = new Date(b.readAt || b.addedAt).getFullYear(); years.set(y, (years.get(y) || 0) + 1); });
@@ -2444,8 +2531,9 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
   const [layout, setLayout] = useState(() => { try { return localStorage.getItem('vrt_layout') || 'list'; } catch (e) { return 'list'; } });
   useEffect(() => { try { localStorage.setItem('vrt_layout', layout); } catch (e) { /* */ } }, [layout]);
   useEffect(() => { try { sessionStorage.setItem('vrt_shelf', shelf); } catch (e) { /* */ } }, [shelf]);
-  const readBooks = db.books.filter(b => b.status !== 'want'), wantBooks = db.books.filter(b => b.status === 'want');
-  const books = shelf === 'want' ? wantBooks : readBooks;
+  const byShelf = (k) => db.books.filter(b => statusOf(b) === k);
+  const readBooks = byShelf('read'), wantBooks = byShelf('want');
+  const books = byShelf(shelf);
   const allTags = useMemo(() => {
     const m = new Map();
     books.forEach(b => b.tags.forEach(t => m.set(t, (m.get(t) || 0) + 1)));
@@ -2489,9 +2577,9 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
       </header>
       {showStats && <LibraryStats books={db.books} />}
       <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2 mb-3" role="tablist" aria-label="מדף">
-        {[['read', `קראתי (${readBooks.length})`, 'BookCheck'], ['want', `רוצה לקרוא (${wantBooks.length})`, 'Bookmark']].map(([k, l, ic]) => (
+        {STATUSES.map(([k, l, ic]) => (
           <button key={k} type="button" role="tab" aria-selected={shelf === k} onClick={() => { setShelf(k); setTag(''); }}
-            className={`min-h-[44px] rounded-xl font-semibold text-[15px] inline-flex items-center justify-center gap-1.5 ${shelf === k ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}><Icon name={ic} size={17} />{l}</button>
+            className={`min-h-[42px] rounded-xl font-semibold text-[14px] inline-flex items-center justify-center gap-1.5 ${shelf === k ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}><Icon name={ic} size={16} />{l} ({byShelf(k).length})</button>
         ))}
       </div>
       <div className="flex gap-2 mb-3">
@@ -2529,8 +2617,8 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
               <button type="button" onClick={() => { setOpen(b.id); setConfirmDel(false); }} className="w-full text-right grid gap-1.5 active:scale-[.98] transition-transform">
                 <span className="relative block">
                   <Cover book={b} className="w-full aspect-[2/3] h-auto rounded-lg" />
-                  {b.status === 'want'
-                    ? <span className="absolute top-1.5 left-1.5 w-6 h-6 rounded-full glass grid place-items-center text-brass"><Icon name="Bookmark" size={14} /></span>
+                  {!(statusOf(b) === 'read' || b.rating > 0)
+                    ? <span className="absolute top-1.5 left-1.5 w-6 h-6 rounded-full glass grid place-items-center text-brass"><Icon name={(STATUSES.find(x => x[0] === statusOf(b)) || [])[2]} size={14} /></span>
                     : <span className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-full glass text-[11px] font-bold tabular inline-flex items-center gap-0.5"><Icon name="Star" size={11} className="text-brass" />{b.rating}</span>}
                 </span>
                 <span className="font-display font-medium text-[14px] leading-snug clamp-2">{b.title}</span>
@@ -2549,7 +2637,8 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
               <div className="min-w-0 flex-1">
                 <div className="font-display font-medium text-[17px] leading-snug clamp-2">{b.title}</div>
                 <div className="text-muted text-[14px] truncate">{[b.authors.join(', '), b.publisher, b.year].filter(Boolean).join(' · ')}</div>
-                {b.status === 'want' ? <div className="mt-1 text-[13px] text-accent font-semibold inline-flex items-center gap-1"><Icon name="Bookmark" size={13} />רוצה לקרוא</div> : <div className="mt-1"><Stars value={b.rating} size={15} /></div>}
+                {statusOf(b) === 'read' || b.rating > 0 ? <div className="mt-1"><Stars value={b.rating} size={15} /></div>
+                  : <div className="mt-1 text-[13px] text-accent font-semibold inline-flex items-center gap-1"><Icon name={(STATUSES.find(x => x[0] === statusOf(b)) || [])[2]} size={13} />{(STATUSES.find(x => x[0] === statusOf(b)) || [])[1]}</div>}
                 {b.tags.length > 0 && <div className="flex flex-wrap gap-1 mt-1.5">{b.tags.slice(0, 4).map(t => <span key={t} className="text-[12px] px-2 py-0.5 rounded-full bg-surface2 text-muted font-semibold">{t}</span>)}{b.tags.length > 4 && <span className="text-[12px] text-muted">+{b.tags.length - 4}</span>}</div>}
               </div>
             </button>
@@ -2568,7 +2657,7 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
               {current.subtitle && <div className="text-[14px] text-muted">{current.subtitle}</div>}
               <div className="text-[15px] mt-1">{current.authors.join(', ')}</div>
               <div className="text-muted text-[13px] tabular mt-0.5">{metaLine(current)}</div>
-              <div className="mt-2">{current.status === 'want' ? <span className="text-accent font-semibold inline-flex items-center gap-1"><Icon name="Bookmark" size={15} />ברשימת "רוצה לקרוא"</span> : <Stars value={current.rating} size={18} />}</div>
+              <div className="mt-2">{statusOf(current) === 'read' ? <Stars value={current.rating} size={18} /> : <span className="text-accent font-semibold inline-flex items-center gap-1"><Icon name={(STATUSES.find(x => x[0] === statusOf(current)) || [])[2]} size={15} />{(STATUSES.find(x => x[0] === statusOf(current)) || [])[1]}{current.rating > 0 ? ` · ${current.rating}★` : ''}</span>}</div>
             </div>
           </div>
           <div className="flex flex-wrap gap-1.5 mb-3"><SourceBadge book={current} />{current.tags.map(t => <span key={t} className="text-[13px] px-2 py-0.5 rounded-full bg-surface2 font-semibold">{t}</span>)}</div>
@@ -2581,12 +2670,13 @@ function LibraryTab({ db, onEdit, onDelete, onUpdateBook, goAdd, notify }) {
           )}
           {current.genres && current.genres.length > 0 && <div className="flex flex-wrap gap-1 mb-3">{current.genres.map(g => <span key={g} className="text-[12px] px-2 py-0.5 rounded-full border border-line">{g}</span>)}</div>}
           <AiDetailsButton book={current} onUpdate={(patch) => onUpdateBook(current.id, patch)} />
-          <p className="text-muted text-[13px] mb-3">{current.year ? `יצא לאור ב-${current.year} · ` : ''}{current.status === 'want' ? `נוסף לרשימה ב-${fmtDate(current.addedAt)}` : `נקרא ב-${fmtMonth(current.readAt || current.addedAt)}`}{current.isbns[0] ? ` · ISBN ${current.isbns[0]}` : ''}</p>
+          <p className="text-muted text-[13px] mb-3">{current.year ? `יצא לאור ב-${current.year} · ` : ''}{statusOf(current) === 'want' ? `נוסף לרשימה ב-${fmtDate(current.addedAt)}` : statusOf(current) === 'reading' ? `התחלתי ב-${fmtDate(current.startedAt || current.addedAt)}` : `${statusOf(current) === 'partial' ? 'הפסקתי ב-' : 'נקרא ב-'}${fmtMonth(current.readAt || current.addedAt)}`}{current.isbns[0] ? ` · ISBN ${current.isbns[0]}` : ''}</p>
           <div className="mb-3"><FormatInfo book={current} /></div>
+          <div className="mb-3"><BuyLinks book={current} offers={current.offers || []} /></div>
           <RecommendToFriend book={current} notify={notify} />
           {current.link && <a href={current.link} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent font-semibold mb-4 min-h-[44px]"><Icon name="ExternalLink" size={16} />לרשומה במקור</a>}
           <div className="grid grid-cols-2 gap-2">
-            <Btn variant="soft" onClick={() => { onEdit(current); setOpen(null); }}><Icon name={current.status === 'want' ? 'BookCheck' : 'Pencil'} size={18} />{current.status === 'want' ? 'קראתי אותו' : 'עריכה'}</Btn>
+            <Btn variant="soft" onClick={() => { onEdit(current); setOpen(null); }}><Icon name={['want', 'reading'].includes(statusOf(current)) ? 'BookCheck' : 'Pencil'} size={18} />{['want', 'reading'].includes(statusOf(current)) ? 'סיימתי אותו' : 'עריכה'}</Btn>
             {!confirmDel
               ? <Btn variant="danger" onClick={() => setConfirmDel(true)}><Icon name="Trash2" size={18} />מחיקה</Btn>
               : <Btn variant="danger" className="!bg-danger !text-accentInk" onClick={() => { onDelete(current.id); setOpen(null); }}>לחצו שוב למחיקה</Btn>}
@@ -3383,7 +3473,7 @@ function LitProfileCard({ db, update }) {
   };
   useEffect(() => { if (aiAvailable() && profileStale(db)) build(); }, []);
   if (!aiAvailable()) return null;
-  const read = db.books.filter(b => b.status !== 'want').length;
+  const read = db.books.filter(isRated).length;
   return (
     <section className="bg-surface border border-line rounded-2xl p-3.5 mb-4 grid gap-2 shadow-sm">
       <div className="flex items-center justify-between gap-2">
@@ -3446,11 +3536,29 @@ function RecAvailability({ r }) {
           <span key={k} className={`px-2 py-0.5 rounded-full font-semibold ${has(k) ? 'bg-accentSoft text-ok' : 'bg-surface2 text-muted'}`}>{l}: {has(k) ? 'נמצא' : 'לא נמצא'}</span>
         ))}
       </div>
-      {offers.length > 0
-        ? <ul className="grid gap-0.5 text-[14px]">{offers.slice(0, 5).map(o => (
-            <li key={o.url} className="truncate"><a href={o.url} target="_blank" rel="noopener noreferrer" className="underline">לדף הספר ב{site(o.site)}</a>
-              <span className="text-muted"> · {(o.kinds || []).map(k => KIND[k]).join(', ')}</span></li>))}</ul>
-        : <p className="text-[13px] text-muted">לא נמצא דף מכירה בחנויות. "לא נמצא" לא אומר שאין.</p>}
+      <BuyLinks book={r} offers={offers} />
+    </div>
+  );
+}
+// קישורי רכישה: דף הספר עצמו בחנות אם נמצא, אחרת חיפוש של שם הספר באתר החנות
+const REVIEW_NAMES = { 'haaretz.co.il': 'הארץ', 'ynet.co.il': 'ynet', 'simania.co.il': 'סימניה', 'goodreads.com': 'Goodreads', 'kirkusreviews.com': 'Kirkus', 'publishersweekly.com': 'Publishers Weekly', 'nybooks.com': 'NYRB', 'lrb.co.uk': 'LRB' };
+const BUY_STORES = [['e-vrit.co.il', 'עברית'], ['steimatzky.co.il', 'סטימצקי'], ['booknet.co.il', 'צומת ספרים']];
+function BuyLinks({ book, offers = [] }) {
+  const q = `${book.title} ${(book.authors || [])[0] || ''}`.trim();
+  const direct = (site) => offers.find(o => o.site === site);
+  const publishers = offers.filter(o => !BUY_STORES.some(([s]) => s === o.site) && o.site !== 'Google Play');
+  return (
+    <div className="grid gap-1.5">
+      <div className="flex flex-wrap gap-1.5">
+        {BUY_STORES.map(([site, name]) => {
+          const d = direct(site);
+          return d
+            ? <a key={site} href={d.url} target="_blank" rel="noopener noreferrer" className="min-h-[40px] px-3 rounded-full btn-primary text-accentInk text-[14px] font-semibold inline-flex items-center gap-1"><Icon name="ExternalLink" size={14} />לקנייה ב{name}</a>
+            : <a key={site} href={`https://www.google.com/search?q=${encodeURIComponent(`site:${site} ${q}`)}`} target="_blank" rel="noopener noreferrer" className="min-h-[40px] px-3 rounded-full border border-line text-[14px] inline-flex items-center gap-1"><Icon name="Search" size={14} />חיפוש ב{name}</a>;
+        })}
+        {publishers.slice(0, 2).map(o => <a key={o.url} href={o.url} target="_blank" rel="noopener noreferrer" className="min-h-[40px] px-3 rounded-full btn-primary text-accentInk text-[14px] font-semibold inline-flex items-center gap-1"><Icon name="ExternalLink" size={14} />בהוצאה ({STORE_NAMES[o.site] || o.site})</a>)}
+      </div>
+      {!offers.length && <p className="text-[12px] text-muted">לא נמצא דף מכירה ישיר; הקישורים פותחים חיפוש באתר החנות.</p>}
     </div>
   );
 }
@@ -3510,10 +3618,19 @@ function RecCard({ r, onRead, onWant, onDismiss, inLib, onEnrich }) {
         <ul className="text-[14px] grid gap-0.5 list-disc pr-5">{r.reasons.map((x, i) => <li key={i}>{x}</li>)}</ul>
       </div>
       <Synopsis book={r} className="mt-2.5" onChange={(patch) => setExtra(x => ({ ...x, ...patch }))} />
+      {r.reviews && (r.reviews.rating || r.reviews.list.length > 0) && (
+        <div className="mt-2.5 border border-line rounded-xl p-2.5 grid gap-1.5">
+          <div className="text-[13px] font-semibold text-muted flex items-center gap-1"><Icon name="MessageCircle" size={14} />מה אומרים עליו</div>
+          {r.reviews.rating && <div className="text-[14px] inline-flex items-center gap-1"><Icon name="Star" size={14} className="text-brass fill-current" /><span className="font-semibold tabular">{r.reviews.rating.value.toFixed(1)}</span><span className="text-muted">/ {r.reviews.rating.best || 5}{r.reviews.rating.count ? ` · ${r.reviews.rating.count.toLocaleString('he-IL')} מדרגים` : ''} · <a href={r.reviews.rating.url} target="_blank" rel="noopener noreferrer" className="underline">{STORE_NAMES[r.reviews.rating.site] || r.reviews.rating.site}</a></span></div>}
+          {r.reviews.list.slice(0, 2).map(x => (
+            <blockquote key={x.url} className="text-[14px] font-reading border-r-2 border-brass pr-2" dir="auto">"{x.quote}" <a href={x.url} target="_blank" rel="noopener noreferrer" className="text-[12px] text-muted underline whitespace-nowrap">— {REVIEW_NAMES[x.site] || x.site}</a></blockquote>
+          ))}
+        </div>
+      )}
       {r.offers ? <RecAvailability r={r} /> : enriching ? <div className="mt-2.5 text-[13px] text-muted inline-flex items-center gap-1.5"><Spinner size={14} />בודק זמינות בחנויות…</div> : <FormatInfo book={r} />}
       <div className="grid grid-cols-[1fr_auto_auto] gap-2 mt-2">
         {inLib
-          ? <div className="min-h-[48px] rounded-xl bg-surface2 text-ok font-semibold grid place-items-center text-[14px]">{inLib.status === 'want' ? 'ברשימת "רוצה לקרוא"' : `בספרייה (${inLib.rating}★)`}</div>
+          ? <div className="min-h-[48px] rounded-xl bg-surface2 text-ok font-semibold grid place-items-center text-[14px]">{libLabel(inLib)}</div>
           : <div className="grid grid-cols-2 gap-2">
               <Btn variant="soft" onClick={() => onWant({ ...r, ...extra })}><Icon name="Bookmark" size={18} />רוצה לקרוא</Btn>
               <Btn variant="ghost" onClick={() => onRead({ ...r, ...extra })}><Icon name="BookCheck" size={18} />קראתי</Btn>
@@ -3557,7 +3674,7 @@ function HistoryView({ db, update, onPick, notify, openId, setOpenId }) {
         <h2 className="font-display font-medium text-[20px]">{open.recs.length} המלצות</h2>
         <ul className="grid gap-3">
           {open.recs.map(r => (
-            <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)} onRead={(b) => onPick(b)} onWant={(b) => onPick(b, { status: 'want' })}
+            <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)} onRead={(b) => onPick(b)} onWant={(b) => onPick(b, { status: 'want', fromRec: true })}
               onDismiss={(b) => setRejecting(b)} />
           ))}
         </ul>
@@ -3636,14 +3753,14 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
   useEffect(() => { if (log.length || recs.length) endRef.current && endRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [log.length, step, recs.length]);
 
   const pushLog = (...entries) => recSet(st, { log: [...st.log, ...entries] });
-  const reset = () => { recSet(st, { step: 0, answers: { avoid: [] }, log: [], recs: [], session: { id: null, at: 0 }, shown: new Set(), focus: {}, questions: [], qa: [] }); setMulti([]); setAiText(''); setOther(''); };
+  const reset = () => { recSet(st, { step: 0, answers: { avoid: [] }, log: [], recs: [], session: { id: null, at: 0 }, shown: new Set(), focus: {}, questions: [], qa: [], candP: null }); setMulti([]); setAiText(''); setOther(''); };
   const slim = (r) => ({
     key: r.key, source: r.source, sourceId: r.sourceId, title: r.title, subtitle: r.subtitle || '', authors: r.authors, year: r.year,
     description: (r.description || '').slice(0, 1200), categories: (r.categories || []).slice(0, 6), cover: r.cover, pageCount: r.pageCount,
     language: r.language, isbns: (r.isbns || []).slice(0, 3), link: r.link, publisher: r.publisher || '', reasons: r.reasons || [],
     verifiedAt: r.verifiedAt, verifiedVia: r.verifiedVia || '', ebook: !!r.ebook, ebookLink: r.ebookLink || '', olEbook: !!r.olEbook,
     sources: r.sources || [], aiFormats: r.aiFormats || null, genres: r.genres || [], descSource: r.descSource || '', descriptionHe: (r.descriptionHe || '').slice(0, 1500),
-    offers: (r.offers || []).slice(0, 8), availability: r.availability || null
+    offers: (r.offers || []).slice(0, 8), availability: r.availability || null, reviews: r.reviews || null
   });
   const saveSession = (ans, usedLang, allRecs) => {
     if (!st.session.id) st.session = { id: uid(), at: Date.now() };
@@ -3694,7 +3811,11 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
   const runAi = async (ans, qa) => {
     recSet(st, { running: true, questions: [], qa });
     try {
+      // השכבה האלגוריתמית: המועמדים נאספו כבר בזמן שאלות ההמשך
+      const candidates = await (st.candP || (st.candP = buildCandidates(db, ans.focus || {}))).catch(() => []);
+      if (candidates.length) progress(`נמצאו ${candidates.length} ספרים מתאימים במאגרים (לפי סופרים שאהבת, חברים וז'אנרים). Claude בוחר מתוכם.`);
       const { recs: r, interpretation } = await aiRecommend({
+        candidates,
         books: db.books, request: ans.request, focus: ans.focus, qa, lang, exclude: excludeNow(),
         dismissed: db.dismissed, history: db.history, want: 5, onProgress: progress, ctx: { ans, qa },
         profile: db.litProfile, profileNote: db.profileNote, rejections: activeRejections(db).concat((db.rejections || []).filter(x => x.note && x.until && x.until <= Date.now())), friendsLoved: friendsLovedTitles(db.books), feedback: db.feedback || [], genreMix: genreMixText(db.books)
@@ -3708,6 +3829,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
     const ans = { mode: 'ai', request, focus: st.focus };
     const sum = focusSummary(st.focus);
     recSet(st, { answers: ans, step: QUESTIONS.length, running: true, qa: [] });
+    st.candP = buildCandidates(db, st.focus || {});   // רץ במקביל לשאלות ההמשך
     pushLog({ from: 'me', text: [request || 'תמליץ לי על הספר הבא', ...sum].join(' · ') });
     let qs = [];
     try { qs = await aiClarify({ books: db.books, request, focus: st.focus, profile: db.litProfile }); } catch (e) { qs = []; }
@@ -3873,6 +3995,12 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
           );
         })()}
         {running && <Bubble from="bot"><span className="inline-flex items-center gap-2 text-muted"><Spinner size={16} />עובד על זה…</span></Bubble>}
+        {running && answers.mode === 'ai' && pushSupported() && (typeof Notification === 'undefined' || Notification.permission !== 'granted') && (
+          <div className="fade-in bg-surface border border-line rounded-2xl p-3 grid gap-1.5">
+            <p className="text-[14px]">אפשר לצאת מהאפליקציה בינתיים. רוצה התראה כשההמלצות מוכנות?</p>
+            <PushButton notify={notify} />
+          </div>
+        )}
       </div>
 
       {recs.length > 0 && (
@@ -3881,7 +4009,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
           <ul className="grid gap-3">
             {recs.map(r => (
               <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)}
-                onRead={(b) => onPick(b)} onWant={(b) => onPick(b, { status: 'want' })}
+                onRead={(b) => onPick(b)} onWant={(b) => onPick(b, { status: 'want', fromRec: true })}
                 onEnrich={(e) => { const all = st.recs.map(x => x.key === e.key ? e : x); recSet(st, { recs: all }); if (st.session.id) saveSession(st.answers, lang, all); }}
                 onDismiss={(b) => setRejecting(b)} />
             ))}
@@ -4279,7 +4407,7 @@ const shareOf = (d) => ({ read: true, want: true, notes: true, community: true, 
 function visibleBooks(d) {
   if (!d) return [];
   const sh = shareOf(d);
-  return d.books.filter(b => b.status === 'want' ? sh.want : sh.read).map(b => sh.notes ? b : { ...b, note: '' });
+  return d.books.filter(b => ['want', 'reading'].includes(statusOf(b)) ? sh.want : sh.read).map(b => sh.notes ? b : { ...b, note: '' });
 }
 function useFriends() {
   const social = useSocial();
@@ -4302,7 +4430,7 @@ function lovedBy(pids, myBooks, { minFans = 1, community = false } = {}) {
     if (!d) return;
     if (community && shareOf(d).community === false) return;
     visibleBooks(d).forEach(b => {
-      const loved = b.status !== 'want' && b.rating >= 4, wanted = b.status === 'want';
+      const loved = isRated(b) && b.rating >= 4, wanted = statusOf(b) === 'want';
       if (!loved && !wanted) return;
       if (findInLibrary(b, myBooks)) return;
       const k = dedupeKey(b);
@@ -4350,7 +4478,7 @@ function FriendsTab({ db, update, onPick, notify }) {
   );
   const AddButtons = ({ book }) => {
     const inLib = findInLibrary(book, db.books);
-    if (inLib) return <div className="text-[13px] text-muted mt-1.5">{inLib.status === 'want' ? 'כבר ברשימת "רוצה לקרוא"' : `כבר בספרייה (${inLib.rating}★)`}</div>;
+    if (inLib) return <div className="text-[13px] text-muted mt-1.5">{libLabel(inLib)}</div>;
     return (
       <div className="flex gap-1.5 mt-2 flex-wrap">
         <Chip onClick={() => onPick(book, { status: 'want' })}><Icon name="Bookmark" size={14} />רוצה לקרוא</Chip>
@@ -4396,7 +4524,7 @@ function FriendsTab({ db, update, onPick, notify }) {
           ? <ul className="grid grid-cols-2 gap-2">{accepted.map(pid => {
               const d = loadDBOf(pid);
               const vis = visibleBooks(d);
-              const read = vis.filter(b => b.status !== 'want').length, want = vis.filter(b => b.status === 'want').length;
+              const read = vis.filter(isRated).length, want = vis.filter(b => statusOf(b) === 'want').length;
               return (
                 <li key={pid}>
                   <button type="button" onClick={() => setView(pid)} className="w-full text-right bg-surface border border-line rounded-2xl p-3 grid gap-1">
@@ -4462,7 +4590,7 @@ function FriendsTab({ db, update, onPick, notify }) {
 function FriendShelf({ pid, profile, myBooks, onBack, onPick }) {
   const d = loadDBOf(pid);
   const [shelf, setShelf] = useState('read');
-  const books = d ? visibleBooks(d).filter(b => shelf === 'want' ? b.status === 'want' : b.status !== 'want').sort((a, b) => (b.rating - a.rating) || (b.addedAt - a.addedAt)) : [];
+  const books = d ? visibleBooks(d).filter(b => shelf === 'want' ? ['want', 'reading'].includes(statusOf(b)) : !['want', 'reading'].includes(statusOf(b))).sort((a, b) => (b.rating - a.rating) || (b.addedAt - a.addedAt)) : [];
   return (
     <div className="fade-in">
       <header className="pt-4 pb-3 flex items-center gap-2">
@@ -4486,9 +4614,9 @@ function FriendShelf({ pid, profile, myBooks, onBack, onPick }) {
               <div className="min-w-0 flex-1">
                 <div className="font-display font-medium text-[16px] leading-snug clamp-2">{b.title}</div>
                 <div className="text-muted text-[13px] truncate">{b.authors.join(', ')}</div>
-                {b.status !== 'want' && <Stars value={b.rating} size={13} />}
+                {statusOf(b) === 'reading' ? <div className="text-[12px] text-teal font-semibold">קורא/ת עכשיו</div> : b.rating > 0 && <Stars value={b.rating} size={13} />}
                 {b.note && <div className="text-[13px] font-reading clamp-2 mt-0.5">"{b.note}"</div>}
-                {inLib ? <div className="text-[12px] text-muted mt-1">{inLib.status === 'want' ? 'ברשימה שלך' : `קראת (${inLib.rating}★)`}</div>
+                {inLib ? <div className="text-[12px] text-muted mt-1">{libLabel(inLib)}</div>
                   : <div className="flex gap-1.5 mt-1.5"><Chip onClick={() => onPick(b, { status: 'want' })}><Icon name="Bookmark" size={14} />רוצה לקרוא</Chip><Chip onClick={() => onPick(b)}>קראתי</Chip></div>}
               </div>
             </li>
@@ -4522,6 +4650,52 @@ function RecommendToFriend({ book, notify }) {
       <label htmlFor="rec-note" className="sr-only">מה לכתוב</label>
       <input id="rec-note" value={note} onChange={e => setNote(e.target.value)} placeholder="כמה מילים: למה זה בשבילו/ה (רשות)" className="min-h-[44px] px-3 rounded-xl border border-line bg-bg text-[16px]" />
       <div className="grid grid-cols-2 gap-2"><Btn disabled={!to.length} onClick={send}>שליחה</Btn><Btn variant="ghost" onClick={() => setOpen(false)}>ביטול</Btn></div>
+    </div>
+  );
+}
+
+/* ---------- כרטיס "בחרת ספר" בסגנון Wrapped, ומעקב אחרי 3 שבועות ---------- */
+const FOLLOW_UP_AFTER = 21 * 86400000;
+function PickCard({ pick, onClose }) {
+  const { book, status, why } = pick;
+  const share = async () => {
+    const text = `בחרתי לקרוא את "${book.title}"${(book.authors || [])[0] ? ` של ${book.authors[0]}` : ''} 📚 (מה שנקרא)`;
+    try { if (navigator.share) await navigator.share({ text }); else await navigator.clipboard.writeText(text); } catch (e) { /* ביטול */ }
+  };
+  return ReactDOM.createPortal((
+    <div className="fixed inset-0 z-50 grid place-items-center p-5 fade-in" role="dialog" aria-modal="true" aria-label="בחרת ספר" style={{ background: 'rgba(10,10,20,.55)' }} onClick={onClose}>
+      <div className="sheet-in w-full max-w-sm rounded-3xl p-6 text-center grid gap-3 relative overflow-hidden" onClick={e => e.stopPropagation()}
+        style={{ background: 'linear-gradient(150deg, var(--accent) 0%, var(--rose) 55%, var(--brass) 100%)', color: '#fff' }}>
+        <div className="text-[13px] font-bold tracking-[.2em] opacity-90">הבחירה שלך</div>
+        <div className="mx-auto w-28 h-40 rounded-lg overflow-hidden shadow-2xl ring-4 ring-white/30 bg-white/20 grid place-items-center">
+          {book.cover && !isEink() ? <img src={book.cover} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" /> : <span className="font-display text-[40px]">{(book.title || '?').charAt(0)}</span>}
+        </div>
+        <div className="font-display font-bold text-[26px] leading-tight">{book.title}</div>
+        {(book.authors || [])[0] && <div className="text-[16px] opacity-90">{book.authors[0]}</div>}
+        {why && <p className="text-[15px] leading-relaxed bg-white/15 rounded-2xl p-3">{why}</p>}
+        <div className="text-[14px] opacity-95">{status === 'reading' ? 'קריאה נעימה! 📖' : 'נשמר ב"רוצה לקרוא" 🔖'} בעוד שלושה שבועות נשאל איך היה.</div>
+        <div className="grid grid-cols-2 gap-2 mt-1">
+          <button type="button" onClick={share} className="min-h-[46px] rounded-xl bg-white/20 font-semibold">שיתוף</button>
+          <button type="button" onClick={onClose} className="min-h-[46px] rounded-xl bg-white text-[#1B1A28] font-semibold">יופי</button>
+        </div>
+      </div>
+    </div>
+  ), document.body);
+}
+// אחרי 3 שבועות: איך הולך עם הספר שבחרת מהמלצה?
+function FollowUpBanner({ db, update, onPick }) {
+  const due = db.books.find(b => b.fromRec && !b.fromRec.asked && ['want', 'reading'].includes(statusOf(b)) && Date.now() - (b.fromRec.at || 0) > FOLLOW_UP_AFTER);
+  if (!due) return null;
+  const mark = (patch) => update(d => ({ ...d, books: d.books.map(b => b.id === due.id ? sanitizeBook({ ...b, ...patch, fromRec: { ...b.fromRec, ...(patch.fromRec || {}) }, editedAt: Date.now() }) : b) }));
+  return (
+    <div className="fade-in mt-3 bg-surface border border-line rounded-2xl p-3 grid gap-2 accent-top">
+      <div className="text-[15px]"><span className="font-semibold">איך הולך עם "{due.title}"?</span> <span className="text-muted text-[13px]">בחרת אותו מהמלצה לפני שלושה שבועות.</span></div>
+      <div className="flex flex-wrap gap-1.5">
+        {statusOf(due) === 'want' && <Chip onClick={() => mark({ status: 'reading', startedAt: Date.now(), fromRec: { at: Date.now() } })}><Icon name="BookOpen" size={14} />התחלתי לקרוא</Chip>}
+        <Chip onClick={() => { mark({ fromRec: { asked: Date.now() } }); onPick(due, { status: 'read' }); }}><Icon name="BookCheck" size={14} />סיימתי</Chip>
+        <Chip onClick={() => { mark({ fromRec: { asked: Date.now() } }); onPick(due, { status: 'partial' }); }}><Icon name="BookX" size={14} />הפסקתי באמצע</Chip>
+        <Chip onClick={() => mark({ fromRec: { at: Date.now() } })}>עוד לא, תשאלו שוב</Chip>
+      </div>
     </div>
   );
 }
@@ -4608,10 +4782,10 @@ function DigestSheet({ digest, db, update, onPick, notify, onClose }) {
                 </div>
               </div>
               {b.description && <p className="font-reading text-[15px] clamp-3 mt-2" dir="auto">{b.description}</p>}
-              {b.offers.length > 0 && <div className="text-[13px] mt-1.5 flex flex-wrap gap-x-3">{b.offers.slice(0, 3).map(o => <a key={o.url} href={o.url} target="_blank" rel="noopener noreferrer" className="underline">לדף הספר ב{STORE_NAMES[o.site] || o.site}</a>)}</div>}
-              {inLib ? <div className="text-[13px] text-muted mt-2">{inLib.status === 'want' ? 'ברשימת "רוצה לקרוא"' : 'כבר בספרייה'}</div> : (
+              <div className="mt-2"><BuyLinks book={b} offers={b.offers} /></div>
+              {inLib ? <div className="text-[13px] text-muted mt-2">{libLabel(inLib)}</div> : (
                 <div className="flex gap-1.5 mt-2 flex-wrap">
-                  <Chip onClick={() => onPick(b, { status: 'want' })}><Icon name="Bookmark" size={14} />רוצה לקרוא</Chip>
+                  <Chip onClick={() => onPick(b, { status: 'want', fromRec: true })}><Icon name="Bookmark" size={14} />רוצה לקרוא</Chip>
                   <Chip onClick={() => onPick(b)}><Icon name="BookCheck" size={14} />קראתי</Chip>
                   <Chip onClick={() => setRejecting(b)}><Icon name="ThumbsDown" size={14} />לא בשבילי</Chip>
                 </div>
@@ -4640,6 +4814,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
   const [digestOpen, setDigestOpen] = useState(null);
   // פתיחה מהתראה: ?view=digest
   useEffect(() => {
+    if (/[?&]view=recs/.test(location.search)) { setTab('discover'); try { history.replaceState(null, '', location.pathname); } catch (e) { /* */ } return; }
     if (!/[?&]view=digest/.test(location.search)) return;
     const c = loadCloud(); if (!c) return;
     fetchJSON(c.url + '/digest?pid=' + encodeURIComponent(ACTIVE.id)).then(d => { if (d.digests && d.digests[0]) setDigestOpen(d.digests[0]); }).catch(() => {});
@@ -4694,18 +4869,22 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
 
   const pick = (book, opts) => {
     const existing = findInLibrary(book, db.books);
-    setPending({ book: existing || book, existing: existing || null, onSaved: opts && opts.onSaved, status: opts && opts.status });
+    setPending({ book: existing || book, existing: existing || null, onSaved: opts && opts.onSaved, status: opts && opts.status, fromRec: !!(opts && opts.fromRec) });
   };
+  const [celebrate, setCelebrate] = useState(null);
   const save = ({ status = 'read', rating, tags, note, readAt = 0 }) => {
     const { book, existing } = pending;
     update(d => {
       const tagLibrary = Array.from(new Set([...d.tagLibrary, ...tags]));
-      if (existing) return { ...d, tagLibrary, books: d.books.map(b => b.id === existing.id ? sanitizeBook({ ...b, status, rating, tags, note, readAt, editedAt: Date.now() }) : b) };
+      if (existing) return { ...d, tagLibrary, books: d.books.map(b => b.id === existing.id ? sanitizeBook({ ...b, status, rating, tags, note, readAt, startedAt: status === 'reading' && statusOf(b) !== 'reading' ? Date.now() : b.startedAt, editedAt: Date.now() }) : b) };
       const now = Date.now();
-      const rec = sanitizeBook({ ...book, id: uid(), status, rating, tags, note, readAt, addedAt: now, editedAt: now, verifiedAt: book.verifiedAt || now });
+      const fromRec = pending.fromRec && status !== 'read' ? { at: now, why: (book.reasons || [])[0] || '' } : null;
+      const rec = sanitizeBook({ ...book, id: uid(), status, rating, tags, note, readAt, startedAt: status === 'reading' ? now : 0, addedAt: now, editedAt: now, verifiedAt: book.verifiedAt || now, fromRec });
       return { ...d, tagLibrary, books: [rec, ...d.books], settings: { ...d.settings, onboarded: true } };
     });
-    notify(existing ? 'השינויים נשמרו' : status === 'want' ? `"${book.title}" נוסף לרשימת "רוצה לקרוא"` : `"${book.title}" נשמר בספרייה`);
+    // ספר שבחרת מתוך המלצה: כרטיס חגיגי בסגנון Wrapped, ובעוד 3 שבועות נשאל איך היה
+    if (!existing && pending.fromRec && status !== 'read') setCelebrate({ book, status, why: (book.reasons || [])[0] || '' });
+    notify(existing ? 'השינויים נשמרו' : { want: `"${book.title}" נוסף לרשימת "רוצה לקרוא"`, reading: `"${book.title}" נוסף ל"קורא עכשיו". קריאה נעימה!` }[status] || `"${book.title}" נשמר בספרייה`);
     const onSaved = pending.onSaved;
     setPending(null);
     if (onSaved) onSaved(existing || book);
@@ -4727,9 +4906,10 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
         </div>
         <InstallPrompt />
         <DigestBanner db={db} update={update} onOpen={setDigestOpen} />
+        <FollowUpBanner db={db} update={update} onPick={pick} />
         {showStarter && <Starter db={db} update={update} onBegin={() => setStarterOpen(true)} onClose={() => setStarterOpen(false)}
           goQueue={() => { setStarterOpen(false); try { sessionStorage.setItem('vrt_add_mode', 'bulk'); } catch (e) { /* */ } setTab('add'); }} />}
-        {tab === 'library' && !showStarter && <LibraryTab db={db} onEdit={(b) => setPending({ book: b, existing: b, status: b.status === 'want' ? 'read' : undefined })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id), tombstones: { ...d.tombstones, books: { ...d.tombstones.books, [id]: Date.now() } } })); notify('הספר נמחק'); }}
+        {tab === 'library' && !showStarter && <LibraryTab db={db} onEdit={(b) => setPending({ book: b, existing: b, status: ['want', 'reading'].includes(statusOf(b)) ? 'read' : undefined })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id), tombstones: { ...d.tombstones, books: { ...d.tombstones.books, [id]: Date.now() } } })); notify('הספר נמחק'); }}
           onUpdateBook={(id, patch) => update(d => ({ ...d, books: d.books.map(b => b.id === id ? sanitizeBook({ ...b, ...patch, editedAt: Date.now() }) : b) }))} goAdd={() => setTab('add')} notify={notify} />}
         {tab === 'add' && <AddTab db={db} onPick={pick} goSettings={() => setTab('backup')} />}
         {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} onOpenDigest={setDigestOpen} />}
@@ -4752,6 +4932,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
         </ul>
       </nav>
 
+      {celebrate && <PickCard pick={celebrate} onClose={() => setCelebrate(null)} />}
       {digestOpen && <DigestSheet digest={digestOpen} db={db} update={update} onPick={pick} notify={notify} onClose={() => setDigestOpen(null)} />}
       {pending && <RateSheet book={pending.book} existing={pending.existing} initialStatus={pending.status} tagLibrary={db.tagLibrary} onSave={save} onClose={() => setPending(null)} />}
       <Toast toast={toast} />

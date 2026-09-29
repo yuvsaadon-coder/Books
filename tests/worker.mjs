@@ -1,5 +1,13 @@
 // בדיקות יחידה לשרת: הכלים שנשלחים ל-Anthropic
 import assert from 'node:assert/strict';
+{
+  const { ratingFromHtml, endpointKey } = await import('../worker/worker.js');
+  const gr = '<script type="application/ld+json">{"@type":"Book","name":"x","aggregateRating":{"@type":"AggregateRating","ratingValue":"3.84","ratingCount":12045,"bestRating":5}}</script>';
+  assert.deepEqual(ratingFromHtml(gr), { value: 3.84, count: 12045, best: 5 });
+  assert.equal(ratingFromHtml('<p>no rating</p>'), null);
+  assert.equal((await endpointKey('https://fcm.googleapis.com/fcm/send/abc')).length, 32);
+  console.log('worker reviews rating + notice key: ok');
+}
 import { sanitizeTools } from '../worker/worker.js';
 const tools = sanitizeTools([
   { type: 'web_search_20260209', name: 'web_search' }, { type: 'web_fetch_20260209', name: 'web_fetch' },

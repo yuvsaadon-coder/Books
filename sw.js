@@ -2,7 +2,7 @@
 // דף האפליקציה: קודם מהרשת (כדי לקבל עדכונים), ואם אין רשת – מהמטמון.
 // ספריות מ-CDN, אייקונים ו-manifest: מהמטמון, עם רענון ברקע.
 // קריאות ל-API (Google Books, Open Library, Wikidata, השרת המשפחתי) לא נשמרות במטמון.
-const CACHE = 'books-app-v26';
+const CACHE = 'books-app-v27';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/favicon.svg', './icons/icon-192.png', './icons/icon-512.png',
   './fonts/frank-ruhl-libre-hebrew-400-normal.woff2', './fonts/assistant-hebrew-400-normal.woff2', './fonts/assistant-hebrew-600-normal.woff2'];
 const STATIC_HOSTS = ['cdn.jsdelivr.net'];
@@ -39,12 +39,27 @@ self.addEventListener('fetch', (e) => {
   }
 });
 
-// ההצעות הדו-שבועיות: השרת שולח התראה בלי תוכן, וכאן מציגים אותה
+// התראות מהשרת (הצעות דו-שבועיות, "ההמלצה מוכנה"): נשלחות בלי תוכן, וכאן שואלים את השרת מה לכתוב.
+// אם האפליקציה פתוחה ומוצגת עכשיו, לא מקפיצים התראה (המשתמש כבר רואה את התוצאה)
+const API = 'https://books.yuvsaadon.workers.dev';
+async function endpointKey(endpoint) {
+  const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(endpoint));
+  return [...new Uint8Array(h)].slice(0, 16).map(b => b.toString(16).padStart(2, '0')).join('');
+}
 self.addEventListener('push', (e) => {
-  e.waitUntil(self.registration.showNotification('מה שנקרא', {
-    body: '10 ספרים חדשים שאולי יעניינו אותך', icon: 'icons/icon-192.png', badge: 'icons/favicon-32.png',
-    tag: 'digest', lang: 'he', dir: 'rtl', data: { url: './?view=digest' }
-  }));
+  e.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    let n = { title: 'מה שנקרא', body: 'יש לך עדכון חדש', url: './' };
+    try {
+      const sub = await self.registration.pushManager.getSubscription();
+      if (sub) n = await (await fetch(API + '/push/notice?e=' + await endpointKey(sub.endpoint), { cache: 'no-store' })).json();
+    } catch (err) { /* הודעה כללית */ }
+    if (wins.some(w => w.visibilityState === 'visible') && /view=recs/.test(n.url || '')) return;
+    await self.registration.showNotification(n.title || 'מה שנקרא', {
+      body: n.body || '', icon: 'icons/icon-192.png', badge: 'icons/favicon-32.png',
+      tag: /recs/.test(n.url || '') ? 'recs' : 'digest', lang: 'he', dir: 'rtl', data: { url: n.url || './' }
+    });
+  })());
 });
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();

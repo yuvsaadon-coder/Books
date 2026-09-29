@@ -324,7 +324,8 @@ async function storeSearchViaClaude(env, q, sites = STORE_SITES) {
   if (!msg) return [];
   const out = [];
   for (const b of msg.content || []) {
-    if (b.type === 'web_search_tool_result' && Array.isArray(b.content)) b.content.forEach(x => x && x.url && storeOf(x.url) && out.push({ url: x.url, title: x.title || '', site: storeOf(x.url) }));
+    const siteIn = (u) => { try { const h = new URL(u).hostname.replace(/^www\./, ''); return sites.find(d => h === d || h.endsWith('.' + d)) || ''; } catch (e) { return ''; } };
+    if (b.type === 'web_search_tool_result' && Array.isArray(b.content)) b.content.forEach(x => x && x.url && siteIn(x.url) && out.push({ url: x.url, title: x.title || '', site: siteIn(x.url) }));
   }
   return out;
 }
@@ -357,6 +358,42 @@ async function handleStores(req, env, cors, ctx) {
   return new Response(body, { status: 200, headers: { ...cors, 'content-type': 'application/json' } });
 }
 
+// ---------- ביקורות לספרים הסופיים בלבד (נשמר לכולם ל-30 יום) ----------
+// חיפוש אחד מוגבל לאתרי ביקורת אמינים, ומכל דף: משפט הפתיחה (og:description) ודירוג מצטבר אם מופיע (JSON-LD aggregateRating)
+const REVIEW_SITES = ['haaretz.co.il', 'ynet.co.il', 'simania.co.il', 'goodreads.com', 'kirkusreviews.com', 'publishersweekly.com', 'nybooks.com', 'lrb.co.uk'];
+export function ratingFromHtml(html) {
+  for (const m of String(html || '').matchAll(/<script[^>]+application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const walk = (o) => { if (!o || typeof o !== 'object') return null; if (o.aggregateRating) return o.aggregateRating; for (const v of Object.values(o)) { const r = walk(v); if (r) return r; } return null; };
+      const r = walk(JSON.parse(m[1]));
+      if (r && Number.isFinite(Number(r.ratingValue))) return { value: Number(r.ratingValue), count: Number(r.ratingCount || r.reviewCount || 0) || 0, best: Number(r.bestRating || 5) || 5 };
+    } catch (e) { /* JSON לא תקין */ }
+  }
+  return null;
+}
+async function handleReviews(req, env, cors, ctx) {
+  const p = new URL(req.url).searchParams;
+  const title = (p.get('title') || '').slice(0, 150).trim(), author = (p.get('author') || '').slice(0, 80).trim(), original = (p.get('original') || '').slice(0, 150).trim();
+  if (!title) return json({ error: 'missing' }, 400, cors);
+  const key = 'reviews:' + `${title}|${author}`.toLowerCase();
+  const cached = await env.LIBRARY.get(key, 'json');
+  if (cached) return json({ ...cached, cached: true }, 200, cors);
+  const q = [`"${title}"`, original && original !== title ? `"${original}"` : '', author, 'ביקורת review'].filter(Boolean).join(' ');
+  const hits = (await storeSearchViaClaude(env, q, REVIEW_SITES)).filter(x => titleHas(x.title, title) || (original && titleHas(x.title, original)));
+  const reviews = []; let rating = null;
+  await Promise.all(hits.slice(0, 4).map(async (h) => {
+    const html = await fetchHtml(h.url, ctx);
+    const page = html ? checkPage(html, '', '') : {};
+    const r = html ? ratingFromHtml(html) : null;
+    if (r && (!rating || r.count > rating.count)) rating = { ...r, site: h.site, url: h.url };
+    const quote = (page.description || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+    reviews.push({ site: h.site, url: h.url, title: cleanStoreTitle(h.title || page.title || ''), quote });
+  }));
+  const out = { reviews: reviews.slice(0, 3), rating, checked_at: Date.now() };
+  ctx.waitUntil(env.LIBRARY.put(key, JSON.stringify(out), { expirationTtl: 30 * 86400 }));
+  return json(out, 200, cors);
+}
+
 // ---------- עבודות רקע (Durable Object): המלצה ממשיכה לרוץ בשרת גם כשהטלפון כבוי או עבר אפליקציה ----------
 // האפליקציה שולחת את הבקשה, מקבלת מזהה, ובודקת מדי כמה שניות אם התשובה מוכנה. אחרי יום העבודה נמחקת.
 const JOB_TURNS = 4;
@@ -380,7 +417,7 @@ async function anthropicOnce(body, env) {
   throw new Error('blocked domains');
 }
 export async function runJob(job, env, onTurn) {
-  const { submit, ...body } = job;
+  const { submit, pid, ...body } = job;   // שדות פנימיים לא נשלחים ל-Anthropic
   let messages = body.messages;
   const usage = [], hits = [];
   for (let turn = 0; turn < JOB_TURNS; turn++) {
@@ -416,9 +453,12 @@ export class AiJob {
     const s = await this.state.storage.get('status');
     if (!s || s.status !== 'running') { await this.state.storage.deleteAll(); return; }   // ניקוי אחרי יום
     const job = await this.state.storage.get('job');
+    await this.state.storage.put('status', { ...s, started: Date.now() });   // סימן לאפליקציה שהעבודה באמת התחילה
     try {
       const out = await runJob(job, this.env, (turns) => this.state.storage.put('status', { ...s, turns }));
       await this.state.storage.put('status', { status: 'done', at: Date.now(), ...out });
+      // ההמלצה מוכנה: התראה לטלפון (ה-Service Worker לא מציג אותה אם האפליקציה פתוחה מול העיניים)
+      if (job.pid) await pushTo(this.env, job.pid, { title: 'ההמלצות שלך מוכנות', body: 'Claude סיים לחפש. לחצו כדי לראות את הספרים.', url: './?view=recs' }).catch(() => {});
     } catch (e) {
       await this.state.storage.put('status', { status: 'error', at: Date.now(), error: String((e && e.message) || e), code: (e && e.status) || 0 });
     }
@@ -441,7 +481,7 @@ async function handleJobs(req, env, cors, path) {
       model: ALLOWED_MODELS.includes(body.model) ? body.model : ALLOWED_MODELS[0],
       max_tokens: Math.min(Number(body.max_tokens) || 16000, 16000),
       system: body.system, messages: Array.isArray(body.messages) ? body.messages.slice(0, 4) : [], tools: body.tools,
-      submit: String(body.submit || '').slice(0, 64)
+      submit: String(body.submit || '').slice(0, 64), pid: String(body.pid || '').slice(0, 64)
     };
     if (body.thinking) job.thinking = { type: 'adaptive' };
     if (body.output_config && ['low', 'medium', 'high'].includes(body.output_config.effort)) job.output_config = { effort: body.output_config.effort };
@@ -623,11 +663,17 @@ export async function vapidAuth(env, endpoint) {
   const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, new TextEncoder().encode(`${head}.${body}`));
   return `vapid t=${head}.${body}.${b64u(sig)}, k=${v.pub}`;
 }
-async function pushTo(env, pid) {
+// ה-Service Worker שואל מה ההודעה האחרונה שלו (לפי גיבוב של כתובת ההרשמה), כי ההתראה נשלחת בלי תוכן
+export async function endpointKey(endpoint) {
+  const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(endpoint));
+  return [...new Uint8Array(h)].slice(0, 16).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+async function pushTo(env, pid, notice = { title: 'מה שנקרא', body: '10 ספרים חדשים שאולי יעניינו אותך', url: './?view=digest' }) {
   const subs = (await env.LIBRARY.get('push:' + pid, 'json')) || [];
   const keep = [];
   for (const sub of subs) {
     try {
+      await env.LIBRARY.put('notice:' + await endpointKey(sub.endpoint), JSON.stringify({ ...notice, at: Date.now() }), { expirationTtl: 7 * 86400 });
       const r = await fetch(sub.endpoint, { method: 'POST', headers: { Authorization: await vapidAuth(env, sub.endpoint), TTL: '86400', Urgency: 'normal', 'Content-Length': '0' } });
       if (r.status !== 404 && r.status !== 410) keep.push(sub);
     } catch (e) { keep.push(sub); }
@@ -644,13 +690,13 @@ const DIGEST_TOOL = {
 };
 const ADDRESS_RULE = { f: ' Address the reader in the Hebrew feminine singular.', m: ' Address the reader in the Hebrew masculine singular.', n: ' Address the reader in gender-neutral Hebrew.' };
 function digestPrompt(db, prior) {
-  const read = (db.books || []).filter(b => b.status !== 'want').sort((a, b) => b.rating - a.rating).slice(0, 60);
+  const read = (db.books || []).filter(b => !['want', 'reading'].includes(b.status)).sort((a, b) => b.rating - a.rating).slice(0, 60);
   const lib = read.map(b => `- ${b.title}${b.year ? ` (${b.year})` : ''} — ${(b.authors || [])[0] || '?'} | ${b.rating}${b.note ? ' | ' + String(b.note).slice(0, 120) : ''}`).join('\n');
   const p = db.litProfile;
   const exclude = [...new Set([...(db.books || []).map(b => b.title), ...(db.history || []).flatMap(h => (h.recs || []).map(r => r.title)),
     ...prior.flatMap(d => d.books.map(b => b.title)), ...(db.rejections || []).map(r => r.title)])].slice(0, 700);
   return `${p && p.text ? `READER PROFILE:\n${p.brief || p.text}` : `READER'S LIBRARY (title — author | rating | notes):\n${lib || '(empty)'}`}${db.profileNote ? `\nREADER'S NOTE: ${db.profileNote}` : ''}
-WISHLIST (current interests; do not suggest these): ${(db.books || []).filter(b => b.status === 'want').slice(0, 40).map(b => b.title).join('; ') || 'none'}
+WISHLIST / READING NOW (current interests; do not suggest these): ${(db.books || []).filter(b => ['want', 'reading'].includes(b.status)).slice(0, 40).map(b => b.title).join('; ') || 'none'}
 DO NOT SUGGEST (already read, owned, suggested before, or rejected): ${exclude.join('; ') || 'none'}
 
 Suggest 14 books this reader has not read that would interest them now — a varied mix (not all by the same author), including some recent books. Prefer books with a Hebrew edition.`;
@@ -706,7 +752,7 @@ export async function runDigests(env, ctx, now = Date.now()) {
     }
     if (now < meta.next || ran >= DIGEST_PER_RUN) continue;
     const db = (data.dbs || {})[p.id];
-    const readCount = db ? (db.books || []).filter(b => b.status !== 'want').length : 0;
+    const readCount = db ? (db.books || []).filter(b => !['want', 'reading'].includes(b.status)).length : 0;
     if (readCount < 1) { await env.LIBRARY.put('digest-meta:' + p.id, JSON.stringify({ next: now + DIGEST_FIRST_DELAY })); continue; }
     ran++;
     try {
@@ -722,6 +768,11 @@ export async function runDigests(env, ctx, now = Date.now()) {
 async function handleDigest(req, env, cors, path) {
   const u = new URL(req.url);
   if (path === '/push/key') return json({ key: (await vapidKeys(env)).pub }, 200, cors);
+  if (path === '/push/notice') {
+    const k = (u.searchParams.get('e') || '').replace(/[^0-9a-f]/g, '').slice(0, 32);
+    const n = k ? await env.LIBRARY.get('notice:' + k, 'json') : null;
+    return json(n || { title: 'מה שנקרא', body: 'יש לך עדכון חדש', url: './' }, 200, cors);
+  }
   if (path === '/push/subscribe' && req.method === 'POST') {
     let b; try { b = await req.json(); } catch (e) { return json({ error: 'bad_json' }, 400, cors); }
     const pid = String(b.pid || '').slice(0, 64), sub = b.sub;
@@ -773,6 +824,7 @@ export default {
       if (path === '/gbooks' && req.method === 'GET') return await handleGoogleBooks(req, env, cors, ctx);
       if (path === '/digest' || path.startsWith('/push/')) return await handleDigest(req, env, cors, path);
       if (path === '/jobs' || path.startsWith('/jobs/')) return await handleJobs(req, env, cors, path);
+      if (path === '/reviews' && req.method === 'GET') return await handleReviews(req, env, cors, ctx);
       if (path === '/bookinfo' && req.method === 'GET') return await handleBookInfo(req, env, cors, ctx);
       if (path === '/stores' && req.method === 'GET') return await handleStores(req, env, cors, ctx);
       if (path === '/nli' && req.method === 'GET') return await handleNli(req, env, cors, ctx);

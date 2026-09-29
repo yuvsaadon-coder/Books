@@ -29,6 +29,7 @@ const BOOKS = [
 let store = { rev: 0, data: null };
 const aiCalls = [], aiScript = [], errors = [];
 const digestFor = new Map();
+let stallNext = false;
 const jobs = new Map(), jobBodies = [], jobHold = new Set(), profileCalls = [];
 let viaProxy = 0, direct = 0;
 
@@ -64,6 +65,12 @@ async function phone(browser, name) {
     if (u.origin === WORKER) {
       if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
       if (u.pathname === '/ping') return route.fulfill({ headers: cors, json: { ok: true, ai: true, sync: true, gbooks: true, nli: true, jobs: true } });
+      if (u.pathname === '/reviews') {
+        const t = u.searchParams.get('title') || '';
+        return route.fulfill({ headers: cors, json: t === 'יש ואין'
+          ? { reviews: [{ site: 'haaretz.co.il', url: 'https://www.haaretz.co.il/review', title: 'ביקורת', quote: 'רומן קשוח ויפה על הישרדות.' }], rating: { value: 3.8, count: 12000, best: 5, site: 'goodreads.com', url: 'https://www.goodreads.com/x' } }
+          : { reviews: [], rating: null } });
+      }
       if (u.pathname === '/digest') {
         return route.fulfill({ headers: cors, json: { next: 0, digests: u.searchParams.get('pid') && digestFor.has(u.searchParams.get('pid')) ? [digestFor.get(u.searchParams.get('pid'))] : [] } });
       }
@@ -93,6 +100,7 @@ async function phone(browser, name) {
       if (u.pathname === '/jobs' && req.method() === 'POST') {
         const body = JSON.parse(req.postData()); jobBodies.push(body);
         const id = '00000000-0000-4000-8000-' + String(jobs.size).padStart(12, '0');
+        if (stallNext) { stallNext = false; jobs.set(id, { status: 'running' }); return route.fulfill({ headers: cors, json: { id } }); }
         let out = { status: 'error', error: 'no step' };
         for (let step = aiScript.shift(); step; step = aiScript.shift()) {
           if (step.error) { out = { status: 'error', error: `(${step.error}) invalid_request_error: something_very_long_without_spaces_`.repeat(2) }; break; }
@@ -104,7 +112,7 @@ async function phone(browser, name) {
       }
       if (u.pathname.startsWith('/jobs/')) {
         const id = u.pathname.slice(6);
-        return route.fulfill({ headers: cors, json: jobHold.has(id) ? { status: 'running', turns: 1 } : (jobs.get(id) || { status: 'missing' }) });
+        return route.fulfill({ headers: cors, json: jobHold.has(id) ? { status: 'running', turns: 1, started: 1 } : (jobs.get(id) || { status: 'missing' }) });
       }
       if (u.pathname.startsWith('/v1/messages')) {
         const reqBody = JSON.parse(req.postData());
@@ -137,7 +145,7 @@ async function phone(browser, name) {
 function googleMock(route, u) {
   const m = u.pathname.match(/volumes\/(\w+)$/);
   if (m) {
-    const b = BOOKS.find(x => x.id === m[1]);
+    const b = BOOKS.find(x => x.id === m[1]) || vol(m[1], 'עשרה סיפורים', undefined, '9650000000');
     return route.fulfill({ headers: cors, json: { ...b, volumeInfo: { ...b.volumeInfo, description: b.id === 'en1' ? LONGEN + 'FULL-TEXT-ENDING.' : b.volumeInfo.description } } });
   }
   // חיפוש כריכה לכרטיסי ההיכרות
@@ -269,7 +277,10 @@ try {
     const jp = job.messages[0].content;
     assert.ok(jp.includes('מקור: ספרות מתורגמת') && jp.includes('כמה עצוב מותר לספר להיות? → אפשר לבכות') && jp.includes('בעיקר קלאסיקה אמריקאית'), 'focus and follow-up answers reach the model');
     assert.ok(await A.locator('section li >> text=זמינות').count() > 0);
-    await A.waitForSelector('section li a:has-text("לדף הספר בסטימצקי")');
+    await A.waitForSelector('section li a:has-text("לקנייה בסטימצקי")');
+    await A.waitForSelector('section li >> text=רומן קשוח ויפה על הישרדות.');
+    await A.waitForSelector('section li >> text=3.8');
+    assert.ok(await A.locator('section li a:has-text("חיפוש בצומת ספרים")').count() > 0, 'store search link when no direct page');
     await A.click('nav >> text=ספרים שלי'); await A.click('nav >> text=גלה ספר חדש');
     assert.deepEqual(await texts(A.locator('section li .font-display.text-\\[18px\\]')), ['יש ואין']);
     // שלילה לתמיד עם הערה: נעלם מהרשימה, וההערה מגיעה להמלצה הבאה
@@ -351,14 +362,38 @@ try {
     await A.waitForSelector('[role=dialog] >> text=סנטיאגו, דייג זקן');
     await A.click('[role=dialog] button:has-text("רוצה לקרוא")');
     await A.click('[role=dialog] button:has-text("הוספה לרשימת")');
+    // כרטיס "הבחירה שלך" בסגנון Wrapped
+    await A.waitForSelector('[role=dialog][aria-label="בחרת ספר"] >> text=הזקן והים');
+    await A.click('[role=dialog][aria-label="בחרת ספר"] button:has-text("יופי")');
     await A.keyboard.press('Escape'); await A.waitForTimeout(300);
     assert.equal(await A.locator('button:has-text("ספרים חדשים בשבילך")').count(), 0, 'banner hidden after it was opened');
     await A.click('nav >> text=ספרים שלי'); await A.click('button[role=tab]:has-text("רוצה לקרוא")');
     await A.waitForSelector('main li:has-text("הזקן והים")');
+    // מעקב אחרי 3 שבועות: מזיזים את הזמן של הבחירה אחורה ובודקים את השאלה
+    await A.evaluate(() => {
+      const k = Object.keys(localStorage).find(x => { try { return (JSON.parse(localStorage.getItem(x)).books || []).some(b => b.title === 'הזקן והים'); } catch (e) { return false; } });
+      const d = JSON.parse(localStorage.getItem(k)); d.books.forEach(b => { if (b.title === 'הזקן והים') b.fromRec.at = Date.now() - 22 * 86400000; });
+      localStorage.setItem(k, JSON.stringify(d));
+    });
+    await A.reload();
+    await A.waitForSelector('text=איך הולך עם "הזקן והים"?');
+    await A.click('button:has-text("התחלתי לקרוא")');
+    await A.click('nav >> text=ספרים שלי'); await A.click('button[role=tab]:has-text("קורא עכשיו")');
+    await A.waitForSelector('main li:has-text("הזקן והים")');
     await A.click('nav >> text=גלה ספר חדש');
+  });
+  await step('a background job that never starts falls back to working directly', async () => {
+    stallNext = true;
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 'q7', name: 'submit_questions', input: { questions: [] } }], stop: 'tool_use' });
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 't9', name: 'submit_recommendations', input: { interpretation: 'ישירות.', recommendations: [] } }], stop: 'tool_use' });
+    if (await A.locator('button:has-text("שאלון חדש")').count()) await A.click('button:has-text("שאלון חדש")');
+    await A.fill('#ai-request', 'בדיקת גיבוי'); await A.click('button:has-text("המלצה חכמה")');
+    await A.waitForSelector('text=ממשיך ישירות מהטלפון', { timeout: 40000 });
+    await A.waitForSelector('text=ישירות.', { timeout: 20000 });
   });
   await step('service error is shown briefly and stays on screen', async () => {
     aiScript.push({ error: 400 }); aiScript.push({ error: 400 });
+    if (await A.locator('button:has-text("שאלון חדש")').count()) await A.click('button:has-text("שאלון חדש")');
     await A.fill('#ai-request', 'בדיקה'); await A.click('button:has-text("המלצה חכמה")');
     await A.waitForSelector('text=השירות החזיר שגיאה (400)');
     const [sw, w] = await A.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
@@ -378,6 +413,18 @@ try {
     await A.reload(); assert.equal(await A.evaluate(() => document.documentElement.hasAttribute('data-eink')), true);
     await A.click('nav >> text=הגדרות'); await A.click('[role=switch][aria-label="מצב קורא אלקטרוני"]');
     assert.equal(await A.evaluate(() => document.documentElement.hasAttribute('data-eink')), false);
+  });
+  await step('reading now → finished (statuses)', async () => {
+    await A.click('nav >> text=הוספת ספר'); await A.click('button[role=tab]:has-text("ספר אחד")'); await A.fill('#book-q', 'עשרה סיפורים'); await A.click('form button[type=submit]');
+    await A.locator('main ul > li').first().locator('button:has-text("זה הספר שלי")').click();
+    await A.click('[role=dialog] button[role=tab]:has-text("קורא עכשיו")');
+    await A.click('[role=dialog] button:has-text("הוספה ל")');
+    await A.click('nav >> text=ספרים שלי'); await A.click('button[role=tab]:has-text("קורא עכשיו")');
+    await A.click('main li:has-text("עשרה סיפורים") button');
+    await A.click('[role=dialog] button:has-text("סיימתי אותו")');
+    await A.click('[role=dialog] [aria-label="4 כוכבים"]'); await A.click('[role=dialog] button:has-text("שמירת שינויים")');
+    await A.click('button[role=tab]:has-text("קראתי")');
+    await A.waitForSelector('main li:has-text("עשרה סיפורים")');
   });
   await step('Google Books goes through the family server (shared key + cache)', async () => {
     assert.ok(viaProxy > 0, 'no proxied Google requests');
