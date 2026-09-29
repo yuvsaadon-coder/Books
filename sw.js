@@ -2,7 +2,7 @@
 // דף האפליקציה: קודם מהרשת (כדי לקבל עדכונים), ואם אין רשת – מהמטמון.
 // ספריות מ-CDN, אייקונים ו-manifest: מהמטמון, עם רענון ברקע.
 // קריאות ל-API (Google Books, Open Library, Wikidata, השרת המשפחתי) לא נשמרות במטמון.
-const CACHE = 'books-app-v22';
+const CACHE = 'books-app-v23';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/favicon.svg', './icons/icon-192.png', './icons/icon-512.png',
   './fonts/frank-ruhl-libre-hebrew-400-normal.woff2', './fonts/assistant-hebrew-400-normal.woff2', './fonts/assistant-hebrew-600-normal.woff2'];
 const STATIC_HOSTS = ['cdn.jsdelivr.net'];
@@ -20,10 +20,11 @@ self.addEventListener('fetch', (e) => {
   if (req.mode === 'navigate') {
     // בלי מטמון הדפדפן: אחרת GitHub Pages מגיש גרסה ישנה עד 10 דקות אחרי עדכון
     e.respondWith(fetch(req.url, { cache: 'no-store', credentials: 'same-origin' }).then(res => {
-      const copy = res.clone();
-      caches.open(CACHE).then(c => c.put('./index.html', copy));
+      // תשובה שעברה הפניה (למשל /Books → /Books/) אסור להחזיר לניווט כמו שהיא: הדף נתקע. מחזירים הפניה רגילה
+      if (res.redirected) return Response.redirect(res.url, 302);
+      if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put('./index.html', copy)); }
       return res;
-    }).catch(() => caches.match('./index.html')));
+    }).catch(() => caches.match('./index.html').then(r => r || caches.match('./'))));
     return;
   }
   const sameOrigin = url.origin === self.location.origin;

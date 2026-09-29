@@ -13,6 +13,21 @@ const bundled = await build({
   format: 'iife', target: 'es2019', minify: true, legalComments: 'none', charset: 'utf8'
 });
 const code = bundled.outputFiles[0].text;
+// React, ReactDOM והאייקונים נארזים לתוך הדף (במקום CDN): האפליקציה נפתחת גם כשה-CDN איטי או חסום, ומהר יותר.
+// מהאייקונים נכללים רק אלה שהקוד משתמש בהם.
+const lucideNames = Object.keys(await import(root + 'node_modules/lucide/dist/esm/lucide.js').then(m => m.icons));
+const appSrc = readFileSync(root + 'src/app.jsx', 'utf8');
+const used = [...new Set([...appSrc.matchAll(/['"]([A-Z][A-Za-z0-9]*)['"]/g)].map(m => m[1]))].filter(n => lucideNames.includes(n)).sort();
+const vendor = await build({
+  stdin: { resolveDir: root, loader: 'js', contents: `
+    import * as React from 'react'; import * as ReactDOM from 'react-dom'; import * as ReactDOMClient from 'react-dom/client';
+    import { ${used.join(', ')} } from 'lucide';
+    window.React = React; window.ReactDOM = Object.assign({}, ReactDOM, ReactDOMClient);
+    window.lucide = { icons: { ${used.join(', ')} } };` },
+  bundle: true, write: false, format: 'iife', target: 'es2019', minify: true, legalComments: 'none', charset: 'utf8',
+  define: { 'process.env.NODE_ENV': '"production"' }
+});
+const vendorCode = vendor.outputFiles[0].text;
 const css = execFileSync(root + 'node_modules/.bin/tailwindcss',
   ['-c', root + 'tailwind.config.cjs', '-i', root + 'tools/tailwind.css', '--minify'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
 // גופנים מקומיים (במקום Google Fonts): מהיר יותר, עובד גם בלי אינטרנט. מעתיקים רק עברית ולטינית במשקלים בשימוש.
@@ -29,10 +44,10 @@ for (const [family, [pkg, weights]] of Object.entries(FONTS)) {
   }
 }
 const tpl = readFileSync(root + 'src/index.template.html', 'utf8');
-if (!tpl.includes('/*__APP__*/') || !tpl.includes('/*__TAILWIND__*/')) throw new Error('template placeholders missing');
+if (!tpl.includes('/*__APP__*/') || !tpl.includes('/*__TAILWIND__*/') || !tpl.includes('/*__VENDOR__*/')) throw new Error('template placeholders missing');
 // "</script" בתוך הקוד היה סוגר את התגית מוקדם; esbuild לא מייצר כזה, אבל מוודאים
 const safe = code.replace(/<\/script/gi, '<\\/script');
 const html = '<!-- קובץ שנוצר אוטומטית מ-src/ ע"י tools/build.mjs. לעריכה: src/app.jsx ו-src/index.template.html -->\n' +
-  tpl.replace('/*__TAILWIND__*/', () => fontCss + css).replace('/*__APP__*/', () => safe);
+  tpl.replace('/*__TAILWIND__*/', () => fontCss + css).replace('/*__VENDOR__*/', () => vendorCode.replace(/<\/script/gi, '<\\/script')).replace('/*__APP__*/', () => safe);
 writeFileSync(root + 'index.html', html);
-console.log(`index.html: ${(html.length / 1024).toFixed(0)} KB (app ${(safe.length / 1024).toFixed(0)} KB, css ${(css.length / 1024).toFixed(0)} KB)`);
+console.log(`index.html: ${(html.length / 1024).toFixed(0)} KB (app ${(safe.length / 1024).toFixed(0)} KB, vendor ${(vendorCode.length / 1024).toFixed(0)} KB, ${used.length} icons, css ${(css.length / 1024).toFixed(0)} KB)`);
