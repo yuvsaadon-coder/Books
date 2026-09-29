@@ -157,8 +157,8 @@ try {
     await A.fill('#new-profile', 'יובל'); await A.click('button:has-text("כניסה")'); await addBook(A, 'מיכאל שלי');
     await B.fill('#new-profile', 'יעל'); await B.click('button:has-text("כניסה")'); await addBook(B, 'קפקא על החוף');
     await syncBoth();
-    await A.click('text=החלפת משתמש'); assert.equal((await A.locator('main li').count()), 2);
-    await B.click('text=החלפת משתמש'); assert.equal((await B.locator('main li').count()), 2);
+    await A.click('[aria-label="החלפת משתמש"]'); assert.equal((await A.locator('main li').count()), 2);
+    await B.click('[aria-label="החלפת משתמש"]'); assert.equal((await B.locator('main li').count()), 2);
   });
   await step('a deletion on one phone reaches the other', async () => {
     await B.click('main li:has-text("יובל")');
@@ -278,7 +278,7 @@ try {
   });
   await step('friends: request, accept, see the shelf, wishlist from a friend, recommend to a friend', async () => {
     await A.click('nav >> text=חברים'); await A.locator('li:has-text("יעל")').locator('button:has-text("בקשת חברות")').click();
-    await B.click('text=החלפת משתמש'); await B.click('main li:has-text("יעל")');
+    await B.click('[aria-label="החלפת משתמש"]'); await B.click('main li:has-text("יעל")');
     await syncBoth();
     await B.click('nav >> text=חברים'); await B.click('button:has-text("אישור")');
     await syncBoth();

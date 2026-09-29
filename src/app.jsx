@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '18';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '19';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -1783,7 +1783,7 @@ function SourceBadge({ book }) {
 function Chip({ active, onClick, children, className = '' }) {
   return (
     <button type="button" onClick={onClick} aria-pressed={!!active}
-      className={`min-h-[40px] px-3.5 rounded-full border text-[15px] font-medium transition-colors ${active ? 'bg-accentSoft text-accent border-accent' : 'bg-surface text-ink border-line hover:border-accent'} ${className}`}>
+      className={`min-h-[40px] px-3.5 rounded-full border text-[15px] font-medium transition-colors inline-flex items-center gap-1 ${active ? 'bg-accentSoft text-accent border-accent' : 'bg-surface text-ink border-line hover:border-accent'} ${className}`}>
       {children}
     </button>
   );
@@ -1791,7 +1791,7 @@ function Chip({ active, onClick, children, className = '' }) {
 
 function Btn({ variant = 'primary', className = '', children, ...rest }) {
   const styles = {
-    primary: 'bg-accent text-accentInk border-accent',
+    primary: 'btn-primary text-accentInk border-transparent',
     ghost: 'bg-transparent text-ink border-line',
     soft: 'bg-accentSoft text-accent border-transparent',
     danger: 'bg-transparent text-danger border-danger'
@@ -3715,7 +3715,7 @@ function downloadFile(name, content, type) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 function toText(db) {
-  const lines = [`הספרים של ${ACTIVE.name || 'הספרייה'} · ${db.books.length} ספרים · יוצא ב-${fmtDate(Date.now())}`, ''];
+  const lines = [`מה שנקרא · הספרים של ${ACTIVE.name || 'הספרייה'} · ${db.books.length} ספרים · יוצא ב-${fmtDate(Date.now())}`, ''];
   db.books.slice().sort((a, b) => b.rating - a.rating || a.title.localeCompare(b.title, 'he')).forEach((b, i) => {
     lines.push(`${i + 1}. ${b.title}${b.authors.length ? ' — ' + b.authors.join(', ') : ''}${b.year ? ` (${b.year})` : ''}`);
     lines.push(`   ${'★'.repeat(b.rating)}${'☆'.repeat(5 - b.rating)}${b.tags.length ? '  |  ' + b.tags.join(', ') : ''}`);
@@ -4338,11 +4338,12 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
       <main className="mx-auto max-w-xl px-4 pb-28 safe-top">
         <div className="flex items-center justify-between gap-2 pt-3">
           <div className="flex items-center gap-2 min-w-0">
-            <Avatar profile={profile} size={32} />
-            <span className="font-semibold text-[15px] truncate">{profile.name}</span>
+            <Logo size={32} />
+            <span className="wordmark text-[23px] leading-none">מה שנקרא</span>
           </div>
-          <button type="button" onClick={onSwitch} className="shrink-0 min-h-[40px] px-3 rounded-full border border-line text-[14px] font-semibold text-muted inline-flex items-center gap-1.5">
-            <Icon name="Users" size={16} />החלפת משתמש
+          <button type="button" onClick={onSwitch} aria-label="החלפת משתמש" title="החלפת משתמש"
+            className="shrink-0 min-h-[40px] ps-1 pe-2.5 rounded-full border border-line bg-surface inline-flex items-center gap-1.5 text-[14px] font-semibold">
+            <Avatar profile={profile} size={30} /><span className="truncate max-w-[110px]">{profile.name}</span><Icon name="ChevronsUpDown" size={15} className="text-muted" />
           </button>
         </div>
         <InstallPrompt />
@@ -4356,7 +4357,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
         {tab === 'backup' && <BackupTab onOpenStarter={() => { setStarterOpen(true); setTab('library'); }} db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
       </main>
 
-      <nav className="fixed bottom-0 inset-x-0 z-30 bg-surface border-t border-line safe-bottom" aria-label="ניווט ראשי">
+      <nav className="fixed bottom-0 inset-x-0 z-30 glass border-t border-line safe-bottom" aria-label="ניווט ראשי">
         <ul className="mx-auto max-w-xl grid grid-cols-5">
           {TABS.map(t => (
             <li key={t.id}>
@@ -4381,6 +4382,19 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
    משתמשים: הזדהות בלי סיסמה. כל משתמש מקבל ספרייה נפרדת במכשיר.
    ============================================================ */
 const AVATAR_COLORS = ['#56694F', '#8C6F4A', '#5C6B84', '#86596A', '#6E7A4E', '#6D5D86', '#8E5D48', '#4F7478'];
+// סמליל "מה שנקרא": ספר פתוח בלילה, עם כוכב קטן של "מה עוד נקרא" (תואם לאייקון במסך הבית)
+function Logo({ size = 32 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 512 512" aria-hidden="true" className="shrink-0">
+      <defs><linearGradient id="lg-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#46518F" /><stop offset="1" stopColor="#1E2550" /></linearGradient></defs>
+      <rect width="512" height="512" rx="128" fill="url(#lg-bg)" />
+      <path d="M256 196 C 214 170, 160 164, 112 172 L 112 370 C 160 362, 214 368, 256 394 Z" fill="#FFF8EC" />
+      <path d="M256 196 C 298 170, 352 164, 400 172 L 400 370 C 352 362, 298 368, 256 394 Z" fill="#E9DFCB" />
+      <path d="M256 196 L 256 394" stroke="#1E2550" strokeOpacity=".25" strokeWidth="6" />
+      <path d="M256 70 L 270 112 L 312 126 L 270 140 L 256 182 L 242 140 L 200 126 L 242 112 Z" fill="#E4AA5C" />
+    </svg>
+  );
+}
 function Avatar({ profile, size = 40 }) {
   return (
     <span aria-hidden="true" className="shrink-0 rounded-full grid place-items-center font-semibold text-white"
@@ -4409,8 +4423,14 @@ function WhoAreYou({ profiles, onPick, onCreate }) {
   return (
     <div className="min-h-screen bg-bg text-ink font-body">
       <main className="mx-auto max-w-md px-4 pt-10 pb-10 safe-top fade-in">
-        <img src="icons/icon-192.png" alt="" width="64" height="64" className="w-16 h-16 rounded-xl mb-4 shadow-sm" />
-        <h1 className="font-display font-medium text-[28px] leading-snug mb-1">של מי הספרייה?</h1>
+        <div className="flex items-center gap-3 mb-6">
+          <Logo size={56} />
+          <div>
+            <div className="wordmark text-[34px] leading-none">מה שנקרא</div>
+            <div className="text-muted text-[14px] mt-1">מה קראת, מה תקרא, ומה החברים אוהבים</div>
+          </div>
+        </div>
+        <h1 className="font-display font-medium text-[26px] leading-snug mb-1">של מי הספרייה?</h1>
         <p className="text-muted text-[15px] mb-6">כל משתמש מקבל ספרייה, דירוגים והמלצות משלו. אין סיסמה, רק בוחרים שם.</p>
         {profiles.length > 0 && (
           <ul className="grid gap-2 mb-4">

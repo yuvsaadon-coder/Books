@@ -3,16 +3,16 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#56694F">
-  <title>מנהל קריאה ומנוע המלצות חכם</title>
-  <meta name="description" content="ספרייה אישית מאומתת, דירוגים והמלצות קריאה חכמות">
+  <meta name="theme-color" content="#232B55">
+  <title>מה שנקרא</title>
+  <meta name="description" content="מה שנקרא: הספרייה שלך, רשימת 'רוצה לקרוא', חברים והמלצות קריאה חכמות ומאומתות">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
   <link rel="icon" href="icons/favicon-32.png" sizes="32x32" type="image/png">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-title" content="הספרים שלי">
+  <meta name="apple-mobile-web-app-title" content="מה שנקרא">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <link rel="preload" href="fonts/frank-ruhl-libre-hebrew-400-normal.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="fonts/assistant-hebrew-400-normal.woff2" as="font" type="font/woff2" crossorigin>
@@ -24,26 +24,37 @@
   <script src="https://cdn.jsdelivr.net/npm/lucide@0.469.0/dist/umd/lucide.min.js"></script>
   <style>
     :root {
-      --bg: #F5F1EA; --surface: #FFFDF9; --surface-2: #EEE8DE; --ink: #2E2925; --muted: #7B7168;
-      --line: #E4DCCF; --accent: #56694F; --accent-ink: #FFFDF9; --accent-soft: #E7EADF;
-      --brass: #B08A4E; --danger: #A5574B; --ok: #5A7A55; --warn: #957437;
+      --bg: #F3EEE5; --surface: #FFFCF7; --surface-2: #EBE4D7; --ink: #1B1A28; --muted: #6C6878;
+      --line: #E2D9CA; --accent: #2B366B; --accent-2: #46518F; --accent-ink: #FFFCF7; --accent-soft: #E3E5F1;
+      --brass: #BE8433; --danger: #AE4A40; --ok: #3C7757; --warn: #97691E;
+      --shadow: 0 1px 0 rgba(27,26,40,.03), 0 10px 24px -18px rgba(27,26,40,.35);
       color-scheme: light;
     }
     @media (prefers-color-scheme: dark) {
       :root:not([data-theme="light"]) {
-        --bg: #1B1815; --surface: #231F1B; --surface-2: #2B2622; --ink: #EAE3D8; --muted: #A59A8D;
-        --line: #37302A; --accent: #A3B498; --accent-ink: #1B1815; --accent-soft: #2E3429;
-        --brass: #CFB07A; --danger: #D38D80; --ok: #9FBB97; --warn: #D5B775;
+        --bg: #100F17; --surface: #191823; --surface-2: #232231; --ink: #EDE8DF; --muted: #A39EB0;
+        --line: #2D2B3B; --accent: #AFB9F2; --accent-2: #C8CFF7; --accent-ink: #100F17; --accent-soft: #252946;
+        --brass: #E4AA5C; --danger: #E28E83; --ok: #8DC8A4; --warn: #E1B66C;
+        --shadow: 0 1px 0 rgba(0,0,0,.2), 0 12px 28px -18px rgba(0,0,0,.8);
         color-scheme: dark;
       }
     }
     :root[data-theme="dark"] {
-      --bg: #1B1815; --surface: #231F1B; --surface-2: #2B2622; --ink: #EAE3D8; --muted: #A59A8D;
-      --line: #37302A; --accent: #A3B498; --accent-ink: #1B1815; --accent-soft: #2E3429;
-      --brass: #CFB07A; --danger: #D38D80; --ok: #9FBB97; --warn: #D5B775;
+      --bg: #100F17; --surface: #191823; --surface-2: #232231; --ink: #EDE8DF; --muted: #A39EB0;
+      --line: #2D2B3B; --accent: #AFB9F2; --accent-2: #C8CFF7; --accent-ink: #100F17; --accent-soft: #252946;
+      --brass: #E4AA5C; --danger: #E28E83; --ok: #8DC8A4; --warn: #E1B66C;
+      --shadow: 0 1px 0 rgba(0,0,0,.2), 0 12px 28px -18px rgba(0,0,0,.8);
       color-scheme: dark;
     }
     html, body { background: var(--bg); color: var(--ink); }
+    /* אווירה: זוהר עדין של דיו בפינה, כמו אור מנורת קריאה על נייר */
+    body { background: radial-gradient(900px 520px at 110% -8%, var(--accent-soft), transparent 62%), radial-gradient(700px 420px at -20% 108%, color-mix(in srgb, var(--brass) 12%, transparent), transparent 60%), var(--bg); background-attachment: fixed; }
+    .bg-surface.border, .bg-surface.border-line { box-shadow: var(--shadow); }
+    .btn-primary { background: linear-gradient(135deg, var(--accent-2), var(--accent)); box-shadow: 0 8px 18px -10px color-mix(in srgb, var(--accent) 70%, transparent); }
+    .glass { background: color-mix(in srgb, var(--surface) 84%, transparent); -webkit-backdrop-filter: blur(16px) saturate(1.2); backdrop-filter: blur(16px) saturate(1.2); }
+    .eyebrow { font-size: 12px; letter-spacing: .08em; font-weight: 700; color: var(--brass); }
+    .wordmark { font-family: "Frank Ruhl Libre", Georgia, serif; font-weight: 700; letter-spacing: -.01em; }
+    .rounded-xl { border-radius: 14px; }
     body { margin: 0; font-family: Assistant, "Segoe UI", Arial, sans-serif; font-size: 16px; line-height: 1.55; -webkit-tap-highlight-color: transparent; -webkit-font-smoothing: antialiased; }
     /* טקסט לקריאה: תקצירים, הערות, שיחה */
     .font-reading { font-family: "Frank Ruhl Libre", "David Libre", Georgia, serif; font-size: 16.5px; line-height: 1.75; }
@@ -70,7 +81,7 @@
   <style>/*__TAILWIND__*/</style>
 </head>
 <body>
-  <div id="root"><div class="boot">טוען את מנהל הקריאה…</div></div>
+  <div id="root"><div class="boot">טוען את מה שנקרא…</div></div>
   <script>
     // אירוע ההתקנה עלול להגיע לפני ש-React נטען, לכן תופסים אותו כאן
     window.__installPrompt = null;
