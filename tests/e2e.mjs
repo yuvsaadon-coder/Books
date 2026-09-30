@@ -599,6 +599,16 @@ try {
     assert.equal(await A.locator('main h2:has-text("היכרות מהירה")').count(), 0);
     await syncBoth(); await A.reload(); await A.click('nav >> text=ספרים שלי');
     assert.equal(await A.locator('main h2:has-text("היכרות מהירה")').count(), 0, 'stays hidden after sync + reload');
+    // אפשר תמיד לחזור לרשימה: מלשונית ההוספה (להמשיך), ומההגדרות (מההתחלה)
+    const dlg = A.locator('[role=dialog][aria-label="היכרות עם הטעם שלך"]');
+    await A.click('nav >> text=הוספת ספר'); await A.click('button.starter-link');
+    await dlg.waitFor(); await dlg.locator('button[aria-label="סגירה"]').click();
+    await A.click('nav >> text=הגדרות'); await A.click('button:has-text("מההתחלה")');
+    await dlg.locator('text=אילו ספרים כבר קראת?').waitFor();
+    assert.ok((await dlg.locator('text=/· 1 מתוך \\d+/').count()) > 0, 'starts from the first book');
+    await dlg.locator('button[aria-label="סגירה"]').click();
+    await A.click('nav >> text=ספרים שלי'); await A.waitForSelector('main h2:has-text("היכרות מהירה עם הטעם שלך")');
+    await A.click('button:has-text("לא צריך יותר")');
   });
   await step('Google Books goes through the family server (shared key + cache)', async () => {
     assert.ok(viaProxy > 0, 'no proxied Google requests');

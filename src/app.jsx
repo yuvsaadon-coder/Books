@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '33';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '34';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -2461,7 +2461,10 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
       <header className="pt-4 pb-2">
         <h1 className="font-display font-medium text-[26px] leading-snug">אילו ספרים כבר קראת?</h1>
         <p className="text-muted text-[15px]">ימינה: קראתי. שמאלה: לא קראתי. הדירוג אחרי "קראתי" לא חובה.</p>
-        <button type="button" onClick={skip} className="text-[13px] text-muted underline underline-offset-2 min-h-[32px]">{count ? 'אמשיך אחר כך' : 'דילוג על ההיכרות'}</button>
+        <div className="flex items-center gap-4 flex-wrap">
+          <button type="button" onClick={skip} className="text-[13px] text-muted underline underline-offset-2 min-h-[32px]">{count ? 'אמשיך אחר כך' : 'דילוג על ההיכרות'}</button>
+          {pos > 0 && <button type="button" onClick={() => { save({ pos: 0, trail: [], no: [] }); setRateKey(''); setLast(null); }} className="text-[13px] text-accent font-semibold underline underline-offset-2 min-h-[32px]">לעבור על הרשימה מההתחלה</button>}
+        </div>
       </header>
       <div className="relative mb-3">
         <span className="absolute top-1/2 -translate-y-1/2 right-3 text-muted"><Icon name="Search" size={18} /></span>
@@ -3554,6 +3557,7 @@ function AddTab({ db, update, onPick, goSettings, onOpenStarter }) {
       {mode === 'single' && <SingleSearch db={db} onPick={onPick} goSettings={goSettings} />}
       {mode === 'bulk' && <BulkImport db={db} onPick={onPick} goSettings={goSettings} />}
       {mode === 'text' && <FreeTextIntake goBulk={() => setMode('bulk')} goSettings={goSettings} />}
+      {onOpenStarter && <button type="button" onClick={onOpenStarter} className="starter-link mt-5 w-full min-h-[48px] text-[14px] font-semibold text-accent inline-flex items-center justify-center gap-1.5"><Icon name="ListChecks" size={17} />בחירה מרשימת 400 הספרים המוכרים</button>}
     </div>
   );
 }
@@ -4751,6 +4755,14 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
       </SettingsGroup>
       <SettingsGroup icon="Sparkles" title="המלצות" color="var(--rose)">
         <div>
+          <div className="text-[15px] font-semibold">רשימת 400 הספרים המוכרים</div>
+          <div className="text-[13px] text-muted mb-1.5">סימון מהיר של ספרים שקראת, כדי לדייק את ההמלצות. ספרים שכבר בספרייה לא מוצגים שוב.</div>
+          <div className="grid grid-cols-2 gap-2">
+            <Btn variant="soft" onClick={() => onOpenStarter(false)}><Icon name="ListChecks" size={18} />המשך מאיפה שעצרתי</Btn>
+            <Btn variant="ghost" onClick={() => onOpenStarter(true)}><Icon name="RotateCcw" size={18} />מההתחלה</Btn>
+          </div>
+        </div>
+        <div>
           <div className="text-[14px] text-muted mb-1.5">שפת ברירת מחדל להמלצות ({profile.name})</div>
           <div className="flex gap-2 flex-wrap">
             {REC_LANGS.map(([k, l]) => (
@@ -5547,6 +5559,7 @@ const GUIDE = [
   { id: 'start', title: 'צעדים ראשונים', icon: 'Compass', intro: 'מה שנקרא שומרת את הספרים שקראת, לומדת את הטעם שלך וממליצה על הספר הבא. כל ספר נבדק מול מאגרים אמיתיים, כך שאין ספרים מומצאים.', qa: [
     ['איך מתחילים?', 'בוחרים שם (בלי סיסמה). בכניסה הראשונה נפתחת רשימה של 400 ספרים מוכרים: החלקה ימינה = קראתי, שמאלה = לא קראתי, והסימנייה = רוצה לקרוא. אפשר לדלג ולחזור אליה מהכרטיס שבראש "הספרים שלי".'],
     ['איך מתקינים את האפליקציה על מסך הבית?', 'באייפון: פותחים ב-Safari, לוחצים על כפתור השיתוף ובוחרים "הוספה למסך הבית". באנדרואיד: בכרום, בתפריט ⋮ בוחרים "התקנת האפליקציה", או לוחצים על ההודעה שמופיעה באפליקציה.'],
+    ['איך חוזרים לרשימת הספרים המוכרים?', 'בהגדרות ← "המלצות" ← "רשימת 400 הספרים המוכרים": "המשך מאיפה שעצרתי" או "מההתחלה". יש גם קישור בתחתית לשונית "הוספת ספר". ספרים שכבר בספרייה לא מוצגים שוב.'],
     ['כמה משתמשים יכולים להשתמש בה?', 'כל אחד במשפחה מקבל ספרייה, דירוגים והמלצות משלו. מחליפים משתמש בלחיצה על השם שבראש המסך.'],
     ['הנתונים שלי נשמרים?', 'הכול נשמר בטלפון ומסתנכרן אוטומטית, כך שהספרייה זמינה בכל מכשיר. הנקודה הירוקה ליד השם אומרת שהכול מסונכרן; כתומה = אין חיבור כרגע, והנתונים יסונכרנו כשיחזור.']] },
   { id: 'library', title: 'הספרים שלי', icon: 'Library', intro: 'הספרייה האישית: ארבעה מדפים, חיפוש, מיון, תגיות וסטטיסטיקות.', qa: [
@@ -5734,6 +5747,14 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
   }, []);
   const [tab, setTab] = useState(() => { try { return sessionStorage.getItem('vrt_tab') || 'library'; } catch (e) { return 'library'; } });
   const [starterOpen, setStarterOpen] = useState(false);
+  // פתיחת רשימת הספרים המוכרים: להמשיך מאיפה שעצרו, או מההתחלה (ספרים שכבר בספרייה לא מוצגים שוב)
+  const openStarter = (restart) => {
+    if (restart) {
+      try { localStorage.setItem('vrt-starter2-' + ACTIVE.id, JSON.stringify({ pos: 0, picks: {}, trail: [], no: [] })); } catch (e) { /* */ }
+      if (db.settings.starterDone) update(d => ({ ...d, settings: { ...d.settings, starterDone: false } }));
+    }
+    setStarterOpen(true);
+  };
   // בכניסה הראשונה: חלון מלא של רשימת הספרים המוכרים, מעל כל לשונית
   const showStarter = starterOpen || (!db.books.length && !db.settings.onboarded && !db.settings.starterDone);
   const [pending, setPending] = useState(null);   // { book, existing }
@@ -5861,12 +5882,12 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
             </div>
           </div>
         ), document.body)}
-        {tab === 'library' && <LibraryTab db={db} update={update} onOpenStarter={() => setStarterOpen(true)} onSummary={() => { setSummaryOpen(true); if (db.settings.summarySeen !== summaryPeriod()) update(d => ({ ...d, settings: { ...d.settings, summarySeen: summaryPeriod() } })); }} onEdit={(b) => setPending({ book: b, existing: b, status: ['want', 'reading'].includes(statusOf(b)) ? 'read' : undefined })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id), tombstones: { ...d.tombstones, books: { ...d.tombstones.books, [id]: Date.now() } } })); notify('הספר נמחק'); }}
+        {tab === 'library' && <LibraryTab db={db} update={update} onOpenStarter={() => openStarter(false)} onSummary={() => { setSummaryOpen(true); if (db.settings.summarySeen !== summaryPeriod()) update(d => ({ ...d, settings: { ...d.settings, summarySeen: summaryPeriod() } })); }} onEdit={(b) => setPending({ book: b, existing: b, status: ['want', 'reading'].includes(statusOf(b)) ? 'read' : undefined })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id), tombstones: { ...d.tombstones, books: { ...d.tombstones.books, [id]: Date.now() } } })); notify('הספר נמחק'); }}
           onUpdateBook={(id, patch) => update(d => ({ ...d, books: d.books.map(b => b.id === id ? sanitizeBook({ ...b, ...patch, editedAt: Date.now() }) : b) }))} goAdd={() => setTab('add')} notify={notify} />}
-        {tab === 'add' && <AddTab db={db} update={update} onPick={pick} goSettings={() => setTab('backup')} onOpenStarter={() => setStarterOpen(true)} />}
+        {tab === 'add' && <AddTab db={db} update={update} onPick={pick} goSettings={() => setTab('backup')} onOpenStarter={() => openStarter(false)} />}
         {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} onOpenDigest={setDigestOpen} />}
         {tab === 'friends' && <FriendsTab db={db} update={update} onPick={pick} notify={notify} onGoSettings={() => setTab('backup')} />}
-        {tab === 'backup' && <BackupTab db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
+        {tab === 'backup' && <BackupTab onOpenStarter={openStarter} db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
       </main>
 
       <nav className="fixed bottom-0 inset-x-0 z-30 bg-surface border-t border-line safe-bottom" aria-label="ניווט ראשי">
