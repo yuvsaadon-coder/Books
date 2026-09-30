@@ -65,10 +65,14 @@
 - **"מה האפליקציה יודעת עליי":** `KnowsAboutMe`. מחיקות נשמרות ב-`tombstones.misc`, כדי שהסנכרון לא יחזיר אותן.
 - **ייבוא וייצוא:** `readImportRows` (Goodreads, StoryGraph, CSV כללי) ו-`toGoodreadsCSV`. מה שלא אומת עובר לתור של "הוספה ← רשימה".
 
-- **מראה:** `applyLook` + `LookSettings`: 4 ערכות (`data-palette`: paper/library/ink/stone, ו'מתחלף' לפי היום), בהיר/כהה (`data-mode`), גופן אחד לכל האפליקציה (`data-font`, המשתנה `--font`), גודל (`--zoom`), מצב נגישות (`data-a11y`, לפי ת"י 5568 / WCAG AA). נשמר גם ב-`vrt-look` כדי שיוחל לפני הציור הראשון.
+- **מראה:** `applyLook` + `LookSettings`: 6 ערכות (`data-palette`: paper/library/ink/stone/plum/sea, ו'מתחלף' לפי היום; כל ערכה נבדקה לניגודיות AA בבהיר ובכהה), בהיר/כהה (`data-mode`), גופן אחד לכל האפליקציה (`data-font`, המשתנה `--font`), גודל (`--zoom`), מצב נגישות (`data-a11y`, לפי ת"י 5568 / WCAG AA). נשמר גם ב-`vrt-look` כדי שיוחל לפני הציור הראשון.
 - **מדינה:** `book.country` — נקבע ברקע (`aiCountries`, Haiku, פעם אחת לכל סופר; 'ספרות ישראלית' = ישראל). נשלח למודל (`[מדינה]` ליד כל ספר, ו-`countryMixText`), וכל המלצה מחזירה `country`. מוצג ברשימה, בסטטיסטיקות ובסיכום.
 - **מתי נקרא:** `whenReadForPrompt` ו-`readingTimeline` שולחים למודל כמה זמן עבר מאז כל ספר, כדי לזהות את התפתחות הטעם.
-- **עיצוב:** `PageHero` (אריח צבעוני לכל מסך), `SettingsGroup` (קבוצות בהגדרות), `ChatLog` (הודעות התקדמות מקובצות), `SyncDot` (חיווי סנכרון), `MySummaryCard` (כרטיס קבוע לסיכום בספרייה). צילומי מסך: `SHOTS=<תיקייה> node e2e.mjs`.
+- **שפות ההמלצה:** `settings.recLangs` (he/en/other; ברירת מחדל he+en), `LangToggles` בשאלון ובהגדרות ← המלצות. `langCode` ממיר לקוד הישן (he/both/en/any) שנשלח למודל ולשרת (`recLang` נשמר לתאימות).
+- **הפרופיל הספרותי:** `LitProfileCard` — אחרי שנבנה, מקופל כברירת מחדל ובצבע בולט (`.profile-card`).
+- **הגדרות:** `SettingsGroup` — קבוצות מקופלות עם שורת תקציר; הקבוצות הפתוחות נשמרות במכשיר (`vrt-settings-open`), `openSettingsGroup(title)` פותח קבוצה מבחוץ. בבדיקות: `group(p, title)` לפני עבודה בתוך קבוצה.
+- **בלי הערות מיותרות:** לא מוסיפים שורות הסבר קטנות מתחת לכותרות ולכפתורים; הסבר מקומו במדריך (`GUIDE`).
+- **עיצוב:** `PageHero` (אריח צבעוני לכל מסך), `ChatLog` (הודעות התקדמות מקובצות), `SyncDot` (חיווי סנכרון), `MySummaryCard` (כרטיס קבוע לסיכום בספרייה). צילומי מסך: `SHOTS=<תיקייה> node e2e.mjs`.
 - **תקציר וקישורים לכל ספר:** `useBookDetails` (ספרייה: `BookDetailsBody`; תוצאות חיפוש: שתי הראשונות אוטומטית, השאר בלחיצה) → `/bookinfo`. נשמר עם הספר (`offers`, `detailsAt`); נמצא → מתעדכן אחרי 30 יום, לא נמצא → אחרי יומיים או "חיפוש מחדש" (`fresh=1`). בשרת `bookInfo`: מאגרים → חנויות לפי ISBN → חנויות לפי שם (גם כשהמאגרים מצאו) → תקציר מ-JSON-LD/meta (`pageSynopsis`) → `claudeBookPage` (Haiku עם web_search + web_fetch רק באתרי החנויות וההוצאות; קישור חייב להופיע בתוצאות, תקציר חייב להופיע בטקסט הדף – `quoteInPage`). מטמון KV `bookinfo2:` – נמצא 14 יום, לא נמצא יום.
 - **חנויות:** `STORE_SEARCH` — דפי החיפוש האמיתיים: סטימצקי `catalogsearch/result/?q=`, צומת ספרים `/חיפוש?q=`, עברית `/Search/<שם>`.
 - **ביקורות:** `findReviews` בשרת — Haiku עם חיפוש רק ב-`REVIEW_SITES`, סיכום בעברית, וכל קישור נבדק מול תוצאות החיפוש. "לא נמצא" נשמר רק ליומיים.

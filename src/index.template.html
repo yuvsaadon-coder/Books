@@ -17,11 +17,11 @@
   <link rel="preload" href="fonts/frank-ruhl-libre-hebrew-400-normal.woff2" as="font" type="font/woff2" crossorigin>
   <!-- נבנה מראש: Tailwind + קוד האפליקציה (tools/build.mjs) -->
   <style>
-    /* ערכות עיצוב ספרותיות (data-palette) בגרסה בהירה וכהה (data-mode): צבעים מושתקים, ניגודיות טקסט AA לפחות */
+    /* ערכות עיצוב ספרותיות (data-palette) בגרסה בהירה וכהה (data-mode): לכל ערכה אופי וגוון משלה, רגועים; ניגודיות טקסט AA לפחות */
     :root {
       --bg: #F4EEE3; --surface: #FBF8F1; --surface-2: #EAE2D3; --ink: #2B2520; --muted: #5F564C; --line: #DDD2BF;
       --accent: #8A3B2B; --accent-2: #A4513F; --accent-ink: #FFFFFF; --accent-soft: #F2E1DA;
-      --brass: #946A22; --rose: #9A4A5C; --teal: #3F6F63; --danger: #A93A2E; --ok: #3B7A4A; --warn: #8A6116;
+      --brass: #946A22; --rose: #9A4A5C; --teal: #3F6F63; --danger: #A93A2E; --ok: #2F7A45; --warn: #845F12;
       --shadow: 0 1px 0 rgba(40,30,20,.04), 0 6px 16px -14px rgba(40,30,20,.35); color-scheme: light;
     }
     :root[data-mode="dark"] {
@@ -31,39 +31,63 @@
       --shadow: 0 1px 0 rgba(0,0,0,.25), 0 8px 20px -16px rgba(0,0,0,.7); color-scheme: dark;
     }
     :root[data-palette="library"] {
-      --bg: #EDEFE7; --surface: #FAFBF6; --surface-2: #DFE4D6; --ink: #1E2A22; --muted: #536057; --line: #CFD7C4;
-      --accent: #2E5B45; --accent-2: #3F7458; --accent-ink: #FFFFFF; --accent-soft: #DAE7DE;
-      --brass: #8F6B22; --rose: #914E54; --teal: #2F6E6A; --danger: #A53A30; --ok: #2F7A45; --warn: #845F12;
+      --bg: #E4E9DD; --surface: #F5F7F0; --surface-2: #D5DDCA; --ink: #1B2A21; --muted: #4B5B50; --line: #C3CEB6;
+      --accent: #1F5A40; --accent-2: #2E7556; --accent-ink: #FFFFFF; --accent-soft: #D1E3D6;
+      --brass: #9A7424; --rose: #8E4A4A; --teal: #2D6B67; --danger: #A93A2E; --ok: #2F7A45; --warn: #845F12;
       --shadow: 0 1px 0 rgba(40,30,20,.04), 0 6px 16px -14px rgba(40,30,20,.35); color-scheme: light;
     }
     :root[data-palette="library"][data-mode="dark"] {
-      --bg: #121814; --surface: #1A221D; --surface-2: #242E27; --ink: #E6EEE7; --muted: #A5B3A8; --line: #33403A;
-      --accent: #93C8A9; --accent-2: #B2DCC3; --accent-ink: #121814; --accent-soft: #203A2C;
+      --bg: #111814; --surface: #18211C; --surface-2: #212D26; --ink: #E4EEE6; --muted: #A3B4A8; --line: #2F3D35;
+      --accent: #8CC7A6; --accent-2: #B0DCC2; --accent-ink: #111814; --accent-soft: #1C3A2B;
       --brass: #D6B064; --rose: #D7969B; --teal: #83C4BE; --danger: #EE9A8C; --ok: #8FCB9C; --warn: #E3BF72;
       --shadow: 0 1px 0 rgba(0,0,0,.25), 0 8px 20px -16px rgba(0,0,0,.7); color-scheme: dark;
     }
     :root[data-palette="ink"] {
-      --bg: #F2F2EE; --surface: #FDFDFB; --surface-2: #E5E6E0; --ink: #1C2230; --muted: #545B69; --line: #D6D9D0;
-      --accent: #2C4677; --accent-2: #3E5C94; --accent-ink: #FFFFFF; --accent-soft: #DFE5F1;
-      --brass: #8D6A24; --rose: #924B5F; --teal: #33696A; --danger: #A53A30; --ok: #2F7A45; --warn: #845F12;
+      --bg: #E6EBF1; --surface: #F7F9FC; --surface-2: #D6DEE9; --ink: #17203A; --muted: #4B566E; --line: #C6D0DD;
+      --accent: #233E80; --accent-2: #3455A3; --accent-ink: #FFFFFF; --accent-soft: #D6DFF2;
+      --brass: #A0652A; --rose: #8F4A63; --teal: #2F6A70; --danger: #A93A2E; --ok: #2F7A45; --warn: #845F12;
       --shadow: 0 1px 0 rgba(40,30,20,.04), 0 6px 16px -14px rgba(40,30,20,.35); color-scheme: light;
     }
     :root[data-palette="ink"][data-mode="dark"] {
-      --bg: #11141B; --surface: #181C25; --surface-2: #222733; --ink: #E5E8EF; --muted: #A4ABB8; --line: #2F3544;
-      --accent: #A3B7E0; --accent-2: #C0CFEE; --accent-ink: #11141B; --accent-soft: #222D47;
-      --brass: #D5B067; --rose: #D597A8; --teal: #84BDBD; --danger: #EE9A8C; --ok: #8FCB9C; --warn: #E3BF72;
+      --bg: #10141D; --surface: #171C27; --surface-2: #212837; --ink: #E3E8F2; --muted: #A2ABBC; --line: #2E3547;
+      --accent: #A6B9E6; --accent-2: #C3D0F1; --accent-ink: #10141D; --accent-soft: #202C4A;
+      --brass: #E0A06A; --rose: #D597A8; --teal: #84BDBD; --danger: #EE9A8C; --ok: #8FCB9C; --warn: #E3BF72;
       --shadow: 0 1px 0 rgba(0,0,0,.25), 0 8px 20px -16px rgba(0,0,0,.7); color-scheme: dark;
     }
     :root[data-palette="stone"] {
-      --bg: #F1EADC; --surface: #FBF7EE; --surface-2: #E6DCC8; --ink: #33291F; --muted: #66594A; --line: #DACDB5;
-      --accent: #5E5E26; --accent-2: #767633; --accent-ink: #FFFFFF; --accent-soft: #E6E5CE;
-      --brass: #93661F; --rose: #94503F; --teal: #45705F; --danger: #A53A30; --ok: #3B7A4A; --warn: #8A6116;
+      --bg: #F0E3D1; --surface: #FBF5EB; --surface-2: #E7D4BC; --ink: #3A2A1E; --muted: #6B5645; --line: #DAC3A5;
+      --accent: #A0432A; --accent-2: #BB5A3C; --accent-ink: #FFFFFF; --accent-soft: #F3DCD1;
+      --brass: #6F6E2A; --rose: #8E4B5A; --teal: #4A6F5E; --danger: #A93A2E; --ok: #2F7A45; --warn: #845F12;
       --shadow: 0 1px 0 rgba(40,30,20,.04), 0 6px 16px -14px rgba(40,30,20,.35); color-scheme: light;
     }
     :root[data-palette="stone"][data-mode="dark"] {
-      --bg: #1B1813; --surface: #24201A; --surface-2: #2F2A22; --ink: #EFE7D8; --muted: #B2A794; --line: #3D362C;
-      --accent: #C9C98A; --accent-2: #DADAA6; --accent-ink: #1B1813; --accent-soft: #34341E;
-      --brass: #D9AE62; --rose: #D99A8A; --teal: #8FBFAC; --danger: #EE9A8C; --ok: #8FCB9C; --warn: #E3BF72;
+      --bg: #1B1511; --surface: #251D18; --surface-2: #30261F; --ink: #F1E6D8; --muted: #B8A590; --line: #40342A;
+      --accent: #E69A7F; --accent-2: #F0B5A0; --accent-ink: #1B1511; --accent-soft: #43281F;
+      --brass: #C9C98A; --rose: #D99AA6; --teal: #8FBFAC; --danger: #EE9A8C; --ok: #8FCB9C; --warn: #E3BF72;
+      --shadow: 0 1px 0 rgba(0,0,0,.25), 0 8px 20px -16px rgba(0,0,0,.7); color-scheme: dark;
+    }
+    :root[data-palette="plum"] {
+      --bg: #ECE7EF; --surface: #FAF8FB; --surface-2: #DED6E5; --ink: #2A1F2E; --muted: #5D5163; --line: #D0C5D8;
+      --accent: #6B2E5E; --accent-2: #864078; --accent-ink: #FFFFFF; --accent-soft: #EBD9E7;
+      --brass: #99692A; --rose: #7A3B4F; --teal: #3E6B6E; --danger: #A93A2E; --ok: #2F7A45; --warn: #845F12;
+      --shadow: 0 1px 0 rgba(40,30,20,.04), 0 6px 16px -14px rgba(40,30,20,.35); color-scheme: light;
+    }
+    :root[data-palette="plum"][data-mode="dark"] {
+      --bg: #17121A; --surface: #1F1823; --surface-2: #2A212F; --ink: #EFE7F2; --muted: #B3A6B9; --line: #3A2F40;
+      --accent: #D9A2CD; --accent-2: #E8BFDF; --accent-ink: #17121A; --accent-soft: #3A2336;
+      --brass: #DDB066; --rose: #E0A0B2; --teal: #86BFBF; --danger: #EE9A8C; --ok: #8FCB9C; --warn: #E3BF72;
+      --shadow: 0 1px 0 rgba(0,0,0,.25), 0 8px 20px -16px rgba(0,0,0,.7); color-scheme: dark;
+    }
+    :root[data-palette="sea"] {
+      --bg: #E3EDEB; --surface: #F6FAF9; --surface-2: #D0E1DD; --ink: #14282A; --muted: #465C5E; --line: #BED2CE;
+      --accent: #0E6264; --accent-2: #1A7D7E; --accent-ink: #FFFFFF; --accent-soft: #CFE7E4;
+      --brass: #B85C3C; --rose: #8C4A5A; --teal: #2F6E8A; --danger: #A93A2E; --ok: #2F7A45; --warn: #845F12;
+      --shadow: 0 1px 0 rgba(40,30,20,.04), 0 6px 16px -14px rgba(40,30,20,.35); color-scheme: light;
+    }
+    :root[data-palette="sea"][data-mode="dark"] {
+      --bg: #0F1818; --surface: #162121; --surface-2: #1F2D2D; --ink: #E1EEEC; --muted: #9FB5B3; --line: #2B3C3C;
+      --accent: #7FCDCB; --accent-2: #A6E0DE; --accent-ink: #0F1818; --accent-soft: #173A3A;
+      --brass: #E79B7E; --rose: #DB98A8; --teal: #8CC2DA; --danger: #EE9A8C; --ok: #8FCB9C; --warn: #E3BF72;
       --shadow: 0 1px 0 rgba(0,0,0,.25), 0 8px 20px -16px rgba(0,0,0,.7); color-scheme: dark;
     }
     /* גופן אחד לכל האפליקציה (לבחירה בהגדרות), וגודל תצוגה (--zoom) */
@@ -79,6 +103,9 @@
     .eyebrow { font-size: 12px; letter-spacing: .08em; font-weight: 700; color: var(--brass); }
     .wordmark { font-family: "Frank Ruhl Libre", Georgia, serif; font-weight: 700; letter-spacing: -.01em; }
     .rounded-xl { border-radius: 10px; }
+    /* הפרופיל הספרותי: כרטיס בצבע ההדגשה של הערכה, בולט אבל רגוע */
+    .profile-card { background: color-mix(in srgb, var(--accent) 13%, var(--surface)); border: 1.5px solid color-mix(in srgb, var(--accent) 45%, var(--line)); color: var(--ink); }
+    .profile-card-icon { background: var(--accent); color: var(--accent-ink); }
     .hero-tile { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }
     .sync-dot { width: 8px; height: 8px; border-radius: 99px; display: inline-block; }
     .step-line { position: relative; padding-inline-start: 18px; } .step-line::before { content: ''; position: absolute; inset-inline-start: 5px; top: .7em; width: 7px; height: 7px; border-radius: 9px; background: var(--accent); opacity: .55; }

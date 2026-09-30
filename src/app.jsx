@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '36';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '37';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -683,7 +683,7 @@ async function lookupHebrewTitle(b) {
 /* ============================================================
    שכבת אחסון: localStorage + IndexedDB
    ============================================================ */
-const emptyDB = () => ({ version: SCHEMA_VERSION, books: [], tagLibrary: DEFAULT_TAGS.slice(), dismissed: [], settings: { theme: 'system', apiKey: '', recLang: 'auto' }, history: [], tombstones: { books: {}, history: {}, misc: {} }, updatedAt: 0, lastBackupAt: 0 });
+const emptyDB = () => ({ version: SCHEMA_VERSION, books: [], tagLibrary: DEFAULT_TAGS.slice(), dismissed: [], settings: { theme: 'system', apiKey: '', recLang: 'both', recLangs: ['he', 'en'] }, history: [], tombstones: { books: {}, history: {}, misc: {} }, updatedAt: 0, lastBackupAt: 0 });
 
 function sanitizeBook(b) {
   if (!b || typeof b !== 'object' || !b.title || !b.key) return null;
@@ -1846,6 +1846,23 @@ const langOk = (c, lang) => {
   return true;
 };
 const REC_LANGS = [['he', 'עברית'], ['both', 'עברית ואנגלית'], ['en', 'אנגלית'], ['any', 'כל שפה'], ['auto', 'אוטומטי']];
+// שפות הספרים בהמלצות: עברית / אנגלית / שפות זרות אחרות (אפשר כמה). ברירת המחדל: עברית ואנגלית
+const LANG_TOGGLES = [['he', 'עברית'], ['en', 'אנגלית'], ['other', 'שפות זרות']];
+const DEFAULT_LANGS = ['he', 'en'];
+function langsOf(settings = {}) {
+  if (Array.isArray(settings.recLangs) && settings.recLangs.length) return settings.recLangs.filter(x => ['he', 'en', 'other'].includes(x));
+  return { he: ['he'], en: ['en'], both: ['he', 'en'], any: ['he', 'en', 'other'] }[settings.recLang] || DEFAULT_LANGS.slice();
+}
+const langCode = (langs) => { const s = new Set(langs); return s.has('other') ? 'any' : s.has('he') && s.has('en') ? 'both' : s.has('en') ? 'en' : 'he'; };
+const langsLabel = (langs) => LANG_TOGGLES.filter(([k]) => langs.includes(k)).map(([, l]) => l).join(' ו');
+function LangToggles({ value, onChange, label }) {
+  const toggle = (k) => { const n = value.includes(k) ? value.filter(x => x !== k) : [...value, k]; if (n.length) onChange(LANG_TOGGLES.map(([x]) => x).filter(x => n.includes(x))); };
+  return (
+    <div className="flex items-center gap-2 flex-wrap" role="group" aria-label={label}>
+      {LANG_TOGGLES.map(([k, l]) => <Chip key={k} active={value.includes(k)} onClick={() => toggle(k)}><span aria-hidden="true">{value.includes(k) ? '✓ ' : ''}</span>{l}</Chip>)}
+    </div>
+  );
+}
 const recLangLabel = (k) => (REC_LANGS.find(x => x[0] === k) || ['', k])[1];
 function passesAvoid(c, answers) {
   const t = textOf(c);
@@ -3154,9 +3171,6 @@ function SearchResults({ res, db, onPick, goSettings, smart, onSmart }) {
         </Notice>
       )}
       {res.fromAi && <Notice tone="ok">זוהה בעזרת Claude ואומת מול המאגרים{res.tried && res.tried.length ? `: ${res.tried.slice(0, 3).join(' · ')}` : ''}.</Notice>}
-      {!res.fromAi && res.tried && res.tried.length > 0 && groups.length > 0 && !weak && (
-        <p className="text-[13px] text-muted">חיפשנו גם בדרכים נוספות: {res.tried.slice(0, 3).join(' · ')}</p>
-      )}
       {(groups.length === 0 || weak) && (
         <Notice tone="error">{T('לא נמצא ספר שתואם לחיפוש. נסו את השם המלא או איות אחר, את השם בשפת המקור, או ISBN מהכריכה האחורית.')}</Notice>
       )}
@@ -3169,7 +3183,7 @@ function SearchResults({ res, db, onPick, goSettings, smart, onSmart }) {
         </details>
       ) : groups.length > 0 && (
         <>
-          <p className="text-[14px] text-muted">{groups.length} ספרים{edCount > groups.length ? ` (${edCount} מהדורות)` : ''} מ-{res.sources.join(' + ')}{T('. בחרו את הספר, או פתחו את רשימת המהדורות כדי לבחור את ההדפסה המדויקת:')}</p>
+          <p className="text-[14px] text-muted">{groups.length} תוצאות{edCount > groups.length ? ` (${edCount} מהדורות)` : ''}</p>
           {list}
           {!partial && onSmart && <SmartBox st={smart} onRun={onSmart} />}
         </>
@@ -3413,7 +3427,7 @@ function BulkImport({ db, onPick, goSettings }) {
           </div>
         )}
         <Btn disabled={!parsed.length} onClick={start}><Icon name="ListChecks" size={20} />התחלה: {parsed.length || ''} ספרים לבחירה</Btn>
-        <p className="text-[13px] text-muted">כל ספר נבדק מול המאגרים. אחר כך עוברים ספר-ספר, בוחרים את ההדפסה הנכונה ומדרגים. ההתקדמות נשמרת גם אם סוגרים את הדף.</p>
+        
       </div>
     );
   }
@@ -3448,7 +3462,7 @@ function BulkImport({ db, onPick, goSettings }) {
             <Btn variant="soft" disabled={bulkSmart.busy} onClick={() => smartAllNotFound(false)}>
               {bulkSmart.busy ? <><Spinner />מזהה {bulkSmart.done + 1} מתוך {bulkSmart.total}…</> : <><Icon name="Sparkles" size={18} />זיהוי חכם לכל מה שלא נמצא ({items.filter(it => it.status === 'notfound' || it.status === 'error').length})</>}
             </Btn>
-            {!bulkSmart.busy && bulkSmart.total > 0 && <p className="text-[13px] text-muted">זוהו {bulkSmart.done} ספרים · עלות משוערת ${bulkSmart.cost.toFixed(2)}</p>}
+            {!bulkSmart.busy && bulkSmart.total > 0 && <p className="text-[13px] text-muted">זוהו {bulkSmart.done} ספרים</p>}
             {bulkSmart.err && <p className="text-[13px] text-danger">{bulkSmart.err}</p>}
           </div>
         )}
@@ -3616,7 +3630,7 @@ function AddTab({ db, update, onPick, goSettings, onOpenStarter }) {
   useEffect(() => { try { sessionStorage.setItem('vrt_add_mode', mode); } catch (e) { /* */ } }, [mode]);
   return (
     <div className="fade-in">
-      <PageHero tab="add" title="הוספת ספר" sub="שם ספר בעברית או באנגלית, ISBN או קישור. רק תוצאות שחזרו מהמאגרים יוצגו." />
+      <PageHero tab="add" title="הוספת ספר" />
       <StarterPrompt db={db} update={update} onOpen={onOpenStarter} />
       <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-surface2 mb-4" role="tablist" aria-label="אופן ההוספה">
         {[['single', 'ספר אחד', 'Search'], ['bulk', 'רשימה', 'ListChecks'], ['text', 'טקסט חופשי', 'PenLine']].map(([k, l, ic]) => (
@@ -3705,7 +3719,7 @@ function FormatInfo({ book }) {
         ? <ul className="grid gap-0.5 text-[14px]">{facts.map((f, i) => (
             <li key={i} className="flex items-start gap-1.5"><span className="text-ok mt-0.5"><Icon name="CircleCheck" size={15} /></span>
               {f.link ? <a href={f.link} target="_blank" rel="noopener noreferrer" className="underline">{f.text}</a> : <span>{f.text}</span>}</li>))}</ul>
-        : <p className="text-[13px] text-muted">המאגרים לא מציינים פורמטים לספר הזה.</p>}
+        : null}
       {af && (
         <div className="text-[13px] border-t border-line pt-1.5">
           <div className="font-semibold text-muted mb-0.5">לפי המקורות שנקראו:</div>
@@ -3726,7 +3740,6 @@ function FormatInfo({ book }) {
       )}
       <details>
       <summary className="text-[13px] font-semibold text-accent cursor-pointer min-h-[32px] flex items-center">חיפוש בחנויות: עברית, סטימצקי, צומת ספרים ו-Audible</summary>
-      <div className="text-[12px] text-muted mb-1">כל קישור פותח חיפוש באתר עצמו. זו בדיקה ידנית, לא אימות.</div>
       <div className="flex flex-wrap gap-1.5">
         {STORES.map(st => (
           <a key={st.site} href={storeSearchUrl(st.site, book.title || q)} target="_blank" rel="noopener noreferrer"
@@ -3759,40 +3772,49 @@ function LitProfileCard({ db, update }) {
   useEffect(() => { if (aiAvailable() && profileStale(db)) build(); }, []);
   if (!aiAvailable()) return null;
   const read = db.books.filter(isRated).length;
-  return (
-    <section className="bg-surface border border-line rounded-2xl p-3.5 mb-4 grid gap-2 shadow-sm">
-      <div className="flex items-center justify-between gap-2">
-        <h2 className="font-display font-medium text-[18px] flex items-center gap-1.5"><Icon name="Feather" size={18} />הפרופיל הספרותי שלי</h2>
-        {busy ? <span className="text-[13px] text-muted inline-flex items-center gap-1"><Spinner size={14} />מתעדכן…</span>
-          : p && <button type="button" className="text-[13px] text-accent font-semibold min-h-[36px]" onClick={build}>עדכון</button>}
+  // אחרי שהפרופיל נבנה: פס צבעוני מקופל, שנפתח בלחיצה
+  const noteBlock = editNote ? (
+    <div className="grid gap-2">
+      <label htmlFor="profile-note" className="text-[13px] font-semibold text-muted">משהו שחשוב לדעת על הטעם שלך?</label>
+      <textarea id="profile-note" rows={3} value={note} onChange={e => setNote(e.target.value)} maxLength={1500} placeholder={T("למשל: אוהב סופים פתוחים, לא מתחבר לספרי מתח, מחפש עכשיו ספרים קצרים")}
+        className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px]" />
+      <div className="grid grid-cols-2 gap-2">
+        <Btn onClick={() => { update(d => ({ ...d, profileNote: note.trim(), profileNoteAt: Date.now() })); setEditNote(false); }}>שמירה</Btn>
+        <Btn variant="ghost" onClick={() => { setNote(db.profileNote || ''); setEditNote(false); }}>ביטול</Btn>
       </div>
-      {p ? (
-        <>
-          <p className={`font-reading text-[15.5px] whitespace-pre-line ${open ? '' : 'clamp-4'}`}>{p.text}</p>
-          <div className="flex items-center justify-between gap-2 text-[13px] text-muted">
-            <button type="button" className="text-accent font-semibold min-h-[36px]" onClick={() => setOpen(!open)}>{open ? 'פחות' : 'לפרופיל המלא'}</button>
-            <span>עודכן {fmtDate(p.at)}{changedSince(db, p.at).length ? ` · ${changedSince(db, p.at).length} שינויים מאז` : ''}</span>
-          </div>
-        </>
-      ) : <p className="text-[14px] text-muted">{read < 3 ? 'אחרי 3 ספרים מדורגים ייבנה כאן פרופיל של הטעם שלך. ההמלצות משתמשות בו כדי לעבוד מהר יותר.' : busy ? 'בונה את הפרופיל מהספרים שקראת…' : 'עוד אין פרופיל.'}</p>}
-      {!p && !busy && read >= 3 && <Btn variant="soft" onClick={build}><Icon name="Feather" size={18} />בניית הפרופיל</Btn>}
+    </div>
+  ) : (
+    <div className="grid gap-1">
+      {db.profileNote && <p className="text-[14px]"><span className="text-muted">ההערה שלי: </span>{db.profileNote}</p>}
+      <button type="button" className="text-[13px] text-accent font-semibold min-h-[36px] justify-self-start inline-flex items-center gap-1" onClick={() => setEditNote(true)}>
+        <Icon name="PenLine" size={14} />{db.profileNote ? 'עריכת ההערה' : 'להוסיף הערה משלי'}
+      </button>
+    </div>
+  );
+  if (!p) return (
+    <section className="profile-card rounded-xl p-3.5 mb-4 grid gap-2">
+      <h2 className="font-display font-bold text-[18px] flex items-center gap-1.5"><Icon name="Feather" size={18} />הפרופיל הספרותי שלי</h2>
+      <p className="text-[14px]">{read < 3 ? 'ייבנה אחרי 3 ספרים מדורגים.' : busy ? 'בונה את הפרופיל…' : ''}</p>
+      {!busy && read >= 3 && <Btn variant="soft" onClick={build}><Icon name="Feather" size={18} />בניית הפרופיל</Btn>}
       {err && <p className="text-[13px] text-danger">{err}</p>}
-      {editNote ? (
-        <div className="grid gap-2">
-          <label htmlFor="profile-note" className="text-[13px] font-semibold text-muted">משהו שחשוב לדעת על הטעם שלך?</label>
-          <textarea id="profile-note" rows={3} value={note} onChange={e => setNote(e.target.value)} maxLength={1500} placeholder={T("למשל: אוהב סופים פתוחים, לא מתחבר לספרי מתח, מחפש עכשיו ספרים קצרים")}
-            className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px]" />
-          <div className="grid grid-cols-2 gap-2">
-            <Btn onClick={() => { update(d => ({ ...d, profileNote: note.trim(), profileNoteAt: Date.now() })); setEditNote(false); }}>שמירה</Btn>
-            <Btn variant="ghost" onClick={() => { setNote(db.profileNote || ''); setEditNote(false); }}>ביטול</Btn>
-          </div>
-        </div>
-      ) : (
-        <button type="button" className="text-[13px] text-accent font-semibold min-h-[36px] justify-self-start inline-flex items-center gap-1" onClick={() => setEditNote(true)}>
-          <Icon name="PenLine" size={14} />{db.profileNote ? 'עריכת ההערה שלי לפרופיל' : 'להוסיף הערה משלי לפרופיל'}
-        </button>
-      )}
-      {db.profileNote && !editNote && <p className="text-[13px] text-muted">ההערה שלך: {db.profileNote}</p>}
+    </section>
+  );
+  return (
+    <section className="profile-card rounded-xl mb-4 overflow-hidden">
+      <button type="button" aria-expanded={open} onClick={() => setOpen(!open)} className="w-full text-right flex items-center gap-2.5 p-3.5 min-h-[56px]">
+        <span className="w-9 h-9 rounded-lg grid place-items-center shrink-0 profile-card-icon"><Icon name="Feather" size={18} /></span>
+        <span className="flex-1 min-w-0">
+          <span className="block font-display font-bold text-[17px] leading-tight">הפרופיל הספרותי שלי</span>
+          <span className="block text-[12.5px] opacity-80">{busy ? 'מתעדכן…' : `עודכן ${fmtDate(p.at)}`}</span>
+        </span>
+        {busy ? <Spinner size={16} /> : <Icon name={open ? 'ChevronUp' : 'ChevronDown'} size={20} />}
+      </button>
+      {open && <div className="px-3.5 pb-3.5 grid gap-2 fade-in">
+        <p className="font-reading text-[15.5px] whitespace-pre-line">{p.text}</p>
+        {!busy && <button type="button" className="text-[13px] text-accent font-semibold min-h-[36px] justify-self-start inline-flex items-center gap-1" onClick={build}><Icon name="RotateCcw" size={14} />עדכון הפרופיל</button>}
+        {err && <p className="text-[13px] text-danger">{err}</p>}
+        {noteBlock}
+      </div>}
     </section>
   );
 }
@@ -3844,7 +3866,7 @@ function BuyLinks({ book, offers = [], busy = false, onRetry }) {
         {publishers.slice(0, 2).map(o => <a key={o.url} href={o.url} target="_blank" rel="noopener noreferrer" className="min-h-[40px] px-3 rounded-full btn-primary text-accentInk text-[14px] font-semibold inline-flex items-center gap-1"><Icon name="ExternalLink" size={14} />בהוצאה ({STORE_NAMES[o.site] || o.site})</a>)}
       </div>
       {busy && !offers.length && <p className="text-[12px] text-muted inline-flex items-center gap-1.5" aria-live="polite"><Spinner size={12} />מחפש את דף הספר בחנויות ובהוצאות…</p>}
-      {!busy && !offers.length && <p className="text-[12px] text-muted">לא נמצא דף מכירה ישיר; הקישורים פותחים חיפוש באתר החנות.{onRetry && <> <button type="button" onClick={onRetry} className="text-accent font-semibold underline min-h-[32px]">חיפוש מחדש</button></>}</p>}
+      {!busy && !offers.length && onRetry && <p className="text-[12px] text-muted">לא נמצא דף מכירה ישיר. <button type="button" onClick={onRetry} className="text-accent font-semibold underline min-h-[32px]">חיפוש מחדש</button></p>}
       {offers.length > 0 && (() => { const k = new Set(offers.flatMap(o => o.kinds || [])); const l = [['print', 'מודפס'], ['ebook', 'דיגיטלי'], ['audio', 'קולי']].filter(([x]) => k.has(x)).map(([, y]) => y); return l.length ? <p className="text-[12px] text-muted">נמצא בחנויות: {l.join(' · ')}</p> : null; })()}
     </div>
   );
@@ -4145,7 +4167,7 @@ function AllRecsView({ db, update, onPick, digests }) {
   if (!items.length) return <p className="text-center text-muted py-8">{T('עוד אין המלצות. אחרי השיחה הראשונה, כל ההמלצות יתרכזו כאן.')}</p>;
   return (
     <div className="grid gap-4" aria-label="כל ההמלצות">
-      <p className="text-[14px] text-muted">{items.length} המלצות שקיבלת, משיחות ומההצעות הדו-שבועיות. {T('סמנו "טובה" או "לא טובה" (ואם בא לכם, גם למה), וההמלצות הבאות ילמדו מזה.')}</p>
+      <p className="text-[14px] text-muted">{items.length} המלצות מהשיחות ומההצעות הדו-שבועיות.</p>
       {good.length > 0 && <section><h2 className="font-display font-bold text-[18px] mb-2 flex items-center gap-2"><Icon name="ThumbsUp" size={18} className="text-accent" />ההמלצות הטובות ({good.length})</h2><ul className="grid gap-2.5">{good.map(it => row(it))}</ul></section>}
       {open.length > 0 && <section><h2 className="font-display font-bold text-[18px] mb-2">עוד לא סימנתי ({open.length})</h2><ul className="grid gap-2.5">{open.map(it => row(it))}</ul></section>}
       {bad.length > 0 && <details className="bg-surface2 rounded-xl p-3">
@@ -4168,13 +4190,14 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
   const hasAi = aiAvailable();
   const endRef = useRef(null);
   const prof = useMemo(() => buildProfile(db.books), [db.books]);
-  const autoLang = 'he';   // עדיפות לעברית; אפשר לבחור ידנית עברית ואנגלית / כל שפה
-  const lang = db.settings.recLang === 'auto' ? autoLang : db.settings.recLang;
+  // שפות לשיחה הנוכחית: מתחילות מברירת המחדל שבהגדרות, ואפשר לשנות כאן לחיפוש הזה
+  const langs = st.langs || langsOf(db.settings);
+  const lang = langCode(langs);
 
   useEffect(() => { if (log.length || recs.length) endRef.current && endRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [log.length, step, recs.length]);
 
   const pushLog = (...entries) => recSet(st, { log: [...st.log, ...entries] });
-  const reset = () => { recSet(st, { step: 0, answers: { avoid: [] }, log: [], recs: [], session: { id: null, at: 0 }, shown: new Set(), focus: {}, questions: [], qa: [], candP: null }); setMulti([]); setAiText(''); setOther(''); };
+  const reset = () => { recSet(st, { langs: null, step: 0, answers: { avoid: [] }, log: [], recs: [], session: { id: null, at: 0 }, shown: new Set(), focus: {}, questions: [], qa: [], candP: null }); setMulti([]); setAiText(''); setOther(''); };
   const slim = (r) => ({
     key: r.key, source: r.source, sourceId: r.sourceId, title: r.title, subtitle: r.subtitle || '', authors: r.authors, year: r.year,
     description: (r.description || '').slice(0, 1200), categories: (r.categories || []).slice(0, 6), cover: r.cover, pageCount: r.pageCount,
@@ -4309,7 +4332,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
 
   return (
     <div className="fade-in">
-      <PageHero tab="discover" title="גלה ספר חדש" sub={hasAi ? T('ספרו מה בא לכם, בחרו מיקוד, ו-Claude ישאל 2–4 שאלות לדיוק. כל המלצה נבדקת מול המאגרים והחנויות.') : '4 שאלות קצרות. כל המלצה נבדקת מחדש מול המאגר לפני שהיא מוצגת.'} />
+      <PageHero tab="discover" title="גלה ספר חדש" />
       <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-surface2 mb-4" role="tablist" aria-label="תצוגה">
         {[['chat', 'שיחה', 'MessageCircle'], ['all', 'כל ההמלצות', 'ListChecks'], ['history', `שיחות (${(db.history || []).length})`, 'History']].map(([k, l, ic]) => {
           const on = k === 'chat' || k === 'all' ? view === k : view !== 'chat' && view !== 'all';
@@ -4345,11 +4368,10 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
               {!prof.favorites.length && <div className="text-warn">עוד אין ספרים עם 4★ ומעלה. ההמלצות יתבססו בעיקר על השאלון.</div>}
             </div>
           : <div className="text-[14px] text-muted">עדיין אין ספרים בספרייה. ההמלצות יתבססו על השאלון בלבד.</div>}
-        <div className="flex items-center gap-2 flex-wrap pt-1">
-          <span className="text-[14px] text-muted">שפת ההמלצות (נשמרת כברירת מחדל שלך):</span>
-          {REC_LANGS.map(([k, l]) => (
-            <Chip key={k} active={db.settings.recLang === k} onClick={() => update(d => ({ ...d, settings: { ...d.settings, recLang: k } }))}>{k === 'auto' ? `${l} (${recLangLabel(autoLang)})` : l}</Chip>
-          ))}
+        <div className="grid gap-1.5">
+          <span className="text-[14px] font-semibold">שפות הספרים</span>
+          <LangToggles value={langs} label="שפות הספרים" onChange={(v) => recSet(st, { langs: v })} />
+          <span className="text-[12px] text-muted">ברירת המחדל: {langsLabel(langsOf(db.settings))}. אפשר לשנות אותה בהגדרות.</span>
         </div>
       </div>
 
@@ -4362,7 +4384,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
             ))}
           </div>
           <label htmlFor="ai-request" className="font-semibold text-[16px] flex items-center gap-1.5"><Icon name={st.gift ? 'Gift' : 'Sparkles'} size={18} />{st.gift ? T('למי הספר? ספרו עליו או עליה') : 'מה בא לך לקרוא?'}</label>
-          {st.gift && <p className="text-[13px] text-muted -mt-1">במצב מתנה ההמלצה לא נשענת על הטעם שלך ולא משנה את הפרופיל שלך. ספר שנשמר נכנס ל"רוצה לקרוא" עם התגית "מתנה".</p>}
+          {st.gift && <p className="text-[13px] text-muted -mt-1">ההמלצה לא תשפיע על הפרופיל שלך.</p>}
           <textarea id="ai-request" value={aiText} onChange={e => setAiText(e.target.value)} rows={3}
             placeholder={st.gift ? "למשל: לאבא שלי, בן 70, אוהב היסטוריה וביוגרפיות, קרא את 'סאפיינס'" : "למשל: משהו כמו 'יער נורווגי' אבל פחות עצוב; רומן שמתרחש בארץ; ספר שאפשר גם לשמוע"}
             className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px] leading-relaxed" />
@@ -4375,7 +4397,6 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
             </details>
           </div>
           <Btn onClick={goAi} disabled={running}><Icon name="Sparkles" size={20} />המלצה חכמה</Btn>
-          <p className="text-[12px] text-muted">Claude קורא את הספרייה, ההערות והדירוגים שלך, שואל 2–4 שאלות לדיוק וממליץ. ההמלצה רצה בשרת, כך שאפשר לכבות את המסך או לעבור אפליקציה. כל ספר נבדק מול הספרייה הלאומית, Google Books והחנויות, עם זמינות וקישור.</p>
         </div>
       )}
       {!hasAi && step === 0 && !log.length && (
@@ -4453,7 +4474,6 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
             placeholder="למשל: כבדים מדי בשבילי עכשיו; רוצה משהו עם הומור; פחות מלחמה"
             className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px]" />
           <Btn type="submit" variant="soft" disabled={!fbText.trim()}><Icon name="RefreshCw" size={17} />עדכון ההמלצות</Btn>
-          <p className="text-[12px] text-muted">ההערה נשמרת ומדייקת את הפרופיל הספרותי בהדרגה, כדי שמצב רוח של רגע לא ישנה אותו לתמיד.</p>
         </form>
       )}
       {rejecting && <RejectSheet book={rejecting} onClose={() => setRejecting(null)} onDone={(o) => {
@@ -4504,7 +4524,7 @@ async function copyText(text, fallbackEl) {
 // הסנכרון אוטומטי; מוצג רק כשיש בעיה שהמשתמש צריך לדעת עליה
 // מצב קורא אלקטרוני: הגדרה של המכשיר הזה בלבד (לא מסתנכרנת), כי היא תלויה במסך
 // ערכות עיצוב ספרותיות: [מזהה, שם, צבע הדגשה, רקע] ("מתחלף": ערכה אחרת בכל יום)
-const PALETTES = [['paper', 'נייר וקלף', '#8A3B2B', '#F4EEE3'], ['library', 'ספרייה ישנה', '#2E5B45', '#EDEFE7'], ['ink', 'דיו כחול', '#2C4677', '#F2F2EE'], ['stone', 'אבן ירושלמית', '#5E5E26', '#F1EADC']];
+const PALETTES = [['paper', 'נייר וקלף', '#8A3B2B', '#F4EEE3'], ['library', 'ספרייה ישנה', '#1F5A40', '#E4E9DD'], ['ink', 'דיו כחול', '#233E80', '#E6EBF1'], ['stone', 'אבן ירושלמית', '#A0432A', '#F0E3D1'], ['plum', 'שזיף ולבנדר', '#6B2E5E', '#ECE7EF'], ['sea', 'ים תיכון', '#0E6264', '#E3EDEB']];
 const FONT_CHOICES = [['frank', 'פרנק רוהל', '"Frank Ruhl Libre", serif'], ['david', 'דוד', '"David Libre", serif'], ['assistant', 'אסיסטנט', 'Assistant, sans-serif'], ['alef', 'אלף', 'Alef, sans-serif']];
 const ZOOMS = [0.9, 1, 1.1, 1.2, 1.35, 1.5];
 const paletteOf = (st) => (st.palette === 'rotate' ? PALETTES[Math.floor(Date.now() / 86400000) % PALETTES.length][0] : st.palette) || 'paper';
@@ -4535,7 +4555,7 @@ function LookSettings({ db, update }) {
             return (
               <button key={k} type="button" role="radio" aria-checked={on} onClick={() => set({ palette: k })}
                 className={`min-h-[52px] rounded-xl border-2 px-2.5 flex items-center gap-2 text-right ${on ? 'border-accent' : 'border-line'} bg-surface`}>
-                <span className="w-8 h-8 rounded-full shrink-0 border border-line grid place-items-center overflow-hidden" style={{ background: bg || 'conic-gradient(#8A3B2B 0 25%, #2E5B45 0 50%, #2C4677 0 75%, #5E5E26 0)' }}>
+                <span className="w-8 h-8 rounded-full shrink-0 border border-line grid place-items-center overflow-hidden" style={{ background: bg || 'conic-gradient(#8A3B2B 0 17%, #1F5A40 0 33%, #233E80 0 50%, #A0432A 0 67%, #6B2E5E 0 83%, #0E6264 0)' }}>
                   {ac && <span className="w-3.5 h-3.5 rounded-full" style={{ background: ac }} />}</span>
                 <span className="text-[14px] font-semibold leading-tight">{l}</span>
               </button>
@@ -4573,7 +4593,7 @@ function LookSettings({ db, update }) {
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="text-[15px] font-semibold">מצב נגישות</div>
-          <div className="text-[13px] text-muted">ניגודיות גבוהה, טקסט גדול יותר (לפחות 115%), קישורים מסומנים בקו, מסגרת מיקוד בולטת, בלי אנימציות ואזורי לחיצה גדולים. לפי תקן הנגישות הישראלי (ת"י 5568) ו-WCAG 2.0 AA.</div>
+          <div className="text-[13px] text-muted">ניגודיות גבוהה, טקסט גדול יותר ובלי אנימציות (ת"י 5568).</div>
         </div>
         <button type="button" role="switch" aria-checked={!!st.a11y} aria-label="מצב נגישות" onClick={() => set({ a11y: !st.a11y })}
           className={`shrink-0 w-14 h-8 rounded-full relative transition-colors ${st.a11y ? 'bg-accent' : 'bg-surface2 border border-line'}`}>
@@ -4598,7 +4618,7 @@ function EinkToggle() {
     <div className="flex items-center justify-between gap-3">
       <div>
         <div className="text-[15px] font-semibold">מצב קורא אלקטרוני</div>
-        <div className="text-[13px] text-muted">שחור-לבן, טקסט גדול, בלי אנימציות ובלי תמונות כריכה. נטען מהר יותר. חל רק על המכשיר הזה.</div>
+        <div className="text-[13px] text-muted">שחור-לבן, בלי תמונות. רק במכשיר הזה.</div>
       </div>
       <button type="button" role="switch" aria-checked={on} aria-label="מצב קורא אלקטרוני" onClick={toggle}
         className={`shrink-0 w-14 h-8 rounded-full border-2 relative ${on ? 'bg-accent border-accent' : 'bg-surface2 border-line'}`}>
@@ -4664,7 +4684,6 @@ function KnowsAboutMe({ db, update, notify }) {
           {rej.length ? <ul>{rej.slice(0, 80).map(x => <Row key={x.id} label={x.title} onDel={() => delItem('rejections', x.id)}><b>{x.title}</b>{x.note ? ` · ${x.note}` : ''}<div className="text-[12px] text-muted">{x.until ? `עד ${fmtDate(x.until)}` : 'לתמיד'}</div></Row>)}</ul>
             : <p className="text-[13px] text-muted">אין.</p>}
         </div>
-        <p className="text-[13px] text-muted">הסימונים "טובה / לא טובה" על המלצות (ומה שכתבת עליהן) מנוהלים ב"גלה ספר חדש" ← "כל ההמלצות"; לחיצה חוזרת על הסימון מבטלת אותו.</p>
         <p className="text-[13px] text-muted">עוד: {(db.history || []).length} שיחות המלצה (נמחקות בלשונית "המלצות" ← היסטוריה), והספרים, הדירוגים וההערות שבספרייה.</p>
       </div>}
     </section>
@@ -4774,7 +4793,7 @@ function AppImport({ db, update, notify, onExport }) {
     <section className="bg-surface border border-line rounded-xl p-3 grid gap-2">
       <h2 className="font-semibold text-[17px]">ייצוא וייבוא: אפליקציות ספרים אחרות</h2>
       <Btn variant="soft" disabled={!db.books.length} onClick={onExport}><Icon name="Sheet" size={18} />ייצוא CSV (Goodreads / StoryGraph)</Btn>
-      <p className="text-[14px] text-muted">ייבוא מ-Goodreads (My Books ← Import and export ← Export Library), StoryGraph (Manage Account ← Export), או כל קובץ CSV עם שם ספר ומחבר. כל ספר נבדק מול המאגרים; מה שלא אומת עובר לרשימת ההוספה.</p>
+      <p className="text-[14px] text-muted">ייבוא קובץ CSV מ-Goodreads, מ-StoryGraph או כל רשימה עם שם ספר ומחבר.</p>
       <input ref={fileRef} id="import-apps" type="file" accept=".csv,text/csv,text/plain,.tsv" className="hidden" onChange={onFile} />
       <Btn variant="soft" disabled={st && st.busy} onClick={() => fileRef.current && fileRef.current.click()}><Icon name="Upload" size={18} />ייבוא מקובץ CSV</Btn>
       {st && (
@@ -4812,11 +4831,30 @@ function FeedbackBox({ profile, notify }) {
     </div>
   );
 }
-function SettingsGroup({ icon, title, color, children }) {
+// קבוצה בהגדרות: מקופלת כברירת מחדל, עם שורת תקציר של מה שנבחר; מה שנפתח נזכר במכשיר
+const SETTINGS_OPEN_KEY = 'vrt-settings-open';
+function openSettingsGroup(title) {
+  try { const cur = JSON.parse(localStorage.getItem(SETTINGS_OPEN_KEY) || '[]').filter(x => x !== title); localStorage.setItem(SETTINGS_OPEN_KEY, JSON.stringify([...cur, title])); } catch (e) { /* */ }
+}
+function SettingsGroup({ icon, title, summary, children }) {
+  const [open, setOpen] = useState(() => { try { return JSON.parse(localStorage.getItem(SETTINGS_OPEN_KEY) || '[]').includes(title); } catch (e) { return false; } });
+  const toggle = () => setOpen(o => {
+    try { const cur = JSON.parse(localStorage.getItem(SETTINGS_OPEN_KEY) || '[]').filter(x => x !== title); localStorage.setItem(SETTINGS_OPEN_KEY, JSON.stringify(o ? cur : [...cur, title])); } catch (e) { /* */ }
+    return !o;
+  });
   return (
-    <section className="settings-group bg-surface border border-line rounded-2xl p-3.5 grid gap-3">
-      <h2 className="font-display font-bold text-[18px]"><span className="w-8 h-8 rounded-lg grid place-items-center shrink-0 bg-accentSoft text-accent"><Icon name={icon} size={17} /></span>{title}</h2>
-      {children}
+    <section data-group={title} className="settings-group bg-surface border border-line rounded-2xl">
+      <h2 className="m-0">
+        <button type="button" aria-expanded={open} onClick={toggle} className="w-full text-right flex items-center gap-2.5 p-3.5 min-h-[60px]">
+          <span className="w-8 h-8 rounded-lg grid place-items-center shrink-0 bg-accentSoft text-accent"><Icon name={icon} size={17} /></span>
+          <span className="flex-1 min-w-0">
+            <span className="block font-display font-bold text-[18px] leading-tight">{title}</span>
+            {summary && !open && <span className="block text-[13px] text-muted font-normal truncate">{summary}</span>}
+          </span>
+          <Icon name={open ? 'ChevronUp' : 'ChevronDown'} size={20} className="text-muted shrink-0" />
+        </button>
+      </h2>
+      {open && <div className="px-3.5 pb-3.5 grid gap-3 fade-in">{children}</div>}
     </section>
   );
 }
@@ -4899,12 +4937,12 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
 
   return (
     <div className="fade-in grid gap-4">
-      <PageHero tab="backup" title="הגדרות" sub="החשבון, ההמלצות, התצוגה, הפרטיות והנתונים שלך." />
+      <PageHero tab="backup" title="הגדרות" />
 
       <SyncPanel />
 
 
-      <SettingsGroup icon="UserRound" title="החשבון שלי" color="var(--accent)">
+      <SettingsGroup icon="UserRound" title="החשבון שלי" summary={`${profile.name} · ${(ADDRESS_FORMS.find(([k]) => k === (db.settings.address || 'n')) || [])[1] || ''}`}>
         <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (nameDraft.trim()) { onRenameProfile(nameDraft.trim()); notify('השם עודכן'); } }}>
           <label htmlFor="profile-name" className="sr-only">שם המשתמש</label>
           <input id="profile-name" value={nameDraft} onChange={e => setNameDraft(e.target.value)} maxLength={24}
@@ -4923,25 +4961,21 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
           </div>
         </div>
       </SettingsGroup>
-      <SettingsGroup icon="Sparkles" title="המלצות" color="var(--rose)">
+      <SettingsGroup icon="Sparkles" title="המלצות" summary={`שפות: ${langsLabel(langsOf(db.settings))} · רשימת הספרים המוכרים`}>
         <div>
           <div className="text-[15px] font-semibold">רשימת 400 הספרים המוכרים</div>
-          <div className="text-[13px] text-muted mb-1.5">סימון מהיר של ספרים שקראת, כדי לדייק את ההמלצות. ספרים שכבר בספרייה לא מוצגים שוב.</div>
+          
           <div className="grid grid-cols-2 gap-2">
             <Btn variant="soft" onClick={() => onOpenStarter(false)}><Icon name="ListChecks" size={18} />המשך מאיפה שעצרתי</Btn>
             <Btn variant="ghost" onClick={() => onOpenStarter(true)}><Icon name="RotateCcw" size={18} />מההתחלה</Btn>
           </div>
         </div>
         <div>
-          <div className="text-[14px] text-muted mb-1.5">שפת ברירת מחדל להמלצות ({profile.name})</div>
-          <div className="flex gap-2 flex-wrap">
-            {REC_LANGS.map(([k, l]) => (
-              <Chip key={k} active={db.settings.recLang === k} onClick={() => update(d => ({ ...d, settings: { ...d.settings, recLang: k } }))}>{l}</Chip>
-            ))}
-          </div>
+          <div className="text-[14px] text-muted mb-1.5">שפות ברירת המחדל להמלצות</div>
+          <LangToggles value={langsOf(db.settings)} label="שפות ברירת המחדל" onChange={(v) => update(d => ({ ...d, settings: { ...d.settings, recLangs: v, recLang: langCode(v) } }))} />
         </div>
         {SYNC.gbooks
-          ? <p className="text-[14px] text-muted">חיפוש ב-Google Books: <span className="text-ok font-semibold">פעיל דרך השרת המשפחתי</span> (מפתח משותף, אין צורך במפתח אישי).</p>
+          ? null
           : <>
         <form id="api-key-section" onSubmit={saveKey} className="grid gap-1.5">
           <label htmlFor="api-key" className="text-[15px] font-semibold">מפתח Google Books API</label>
@@ -4970,39 +5004,32 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
           </Btn>
         )}
       </SettingsGroup>
-      <SettingsGroup icon="Bell" title="התראות" color="var(--brass)">
+      <SettingsGroup icon="Bell" title="התראות" summary="הצעות כל שבועיים והמלצה מוכנה">
         <div>
           <div className="text-[15px] font-semibold">הצעות כל שבועיים</div>
-          <div className="text-[13px] text-muted mb-1.5">כל שבועיים נבחרים בשבילך 10 ספרים חדשים לפי מה שקראת. אפשר לקבל על זה התראה לטלפון.</div>
+          <div className="text-[13px] text-muted mb-1.5">10 ספרים חדשים בשבילך כל שבועיים.</div>
           <PushButton notify={notify} />
         </div>
       </SettingsGroup>
-      <SettingsGroup icon="Palette" title="תצוגה ונגישות">
+      <SettingsGroup icon="Palette" title="תצוגה ונגישות" summary={[(PALETTES.find(([k]) => k === (db.settings.palette || 'paper')) || [0, 'מתחלף כל יום'])[1], (FONT_CHOICES.find(([k]) => k === (db.settings.font || 'frank')) || [])[1], Math.round(zoomOf(db.settings) * 100) + '%', db.settings.a11y ? 'מצב נגישות' : ''].filter(Boolean).join(' · ')}>
         <LookSettings db={db} update={update} />
         <EinkToggle />
       </SettingsGroup>
-      <SettingsGroup icon="MessageSquareHeart" title="💬 משוב" color="var(--rose)">
+      <SettingsGroup icon="MessageSquareHeart" title="משוב" summary="משהו לא עובד או חסר?">
         <FeedbackBox profile={profile} notify={notify} />
       </SettingsGroup>
-      <SettingsGroup icon="Shield" title="פרטיות וחברים" color="var(--accent-2)">
+      <SettingsGroup icon="Shield" title="פרטיות וחברים" summary="מה חברים רואים עליי">
         <PrivacySettings db={db} update={update} />
       </SettingsGroup>
 
 
-      <h2 className="font-bold text-[17px] mt-2 -mb-2 flex items-center gap-2"><span className="w-8 h-8 rounded-lg grid place-items-center bg-accentSoft text-accent"><Icon name="Database" size={17} /></span>הנתונים שלי</h2>
+      <SettingsGroup icon="Database" title="הנתונים שלי" summary="מה האפליקציה יודעת, ייצוא, ייבוא וגיבוי">
       <KnowsAboutMe db={db} update={update} notify={notify} />
       <AppImport db={db} update={update} notify={notify} onExport={() => { downloadFile(`my-books-${profile.name}-${stamp}.csv`, toGoodreadsCSV(db), 'text/csv;charset=utf-8'); notify('קובץ ה-CSV נוצר'); }} />
       <details className="bg-surface border border-line rounded-xl p-3">
         <summary className="font-semibold text-[17px] cursor-pointer min-h-[36px] flex items-center">גיבוי ידני לקובץ (לא חובה)</summary>
-        <p className="text-[14px] text-muted mt-1 mb-3">הכול מסתנכרן ונשמר אוטומטית. כאן אפשר בנוסף לשמור עותק לקובץ או לייבא ממנו.</p>
+        <div className="mb-3" />
         <div className="grid gap-4">
-      <section className="bg-surface border border-line rounded-xl p-3">
-        <h2 className="font-semibold text-[17px] mb-1">מצב אחסון</h2>
-        <StatusRow ok={status.local} label="localStorage" />
-        <StatusRow ok={status.idb} label="IndexedDB (עותק שני)" />
-        <StatusRow ok={status.persisted} label="אחסון קבוע (מוגן מניקוי)" detail={status.persisted === true ? 'אושר' : status.persisted === false ? 'לא אושר' : 'לא ידוע'} />
-        <p className="text-[13px] text-muted mt-2 tabular">{db.books.length} ספרים · נשמר לאחרונה {status.savedAt ? fmtDateTime(status.savedAt) : '—'} · משתמש: {profile.name}</p>
-      </section>
       <section className="bg-surface border border-line rounded-xl p-3 grid gap-2">
         <h2 className="font-semibold text-[17px]">ייצוא</h2>
         <Btn onClick={() => { downloadFile(`reading-backup-${profile.name}-${stamp}.json`, json(), 'application/json'); markBackup(); notify('קובץ הגיבוי נוצר'); }} disabled={!db.books.length}>
@@ -5046,6 +5073,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
       </section>
         </div>
       </details>
+      </SettingsGroup>
       <p className="text-center text-[12px] text-muted pb-2">נתוני ספרים: Google Books · Open Library · Wikidata. · גרסה {APP_VERSION}</p>
     </div>
   );
@@ -5128,7 +5156,6 @@ function PrivacySettings({ db, update }) {
   const setShare = (k) => update(d => ({ ...d, settings: { ...d.settings, share: { ...shareOf(d), [k]: !shareOf(d)[k] } } }));
   return (
     <div className="grid gap-1">
-      <p className="text-[13px] text-muted">מה חברים שאישרת יכולים לראות. ההגדרה מסתנכרנת לכל המכשירים.</p>
       {SHARE_ITEMS.map(([k, l]) =>
         <label key={k} className="flex items-center justify-between gap-3 min-h-[44px] border-b border-line last:border-0">
           <span className="text-[15px]">{l}</span>
@@ -5224,7 +5251,7 @@ function FriendsTab({ db, update, onPick, notify, onGoSettings }) {
   };
   return (
     <div className="fade-in">
-      <PageHero tab="friends" title="חברים" sub="רואים מה החברים קוראים ואוהבים, ממליצים אחד לשני, ומגלים ספרים דרכם." />
+      <PageHero tab="friends" title="חברים" />
 
       {incoming.length > 0 && (
         <section className="mb-5">
@@ -5288,7 +5315,7 @@ function FriendsTab({ db, update, onPick, notify, onGoSettings }) {
       {community.length > 0 && (
         <section className="mb-5">
           <h2 className="font-semibold text-[15px] mb-2">אהובים בקהילה</h2>
-          <p className="text-[13px] text-muted mb-2">ספרים שכמה משתמשים דירגו 4★ ומעלה.</p>
+          
           <ul className="grid gap-2">{community.map(x => (
             <BookRow key={dedupeKey(x.book)} book={x.book}>
               <div className="text-[13px] text-muted mt-1 tabular">{x.fans.length} משתמשים אהבו · ממוצע {(x.fans.reduce((s, f) => s + f.rating, 0) / x.fans.length).toFixed(1)}★</div>
@@ -5752,9 +5779,9 @@ const GUIDE = [
     ['למה אפשר לסמוך על ההמלצות?', 'כל ספר שהמודל מציע נבדק מול הספרייה הלאומית, Google Books והחנויות; ספר שלא נמצא נפסל. בכל המלצה מופיעים זמינות (מודפס, דיגיטלי, קולי), קישורים לרכישה וביקורות מאתרים מוכרים.'],
     ['ההמלצות לא מתאימות לי', 'כותבים בתיבה "לא בדיוק זה?" מה לא מתאים, ומקבלים הצעות מעודכנות. על ספר מסוים לוחצים "לא בשבילי" ובוחרים לחודש או לתמיד, עם הערה שמדייקת את הפרופיל.'],
     ['איפה כל ההמלצות שקיבלתי?', 'בלשונית "גלה ספר חדש" ← "כל ההמלצות": כל ההמלצות מהשיחות ומההצעות הדו-שבועיות. מסמנים "טובה" או "לא טובה", ואפשר להוסיף למה (רשות). הטובות מופיעות למעלה, אלה שלא התאימו מוצנעות בסוף הרשימה, והסימונים מלמדים את ההמלצות הבאות ואת הפרופיל הספרותי.'],
-    ['באיזו שפה הספרים?', 'כברירת מחדל רק ספרים שיש להם מהדורה בעברית. אפשר לשנות ל"עברית ואנגלית", "אנגלית" או "כל שפה".'],
+    ['באיזו שפה הספרים?', 'בשאלון מסמנים עברית, אנגלית ו/או שפות זרות. ברירת המחדל: עברית ואנגלית. משנים אותה בהגדרות ← "המלצות" ← "שפות ברירת המחדל להמלצות".'],
     ['מה זה "ספר בשביל מישהו אחר"?', 'מצב מתנה: מתארים את מי שמקבל את הספר, וההמלצה לא נשענת על הטעם שלך ולא משנה אותו. ספר שנשמר נכנס ל"רוצה לקרוא" עם התגית "מתנה".'],
-    ['מה זה הפרופיל הספרותי?', 'תקציר של הטעם שלך, שנבנה מהספרים, מהדירוגים ומההערות, ומתעדכן לבד. הוא לוקח בחשבון מתי קראת כל ספר, כדי לזהות לאן הטעם מתפתח. אפשר להוסיף לו הערה משלך.'],
+    ['מה זה הפרופיל הספרותי?', 'תקציר של הטעם שלך, שנבנה מהספרים, מהדירוגים ומההערות, ומתעדכן לבד. הוא לוקח בחשבון מתי קראת כל ספר, כדי לזהות לאן הטעם מתפתח. בראש "גלה ספר חדש" הוא מקופל; לוחצים עליו כדי לקרוא, לעדכן או להוסיף הערה משלך.'],
     ['מה ההצעות הדו-שבועיות?', 'כל שבועיים נבחרים 10 ספרים חדשים לפי מה שקראת, בלי ספרים שכבר הוצעו או שקראת. הם מופיעים בראש המסך, ואפשר לקבל התראה.']] },
   { id: 'summary', title: 'סיכום הקריאה', icon: 'ChartColumn', intro: 'דוח על הקריאה שלך: כמה, מה, מתי ואיך, לשבועיים, לחודש, לשנה או לכל הזמן.', qa: [
     ['איפה הסיכום?', 'כשיש סיכום חדש מופיע כרטיס בראש "הספרים שלי". אחרי שצפית בו, הוא עובר לקישור "סיכום הקריאה" ליד הסטטיסטיקות.'],
@@ -5769,15 +5796,16 @@ const GUIDE = [
     ['איך מפעילים התראות?', 'בהגדרות ← "התראות" ← "התראה כשיש הצעות חדשות", ומאשרים בחלון של הטלפון. אפשר גם מהשורה שמופיעה בזמן שההמלצה מתגבשת.'],
     ['באייפון לא מגיעות התראות', 'באייפון התראות עובדות רק אחרי התקנה על מסך הבית (iOS 16.4 ומעלה), ורק כשפותחים את האפליקציה משם.']] },
   { id: 'look', title: 'תצוגה ונגישות', icon: 'Palette', intro: 'אפשר להתאים את המראה, הגופן והגודל, ולהפעיל מצב נגישות.', qa: [
-    ['איך משנים צבעים?', 'בהגדרות ← "תצוגה ונגישות": ארבע ערכות (נייר וקלף, ספרייה ישנה, דיו כחול, אבן ירושלמית) או "מתחלף כל יום", ובחירה בין בהיר, כהה או לפי המכשיר.'],
-    ['איך מגדילים את הטקסט?', 'בהגדרות ← "גודל הטקסט": א+ להגדלה וא- להקטנה, מ-90% עד 150%. אפשר גם לבחור גופן: פרנק רוהל, דוד, אסיסטנט או אלף.'],
+    ['איך משנים צבעים?', 'בהגדרות ← "תצוגה ונגישות": שש ערכות (נייר וקלף, ספרייה ישנה, דיו כחול, אבן ירושלמית, שזיף ולבנדר, ים תיכון) או "מתחלף כל יום", ובחירה בין בהיר, כהה או לפי המכשיר.'],
+    ['איך מגדילים את הטקסט?', 'בהגדרות ← "תצוגה ונגישות" ← "גודל הטקסט": א+ להגדלה וא- להקטנה, מ-90% עד 150%. אפשר גם לבחור גופן: פרנק רוהל, דוד, אסיסטנט או אלף.'],
     ['מה עושה מצב נגישות?', 'ניגודיות גבוהה, טקסט גדול יותר, קישורים עם קו תחתון, מסגרת מיקוד בולטת, בלי אנימציות ואזורי לחיצה גדולים, לפי ת"י 5568 ו-WCAG 2.0 AA. האפליקציה עובדת גם עם קורא מסך ומקלדת.'],
-    ['יש לי קורא ספרים אלקטרוני', '"מצב קורא אלקטרוני" בהגדרות: שחור-לבן, טקסט גדול, בלי אנימציות ותמונות כבדות. נשמר רק במכשיר שבו הופעל.'],
+    ['יש לי קורא ספרים אלקטרוני', '"מצב קורא אלקטרוני" בהגדרות ← "תצוגה ונגישות": שחור-לבן, טקסט גדול, בלי אנימציות ותמונות כבדות. נשמר רק במכשיר שבו הופעל.'],
+    ['איך מתמצאים בהגדרות?', 'ההגדרות מחולקות לקבוצות: החשבון שלי, המלצות, התראות, תצוגה ונגישות, משוב, פרטיות וחברים, הנתונים שלי. כל קבוצה מקופלת ונפתחת בלחיצה, והאפליקציה זוכרת אילו קבוצות פתחת.'],
     ['איך האפליקציה פונה אליי?', 'בהגדרות ← "החשבון שלי" ← "איך לפנות אליך?": לשון נקבה, זכר או רבים. כל הטקסטים וההמלצות מתאימים את עצמם.']] },
   { id: 'data', title: 'הנתונים והפרטיות', icon: 'Shield', intro: 'רואים מה האפליקציה יודעת, מוחקים, מייצאים ומייבאים.', qa: [
-    ['מה האפליקציה יודעת עליי?', 'בהגדרות ← "מה האפליקציה יודעת עליי": הפרופיל הספרותי, ההערה שלך, המשובים והספרים שנשללו. אפשר למחוק כל פריט.'],
-    ['איך מייצאים את הנתונים?', 'בהגדרות ← "ייצוא וייבוא": קובץ CSV שמתאים ל-Goodreads ול-StoryGraph. ב"גיבוי ידני" יש גם גיבוי מלא (JSON) ורשימה כטקסט.'],
-    ['משהו לא עובד', 'בהגדרות ← "💬 משוב" כותבים מה קרה, וזה מגיע ישר ליובל.']] }
+    ['מה האפליקציה יודעת עליי?', 'בהגדרות ← "הנתונים שלי" ← "מה האפליקציה יודעת עליי": הפרופיל הספרותי, ההערה שלך, המשובים והספרים שנשללו. אפשר למחוק כל פריט.'],
+    ['איך מייצאים את הנתונים?', 'בהגדרות ← "הנתונים שלי": קובץ CSV שמתאים ל-Goodreads ול-StoryGraph. ב"גיבוי ידני" יש גם גיבוי מלא (JSON) ורשימה כטקסט.'],
+    ['משהו לא עובד', 'בהגדרות ← "משוב" כותבים מה קרה, וזה מגיע ישר ליובל.']] }
 ];
 function UserGuide({ onClose }) {
   const [q, setQ] = useState('');
@@ -6058,7 +6086,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
           onUpdateBook={(id, patch) => update(d => ({ ...d, books: d.books.map(b => b.id === id ? sanitizeBook({ ...b, ...patch, editedAt: Date.now() }) : b) }))} goAdd={() => setTab('add')} notify={notify} />}
         {tab === 'add' && <AddTab db={db} update={update} onPick={pick} goSettings={() => setTab('backup')} onOpenStarter={() => openStarter(false)} />}
         {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} onOpenDigest={setDigestOpen} />}
-        {tab === 'friends' && <FriendsTab db={db} update={update} onPick={pick} notify={notify} onGoSettings={() => setTab('backup')} />}
+        {tab === 'friends' && <FriendsTab db={db} update={update} onPick={pick} notify={notify} onGoSettings={() => { openSettingsGroup('פרטיות וחברים'); setTab('backup'); setTimeout(() => { const el = document.querySelector('[data-group="פרטיות וחברים"]'); if (el) el.scrollIntoView({ block: 'start' }); }, 60); }} />}
         {tab === 'backup' && <BackupTab onOpenStarter={openStarter} db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
       </main>
 

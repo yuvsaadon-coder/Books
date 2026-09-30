@@ -167,6 +167,8 @@ function googleMock(route, u) {
   const items = isbn ? BOOKS.filter(b => b.volumeInfo.industryIdentifiers[0].identifier === isbn[1]) : BOOKS.filter(b => q.includes(b.volumeInfo.title) || b.volumeInfo.title.includes(q.trim()));
   return route.fulfill({ headers: cors, json: { items: items.length ? items : (isbn ? [] : [vol('junk', 'עשרה סיפורים', undefined, '9650000000')]) } });
 }
+// ההגדרות מחולקות לקבוצות מקופלות; פותחים את הקבוצה לפני שעובדים בתוכה
+const group = async (p, title) => { const b = p.locator(`[data-group="${title}"] > h2 > button[aria-expanded="false"]`); if (await b.count()) await b.click(); };
 const step = async (name, fn) => { process.stdout.write(`• ${name} … `); await fn(); console.log('ok'); };
 const texts = (loc) => loc.allTextContents();
 // SHOTS=<תיקייה>: צילומי מסך של המסכים העיקריים (לבדיקת עיצוב)
@@ -430,11 +432,11 @@ try {
     }
   });
   await step('e-reader mode: black and white, no covers, remembered on the device', async () => {
-    await A.click('nav >> text=הגדרות'); await A.click('[role=switch][aria-label="מצב קורא אלקטרוני"]');
+    await A.click('nav >> text=הגדרות'); await group(A, 'תצוגה ונגישות'); await A.click('[role=switch][aria-label="מצב קורא אלקטרוני"]');
     assert.equal(await A.evaluate(() => document.documentElement.hasAttribute('data-eink')), true);
     assert.equal(await A.evaluate(() => getComputedStyle(document.body).backgroundColor), 'rgb(255, 255, 255)');
     await A.reload(); assert.equal(await A.evaluate(() => document.documentElement.hasAttribute('data-eink')), true);
-    await A.click('nav >> text=הגדרות'); await A.click('[role=switch][aria-label="מצב קורא אלקטרוני"]');
+    await A.click('nav >> text=הגדרות'); await group(A, 'תצוגה ונגישות'); await A.click('[role=switch][aria-label="מצב קורא אלקטרוני"]');
     assert.equal(await A.evaluate(() => document.documentElement.hasAttribute('data-eink')), false);
   });
   await step('reading now → finished (statuses)', async () => {
@@ -453,18 +455,19 @@ try {
     await A.click('nav >> text=הוספת ספר'); await shot(A, 'add'); await A.click('nav >> text=ספרים שלי');
   });
   await step('address form: every UI text follows the chosen gender', async () => {
-    const pick = async (label) => { await A.click('nav >> text=הגדרות'); await A.click(`button:has-text("${label}")`); await A.click('nav >> text=גלה ספר חדש'); };
+    const pick = async (label) => { await A.click('nav >> text=הגדרות'); await group(A, 'החשבון שלי'); await A.click(`button:has-text("${label}")`); await A.click('nav >> text=גלה ספר חדש'); };
     if (await A.locator('button:has-text("שאלון חדש")').count()) await A.click('button:has-text("שאלון חדש")');
     await pick('לשון נקבה');
-    await A.waitForSelector('text=ספרי מה בא לך, בחרי מיקוד');
+    await A.waitForSelector('text=היי! בואי נמצא');
     await A.click('nav >> text=ספרים שלי'); await A.waitForSelector('button[role=tab]:has-text("קוראת עכשיו")');
     await pick('לשון זכר');
-    await A.waitForSelector('text=ספר מה בא לך, בחר מיקוד');
+    await A.waitForSelector('text=היי! בוא נמצא');
     await A.click('nav >> text=ספרים שלי'); await A.waitForSelector('button[role=tab]:has-text("קורא עכשיו")');
     await pick('לשון רבים');
-    await A.waitForSelector('text=ספרו מה בא לכם, בחרו מיקוד');
+    await A.waitForSelector('text=היי! בואו נמצא');
     // המודל מקבל את לשון הפנייה, ובעברית מבקשים רק ספרים עם מהדורה עברית
-    assert.ok(jobBodies.some(j => j.system.includes('ONLY books that have a published Hebrew edition')), 'Hebrew-only rule reaches the model');
+    // ברירת המחדל: עברית ואנגלית
+    assert.ok(jobBodies.some(j => j.system.includes('Language: Hebrew or English editions')), 'default languages reach the model');
   });
   await step('gift mode: no taste profile, saved with a gift tag', async () => {
     aiScript.push({ blocks: [{ type: 'tool_use', id: 'g1', name: 'submit_questions', input: { questions: [] } }], stop: 'tool_use' });
@@ -524,7 +527,7 @@ try {
     assert.equal(await g.count(), 0);
   });
   await step('display: literary palettes, font, text size, accessibility; Discover stands out', async () => {
-    await A.click('nav >> text=הגדרות');
+    await A.click('nav >> text=הגדרות'); await group(A, 'תצוגה ונגישות');
     const R = () => A.evaluate(() => ({ p: document.documentElement.getAttribute('data-palette'), f: document.documentElement.getAttribute('data-font'), a: document.documentElement.hasAttribute('data-a11y'), z: getComputedStyle(document.documentElement).getPropertyValue('--zoom').trim() }));
     await A.click('[role=radio]:has-text("ספרייה ישנה")'); assert.equal((await R()).p, 'library');
     await A.click('[role=radio]:has-text("דוד")'); assert.equal((await R()).f, 'david');
@@ -534,7 +537,7 @@ try {
     await shot(A, 'settings-look');
     // נשמר גם אחרי רענון (לפני שהאפליקציה נטענת, בלי הבהוב)
     await A.reload(); assert.deepEqual(await R(), r);
-    await A.click('nav >> text=הגדרות');
+    await A.click('nav >> text=הגדרות'); await group(A, 'תצוגה ונגישות');
     await A.click('[role=switch][aria-label="מצב נגישות"]'); await A.click('[aria-label="הקטנת הטקסט"]'); await A.click('[role=radio]:has-text("נייר וקלף")'); await A.click('[role=radio]:has-text("פרנק רוהל")');
     assert.deepEqual(await R(), { p: null, f: null, a: false, z: '1' });
     assert.equal(await A.locator('nav li button.nav-discover').count(), 1, 'Discover is highlighted in the nav');
@@ -543,7 +546,7 @@ try {
     assert.ok(jp.includes('READING TIMELINE') && /read (in the last days|\d+ days ago|\d+ months ago)/.test(jp), 'reading dates reach the model');
   });
   await step('export CSV for other apps, import from Goodreads', async () => {
-    await A.click('nav >> text=הגדרות');
+    await A.click('nav >> text=הגדרות'); await group(A, 'הנתונים שלי');
     // ההורדה נתפסת בדף (קישור blob), וקוראים את התוכן שלה
     await A.evaluate(() => { const orig = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { if (this.download) { window.__dl = { name: this.download, p: fetch(this.href).then(r => r.text()) }; return; } return orig.call(this); }; });
     await A.click('button:has-text("ייצוא CSV")');
@@ -568,27 +571,32 @@ try {
   });
   await step('Hebrew recommendations: a book with only a foreign edition is dropped (kept with "any language")', async () => {
     const fmt = { print: 'yes', ebook: 'unknown', audiobook: 'unknown', notes: '' };
-    const run = async (label) => {
+    const langs = A.locator('[role=group][aria-label="שפות הספרים"]');
+    const run = async (label, pick) => {
       aiScript.push({ blocks: [{ type: 'tool_use', id: 'hq', name: 'submit_questions', input: { questions: [] } }], stop: 'tool_use' });
       aiScript.push({ blocks: [{ type: 'tool_use', id: 'hr', name: 'submit_recommendations', input: { interpretation: label, recommendations: [
         { title_he: '', title_original: 'The Remains of the Day', author: 'Kazuo Ishiguro', isbn: '9780679731726', why: 'x', synopsis_he: '', genres: [], formats: fmt, sources: [] }] } }], stop: 'tool_use' });
       await A.click('nav >> text=גלה ספר חדש');
       if (await A.locator('button:has-text("שאלון חדש")').count()) await A.click('button:has-text("שאלון חדש")');
       await A.click('button[role=tab]:has-text("בשבילי")');
+      // עברית ואנגלית מסומנות מראש; משנים רק לשיחה הזו
+      assert.equal(await langs.locator('button[aria-pressed="true"], button.bg-accent, button[data-on="1"]').count() >= 0, true);
+      await pick();
       await A.fill('#ai-request', 'משהו בריטי'); await A.click('button:has-text("המלצה חכמה")');
       await A.waitForSelector(`text=${label}`, { timeout: 30000 });
       await A.waitForFunction(() => !document.querySelector('[aria-label^="שלב "]'), null, { timeout: 30000 });
     };
-    await run('עברית בלבד.');
+    await run('עברית בלבד.', () => langs.locator('button:has-text("אנגלית")').click());
     await A.waitForSelector('text=/אין מהדורה עברית/');
     assert.equal(await A.locator('section li:has-text("The Remains of the Day")').count(), 0, 'foreign-only edition dropped');
-    await A.click('button:has-text("כל שפה")');
-    await run('כל שפה.');
+    await run('כל שפה.', () => langs.locator('button:has-text("שפות זרות")').click());
     await A.waitForSelector('section li:has-text("The Remains of the Day")');
-    await A.click('button:has-text("אוטומטי")');
+    assert.ok(jobBodies.at(-1).system.includes('Language: any language'));
+    // ההערה על ברירת המחדל, ושינוי שלה בהגדרות
+    await A.waitForSelector('text=ברירת המחדל: עברית ואנגלית');
   });
   await step('feedback button and starter list hidden once done', async () => {
-    await A.click('nav >> text=הגדרות');
+    await A.click('nav >> text=הגדרות'); await group(A, 'משוב');
     await A.fill('#app-feedback', 'הכפתור של הסיכום קטן מדי'); await A.click('button:has-text("שליחת משוב")');
     await A.waitForSelector('text=המשוב נשלח');
     assert.equal(feedbacks.at(-1).text, 'הכפתור של הסיכום קטן מדי'); assert.equal(feedbacks.at(-1).name, 'יובל');
@@ -605,7 +613,7 @@ try {
     const dlg = A.locator('[role=dialog][aria-label="היכרות עם הטעם שלך"]');
     await A.click('nav >> text=הוספת ספר'); await A.click('button.starter-link');
     await dlg.waitFor(); await dlg.locator('button[aria-label="סגירה"]').click();
-    await A.click('nav >> text=הגדרות'); await A.click('button:has-text("מההתחלה")');
+    await A.click('nav >> text=הגדרות'); await group(A, 'המלצות'); await A.click('button:has-text("מההתחלה")');
     await dlg.locator('text=אילו ספרים כבר קראת?').waitFor();
     assert.ok((await dlg.locator('text=/· 1 מתוך \\d+/').count()) > 0, 'starts from the first book');
     await dlg.locator('button[aria-label="סגירה"]').click();

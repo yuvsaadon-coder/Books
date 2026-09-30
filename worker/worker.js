@@ -848,14 +848,16 @@ Recent reading (by when read) shows current interests and where the taste is hea
 }
 export async function generateDigest(env, ctx, pid, db) {
   const prior = (await env.LIBRARY.get('digest:' + pid, 'json')) || [];
-  const lang = (db.settings && db.settings.recLang) || 'auto';
-  const heOnly = lang === 'he' || lang === 'auto';   // באפליקציה 'אוטומטי' = עברית
+  // שפות ברירת המחדל של המשתמש (עברית / אנגלית / שפות זרות); עברית בלבד רק כשזה מה שנבחר
+  const st = db.settings || {};
+  const langs = Array.isArray(st.recLangs) && st.recLangs.length ? st.recLangs : ({ he: ['he'], en: ['en'], any: ['he', 'en', 'other'] }[st.recLang] || ['he', 'en']);
+  const heOnly = langs.length === 1 && langs[0] === 'he';
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
       model: ALLOWED_MODELS[0], max_tokens: 8000, thinking: { type: 'adaptive' }, output_config: { effort: 'low' },
       system: 'You are a literary advisor with deep knowledge of world and Israeli literature. Every book you name is checked against real catalogues; name only real, published books. title_he must be the exact title of a Hebrew edition you know exists (otherwise empty; never translate a title yourself). `why` is one or two sentences in Hebrew that connect the book to this reader.' +
-        (heOnly ? ' Only books that have a published Hebrew edition; title_he is required for every book.' : '') + (ADDRESS_RULE[(db.settings && db.settings.address) || 'n'] || ''),
+        (heOnly ? ' Only books that have a published Hebrew edition; title_he is required for every book.' : langs.includes('other') ? ' Books may be in any language.' : langs.includes('he') ? ' Only books with a Hebrew or an English edition.' : ' Only books with an English edition.') + (ADDRESS_RULE[(db.settings && db.settings.address) || 'n'] || ''),
       tools: [DIGEST_TOOL], messages: [{ role: 'user', content: digestPrompt(db, prior) }]
     })
   });
