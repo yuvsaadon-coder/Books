@@ -150,7 +150,7 @@ console.log('worker page verification: ok');
     return new Response('blocked', { status: 403 });
   };
   const kv = new Map();
-  const envB = { LIBRARY: { get: async (k, t) => kv.has(k) ? JSON.parse(kv.get(k)) : null, put: async (k, v, o) => { kv.set(k, v); assert.equal(o.expirationTtl, 4 * 86400); } } };
+  const envB = { LIBRARY: { get: async (k, t) => kv.has(k) ? JSON.parse(kv.get(k)) : null, put: async (k, v, o) => { kv.set(k, v); assert.equal(o.expirationTtl, 14 * 86400); } } };
   const waits = []; const ctx = { waitUntil: (p) => waits.push(p) };
   const info = await bookInfo(envB, ctx, { isbn: '', title: 'יש ואין', author: 'ארנסט המינגוויי' });
   assert.equal(info.isbn, '9789650000028'); assert.ok(info.found);
@@ -165,6 +165,48 @@ console.log('worker page verification: ok');
   const res2 = await (await worker.fetch(new Request('https://w/bookinfo?title=' + encodeURIComponent('יש ואין') + '&author=' + encodeURIComponent('ארנסט המינגוויי')), envB, ctx)).json();
   assert.equal(calls.length, n); assert.ok(res2.cached); assert.equal(res2.isbn, res1.isbn);
   console.log('worker book info: ok');
+}
+// תקציר וקישורים גם כשהספר נמצא במאגרים אבל החיפוש לפי ISBN לא החזיר דף: חיפוש לפי שם בחנויות, ותקציר מלא מ-JSON-LD
+{
+  const { bookInfo, quoteInPage, claudeBookPage } = await import('../worker/worker.js');
+  const store = new Map();
+  globalThis.caches = { default: { match: async (r) => store.get(r.url) ? new Response(store.get(r.url)) : undefined, put: async (r, res) => { store.set(r.url, await res.text()); } } };
+  const blurb = 'בעיר קטנה על שפת הים חיה משפחה אחת שכל חבריה שומרים סוד. כשהבת הצעירה חוזרת הביתה אחרי עשרים שנה, הסוד מתחיל להיסדק, ואיתו כל מה שחשבו שהם יודעים זה על זה.';
+  globalThis.fetch = async (url) => {
+    url = String(url);
+    if (url.startsWith('https://www.googleapis.com/')) return new Response(JSON.stringify({ items: [{ volumeInfo: { title: 'הבית על החוף', authors: ['Anna Author'], description: '', industryIdentifiers: [{ type: 'ISBN_13', identifier: '9789650000555' }] }, saleInfo: {} }] }));
+    if (url.startsWith('https://openlibrary.org/')) return new Response(JSON.stringify({ docs: [] }));
+    if (url.startsWith('https://www.booknet.co.il/') && url.includes('?q=' + encodeURIComponent('הבית על החוף'))) return new Response('<a href="/product/habait-al-hahof">הבית על החוף</a>');
+    if (url === 'https://www.booknet.co.il/product/habait-al-hahof') return new Response(`<html><head><meta property="og:description" content="רומן משפחתי"><script type="application/ld+json">{"@type":"Product","name":"הבית על החוף","description":"${blurb}"}</script></head><body>הבית על החוף</body></html>`);
+    return new Response('blocked', { status: 403 });
+  };
+  const env = { LIBRARY: { get: async () => null, put: async () => {} } };
+  const info = await bookInfo(env, { waitUntil() {} }, { isbn: '', title: 'הבית על החוף', author: 'Anna Author' });
+  assert.ok(info.found);
+  assert.deepEqual(info.urls.map(u => u.url), ['https://www.booknet.co.il/product/habait-al-hahof'], 'store link although the catalogue already found the book');
+  assert.equal(info.synopsis, blurb, 'full blurb from JSON-LD, not the short og:description');
+
+  // כשהחנויות חוסמות את השרת: Claude מחפש וקורא את הדף; קישור מומצא ותקציר שלא מופיע בדף נזרקים
+  assert.ok(quoteInPage(blurb, 'כותרת ' + blurb + ' עוד טקסט')); assert.ok(!quoteInPage('משפט שלא קיים בדף בכלל אבל ארוך מספיק כדי להיבדק כראוי כאן ועכשיו', blurb));
+  const mk = (synopsis, pages) => ({ stop_reason: 'tool_use', content: [
+    { type: 'web_search_tool_result', content: [{ url: 'https://www.e-vrit.co.il/Product/123/הבית_על_החוף', title: 'הבית על החוף - אנה | עברית' }] },
+    { type: 'web_fetch_tool_result', content: { type: 'web_fetch_result', url: 'https://www.e-vrit.co.il/Product/123/הבית_על_החוף', content: { type: 'document', title: 'הבית על החוף', source: { type: 'text', data: 'הבית על החוף\nתקציר: ' + blurb + '\nמחיר 49' } } } },
+    { type: 'tool_use', name: 'submit_book_page', input: { pages, synopsis_he: synopsis, synopsis_url: 'https://www.e-vrit.co.il/Product/123/הבית_על_החוף' } }] });
+  let reply, body;
+  globalThis.fetch = async (url, init) => { if (String(url).includes('api.anthropic.com')) { body = JSON.parse(init.body); return new Response(JSON.stringify(reply)); } return new Response('blocked', { status: 403 }); };
+  const envC = { ANTHROPIC_API_KEY: 'k', LIBRARY: { get: async () => null, put: async () => {} } };
+  reply = mk(blurb, [{ url: 'https://www.e-vrit.co.il/Product/123/הבית_על_החוף' }, { url: 'https://www.e-vrit.co.il/Product/999/invented' }]);
+  const d = await claudeBookPage(envC, { title: 'הבית על החוף', author: 'אנה', isbn: '' });
+  assert.deepEqual(d.pages.map(p => p.url), ['https://www.e-vrit.co.il/Product/123/הבית_על_החוף'], 'invented URL dropped');
+  assert.equal(d.synopsis, blurb); assert.equal(d.synopsisSite, 'e-vrit.co.il');
+  assert.ok(body.tools.some(t => t.type === 'web_fetch_20250910' && t.allowed_domains.includes('e-vrit.co.il')) && body.model === 'claude-haiku-4-5-20251001');
+  reply = mk('תקציר שהמודל כתב בעצמו ולא מופיע בדף שנקרא, ולכן אסור להציג אותו למשתמש בשום מצב', [{ url: 'https://www.e-vrit.co.il/Product/123/הבית_על_החוף' }]);
+  assert.equal((await claudeBookPage(envC, { title: 'הבית על החוף', author: '', isbn: '' })).synopsis, '', 'text not in the fetched page is rejected');
+  // בתוך bookInfo: כשהכול חסום, השלב הזה מביא תקציר וקישור
+  reply = mk(blurb, [{ url: 'https://www.e-vrit.co.il/Product/123/הבית_על_החוף' }]);
+  const info2 = await bookInfo(envC, { waitUntil() {} }, { isbn: '', title: 'הבית על החוף', author: 'אנה' });
+  assert.equal(info2.synopsis, blurb); assert.equal(info2.urls[0].site, 'e-vrit.co.il'); assert.ok(info2.found && info2.available.ebook);
+  console.log('worker book details (store search, JSON-LD, verified Claude fallback): ok');
 }
 // ההצעות הדו-שבועיות: משתמש קיים מקבל מיד, משתמש חדש יום אחרי, רק ספרים שאומתו ולא הוצעו/נקראו, והתראה נשלחת
 {

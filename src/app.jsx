@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '34';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '35';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -701,6 +701,9 @@ function sanitizeBook(b) {
     // נבחר מתוך המלצה: מתי ולמה, כדי לשאול אחר כך איך היה
     fromRec: b.fromRec && typeof b.fromRec === 'object' ? { at: Number(b.fromRec.at) || 0, why: str(b.fromRec.why).slice(0, 400), asked: Number(b.fromRec.asked) || 0 } : null,   // מתי נקרא (0 = לא הוזן; ברירת המחדל היא מועד ההוספה)
     verifiedVia: str(b.verifiedVia), descSource: str(b.descSource), country: str(b.country).slice(0, 40),
+    // קישורים לדפי הספר בחנויות ובהוצאות (נשמרים עם הספר), ומתי נבדקו
+    offers: Array.isArray(b.offers) ? b.offers.filter(o => o && o.url && /^https:\/\//.test(o.url)).slice(0, 6).map(o => ({ site: str(o.site), url: str(o.url), kinds: arr(o.kinds) })) : [],
+    detailsAt: Number(b.detailsAt) || 0,
     ebook: !!b.ebook, ebookLink: str(b.ebookLink), olEbook: !!b.olEbook,
     note: str(b.note).slice(0, 4000), descriptionHe: str(b.descriptionHe), editedAt: Number(b.editedAt) || Number(b.addedAt) || 0,
     genres: arr(b.genres), sources: Array.isArray(b.sources) ? b.sources.filter(x => x && x.url).map(x => ({ title: str(x.title), url: str(x.url) })).slice(0, 8) : [],
@@ -1521,7 +1524,8 @@ const PROFILE_TOOL = {
     profile_he: { type: 'string', description: 'the reader\'s literary profile in Hebrew, 130-240 words, as short labelled lines: אוהב/ת, פחות מתחבר/ת, סופרים, נושאים ורגש, סגנון וקצב, התפתחות לאורך הזמן (מה קרא/ה פעם לעומת לאחרונה), מה לא להציע' },
     brief_en: { type: 'string', description: 'the same profile compressed for another model, in English, at most 120 words, dense and specific' } } }
 };
-const changedSince = (db, at) => db.books.filter(b => (b.editedAt || b.addedAt || 0) > at);
+// עדכון של תקציר/קישורים בלבד (editedAt ≈ detailsAt) לא נחשב שינוי בטעם
+const changedSince = (db, at) => db.books.filter(b => (b.editedAt || b.addedAt || 0) > at && !(b.detailsAt && Math.abs((b.editedAt || 0) - b.detailsAt) < 5000));
 function profileStale(db) {
   const read = db.books.filter(isRated);
   if (read.length < 3) return false;
@@ -1677,12 +1681,52 @@ function kindsOf(site, text) {
   return ['print'];
 }
 // זמינות + קישורים + תקציר מהשרת (מאגרים → סטימצקי/צומת לפי ISBN → חנויות לפי שם), נשמר בשרת ל-4 ימים
-async function fetchBookInfo(book) {
+async function fetchBookInfo(book, { fresh = false } = {}) {
   const c = loadCloud();
   if (!c) return null;
   const isbns = (book.isbns || []).map(x => String(x).replace(/[^\dXx]/g, ''));
   const isbn = isbns.find(x => /^(978)?965/.test(x)) || isbns[0] || '';
-  return fetchJSON(c.url + '/bookinfo?' + new URLSearchParams({ isbn, title: book.title || '', author: (book.authors || [])[0] || '' }), 40000);
+  // השרת עשוי לחפש ולקרוא את דף הספר (עד כחצי דקה); התשובה נשמרת בשרת לכולם
+  return fetchJSON(c.url + '/bookinfo?' + new URLSearchParams({ isbn, title: book.title || '', author: (book.authors || [])[0] || '', ...(fresh ? { fresh: '1', t: String(Date.now()) } : {}) }), 60000);
+}
+/* תקציר וקישורים לחנויות לכל ספר: נשלפים מהשרת, נשמרים עם הספר, ומתעדכנים (נמצא: כל 30 יום; לא נמצא: אחרי יומיים, או בלחיצה) */
+const DETAILS_OK_MS = 30 * 86400000, DETAILS_MISS_MS = 2 * 86400000;
+function detailsPatch(book, info) {
+  const patch = { detailsAt: Date.now() };
+  if (info.urls && info.urls.length) patch.offers = info.urls.filter(u => u && u.url).slice(0, 6).map(u => ({ site: u.site || '', url: u.url, kinds: u.kinds || [] }));
+  const heSyn = info.synopsis && hasHebrew(info.synopsis);
+  // תקציר עברי מהמקור: כשאין תקציר, או כשהספר בעברית והתקציר הקיים בשפה אחרת
+  if (heSyn && (!book.description || (hasHebrew(book.title) && !hasHebrew(book.description)))) Object.assign(patch, { description: info.synopsis, descSource: STORE_NAMES[info.synopsisSource] || info.synopsisSource || '', descriptionHe: '' });
+  else if (info.synopsis && !book.description) Object.assign(patch, { description: info.synopsis, descSource: STORE_NAMES[info.synopsisSource] || info.synopsisSource || '' });
+  if (!book.cover && info.cover) patch.cover = info.cover;
+  if (info.isbn && !(book.isbns || []).length) patch.isbns = [info.isbn];
+  return patch;
+}
+const needsDetails = (b) => !(b.offers || []).length || !b.description || (hasHebrew(b.title) && !hasHebrew(b.description));
+// מצב: idle / busy / done (נמצא משהו) / none (לא נמצא) / error; retry = חיפוש מחדש בלי מטמון
+function useBookDetails(book, onPatch, { auto = true } = {}) {
+  const [state, setState] = useState('idle');
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
+  const run = async (fresh) => {
+    if (!loadCloud()) return;
+    setState('busy');
+    try {
+      const info = await fetchBookInfo(book, { fresh });
+      if (!alive.current) return;
+      if (!info) { setState('error'); return; }
+      const patch = detailsPatch(book, info);
+      onPatch(patch);
+      setState(patch.offers || patch.description ? 'done' : 'none');
+    } catch (e) { if (alive.current) setState('error'); }
+  };
+  useEffect(() => {
+    if (!auto || !loadCloud() || !needsDetails(book)) return;
+    const age = Date.now() - (book.detailsAt || 0);
+    if (age > ((book.offers || []).length ? DETAILS_OK_MS : DETAILS_MISS_MS)) run(false);
+    else if (book.detailsAt) setState('none');
+  }, [book.key || book.id, auto]);
+  return [state, () => run(true)];
 }
 // ביקורות ודירוג מאתרי ביקורת אמינים (רק לספרים הסופיים; נשמר בשרת ל-30 יום)
 async function fetchReviews(book) {
@@ -1704,7 +1748,7 @@ async function enrichRec(rec) {
     if (!out.cover && info.cover) out.cover = info.cover;
     if (info.isbn && !(out.isbns || []).length) out.isbns = [info.isbn];
   }
-  return { ...out, offers, availability: info ? info.available : null, reviews: rv ? { list: (rv.reviews || []).filter(x => x.quote), rating: rv.rating || null } : { list: [], rating: null } };
+  return { ...out, offers, detailsAt: info ? Date.now() : 0, availability: info ? info.available : null, reviews: rv ? { list: (rv.reviews || []).filter(x => x.quote), rating: rv.rating || null } : { list: [], rating: null } };
 }
 
 /* ============================================================
@@ -2684,6 +2728,17 @@ function StarterPrompt({ db, update, onOpen }) {
     </section>
   );
 }
+// בפרטי הספר: תקציר, זמינות וקישורים לחנויות; נשלפים ונשמרים עם הספר (ומתעדכנים לבד)
+function BookDetailsBody({ book, onUpdateBook }) {
+  const [state, retry] = useBookDetails(book, (patch) => onUpdateBook(book.id, patch));
+  return (
+    <>
+      <Synopsis book={book} className="mb-3" status={state} onRetry={retry} onChange={(patch) => onUpdateBook(book.id, patch)} />
+      <div className="mb-3"><FormatInfo book={book} /></div>
+      <div className="mb-3"><BuyLinks book={book} offers={book.offers || []} busy={state === 'busy'} onRetry={retry} /></div>
+    </>
+  );
+}
 function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify, onSummary, onOpenStarter }) {
   const [q, setQ] = useState('');
   const [tag, setTag] = useState('');
@@ -2847,7 +2902,7 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
             </div>
           </div>
           <div className="flex flex-wrap gap-1.5 mb-3"><SourceBadge book={current} />{current.tags.map(t => <span key={t} className="text-[13px] px-2 py-0.5 rounded-full bg-surface2 font-semibold">{t}</span>)}</div>
-          <Synopsis key={current.id} book={current} className="mb-3" fetchSource onChange={(patch) => onUpdateBook(current.id, patch)} />
+          <BookDetailsBody key={current.id} book={current} onUpdateBook={onUpdateBook} notify={notify} />
           {current.note && (
             <div className="mb-3 rounded-xl bg-surface2 p-2.5">
               <div className="text-[12px] font-semibold text-muted mb-0.5">מה חשבת</div>
@@ -2857,8 +2912,6 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
           {current.genres && current.genres.length > 0 && <div className="flex flex-wrap gap-1 mb-3">{current.genres.map(g => <span key={g} className="text-[12px] px-2 py-0.5 rounded-full border border-line">{g}</span>)}</div>}
           <AiDetailsButton book={current} onUpdate={(patch) => onUpdateBook(current.id, patch)} />
           <p className="text-muted text-[13px] mb-3">{current.year ? `יצא לאור ב-${current.year} · ` : ''}{statusOf(current) === 'want' ? `נוסף לרשימה ב-${fmtDate(current.addedAt)}` : statusOf(current) === 'reading' ? `התחלתי ב-${fmtDate(current.startedAt || current.addedAt)}` : `${statusOf(current) === 'partial' ? 'הפסקתי ב-' : 'נקרא ב-'}${fmtMonth(current.readAt || current.addedAt)}`}{current.isbns[0] ? ` · ISBN ${current.isbns[0]}` : ''}</p>
-          <div className="mb-3"><FormatInfo book={current} /></div>
-          <div className="mb-3"><BuyLinks book={current} offers={current.offers || []} /></div>
           <RecommendToFriend book={current} notify={notify} />
           {current.link && <a href={current.link} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent font-semibold mb-4 min-h-[44px]"><Icon name="ExternalLink" size={16} />לרשומה במקור</a>}
           <div className="grid grid-cols-2 gap-2">
@@ -2902,7 +2955,7 @@ async function fetchFullDescription(book) {
   try { const full = await googleById(book.sourceId); return full && full.description && full.description.length > (book.description || '').length ? full.description : ''; }
   catch (e) { return ''; }
 }
-function Synopsis({ book, onChange, className = '', fetchSource = false }) {
+function Synopsis({ book, onChange, className = '', status = '', onRetry }) {
   const [expanded, setExpanded] = useState(false);
   const [overflow, setOverflow] = useState(false);
   const [full, setFull] = useState('');
@@ -2912,24 +2965,22 @@ function Synopsis({ book, onChange, className = '', fetchSource = false }) {
   const ref = useRef(null);
   const orig = full || book.description || '';
   const text = he && !showOrig ? he : orig;
-  // ספר עם שם עברי ותקציר בשפה אחרת (או בלי תקציר): מנסים להביא את התקציר העברי מדף הספר בחנות/בהוצאה, לפני תרגום
-  const [srcBusy, setSrcBusy] = useState(false);
-  useEffect(() => {
-    if (!fetchSource || !hasHebrew(book.title) || hasHebrew(book.description || '') || !loadCloud()) return;
-    const k = 'vrt-src-tried:' + book.key;
-    try { if (sessionStorage.getItem(k)) return; sessionStorage.setItem(k, '1'); } catch (e) { /* */ }
-    let alive = true;
-    setSrcBusy(true);
-    fetchBookInfo(book).then(info => {
-      if (alive && info && info.synopsis && hasHebrew(info.synopsis) && onChange) onChange({ description: info.synopsis, descSource: STORE_NAMES[info.synopsisSource] || info.synopsisSource, descriptionHe: '' });
-    }).catch(() => {}).finally(() => alive && setSrcBusy(false));
-    return () => { alive = false; };
-  }, [book.key]);
+  const srcBusy = status === 'busy';
   useEffect(() => {
     const el = ref.current;
     if (el && !expanded) setOverflow(el.scrollHeight > el.clientHeight + 2);
   }, [text, expanded]);
-  if (!orig && !he) return <p className={`text-muted text-[14px] ${className}`}>{srcBusy ? 'מחפש תקציר בחנויות…' : 'למקור אין תקציר רשמי לספר הזה.'}</p>;
+  if (!orig && !he) return (
+    <div className={`text-[14px] ${className}`} aria-live="polite">
+      {srcBusy
+        ? <p className="text-muted inline-flex items-center gap-1.5"><Spinner size={14} />מחפש תקציר באתרי ההוצאות והחנויות…</p>
+        : <p className="text-muted">{status === 'error' ? 'חיפוש התקציר לא הצליח (אולי אין חיבור).' : 'לא נמצא תקציר באתרי ההוצאות, בחנויות ובמאגרים.'}</p>}
+      {!srcBusy && <div className="flex flex-wrap gap-x-4">
+        {onRetry && <button type="button" onClick={onRetry} className="text-accent font-semibold min-h-[40px] inline-flex items-center gap-1"><Icon name="RotateCcw" size={15} />חיפוש מחדש</button>}
+        <a href={'https://simania.co.il/searchBooks.php?searchType=tabAll&query=' + encodeURIComponent(book.title || '')} target="_blank" rel="noopener noreferrer" className="text-accent font-semibold min-h-[40px] inline-flex items-center gap-1"><Icon name="Search" size={15} />חיפוש בסימניה</a>
+      </div>}
+    </div>
+  );
   const looksCut = /(\.\.\.|…)\s*$/.test(orig);
   const expand = async () => {
     if (expanded) { setExpanded(false); return; }
@@ -2950,6 +3001,7 @@ function Synopsis({ book, onChange, className = '', fetchSource = false }) {
   return (
     <div className={className}>
       {book.descSource && !he && <div className="text-[12px] font-semibold text-muted mb-0.5">תקציר מ{book.descSource}</div>}
+      {srcBusy && !hasHebrew(orig) && <div className="text-[12px] text-muted mb-0.5 inline-flex items-center gap-1"><Spinner size={12} />מחפש את התקציר העברי מההוצאה…</div>}
       {he && !showOrig && <div className="text-[12px] font-semibold text-muted mb-0.5">תרגום מכונה (AI) של התקציר הרשמי</div>}
       <p ref={ref} dir="auto" className={`font-reading whitespace-pre-line ${expanded ? '' : 'clamp-4'}`}>{text}</p>
       <div className="flex flex-wrap gap-x-4 gap-y-0">
@@ -2968,13 +3020,16 @@ function Synopsis({ book, onChange, className = '', fetchSource = false }) {
   );
 }
 
-function CandidateGroup({ group, inLib, onPick }) {
-  const c = group.main;
+function CandidateGroup({ group, inLib, onPick, autoDetails = false }) {
+  const c0 = group.main;
   const [extra, setExtra] = useState({});
+  // תקציר וקישורים לחנויות גם בתוצאות החיפוש (אוטומטית לתוצאות הראשונות, ובלחיצה לשאר)
+  const [dState, dRetry] = useBookDetails(c0, (patch) => setExtra(x => ({ ...x, ...patch })), { auto: autoDetails });
+  const c = { ...c0, ...extra };
   const [picking, setPicking] = useState(false);
   const [showEd, setShowEd] = useState(false);
   const [olEd, setOlEd] = useState({ loading: false, list: null, error: '' });
-  const googleEds = group.editions.filter(e => e !== c);
+  const googleEds = group.editions.filter(e => e !== c0);
   const canLoadOL = c.source === 'openlibrary' && c.sourceId && c.sourceId.startsWith('/works/');
   const editions = googleEds.concat(olEd.list || []);
 
@@ -3001,7 +3056,9 @@ function CandidateGroup({ group, inLib, onPick }) {
           <div className="mt-1.5"><SourceBadge book={c} /></div>
         </div>
       </div>
-      <Synopsis book={c} className="mt-2.5" onChange={(patch) => setExtra(x => ({ ...x, ...patch }))} />
+      <Synopsis book={c} className="mt-2.5" status={dState} onRetry={dRetry} onChange={(patch) => setExtra(x => ({ ...x, ...patch }))} />
+      {(c.offers || []).length > 0 && <div className="mt-2"><BuyLinks book={c} offers={c.offers} /></div>}
+      {dState === 'idle' && !autoDetails && needsDetails(c) && loadCloud() && <button type="button" onClick={dRetry} className="mt-1 text-accent font-semibold text-[14px] min-h-[40px] inline-flex items-center gap-1"><Icon name="Store" size={15} />תקציר וקישורים לחנויות</button>}
       <div className="flex gap-2 mt-2 items-center">
         {inLib
           ? <div className="flex-1 min-h-[48px] rounded-xl bg-surface2 text-muted font-semibold grid place-items-center text-[15px]">כבר בספרייה ({inLib.rating}★)</div>
@@ -3069,7 +3126,7 @@ function SearchResults({ res, db, onPick, goSettings, smart, onSmart }) {
   const partial = groups.length > 0 && top !== undefined && top >= 0.35 && top < 0.5 && !res.fromAi;
   const list = (
     <ul className="grid gap-3">
-      {groups.map(g => <CandidateGroup key={g.key + g.main.key} group={g} inLib={findInLibrary(g.main, db.books)} onPick={onPick} />)}
+      {groups.map((g, gi) => <CandidateGroup key={g.key + g.main.key} group={g} inLib={findInLibrary(g.main, db.books)} onPick={onPick} autoDetails={gi < 2} />)}
     </ul>
   );
   return (
@@ -3653,7 +3710,7 @@ function FormatInfo({ book }) {
         </div>
       )}
       <details>
-      <summary className="text-[13px] font-semibold text-accent cursor-pointer min-h-[32px] flex items-center">בדיקה בחנויות: e-vrit, Storytel, סטימצקי ועוד</summary>
+      <summary className="text-[13px] font-semibold text-accent cursor-pointer min-h-[32px] flex items-center">חיפוש בחנויות: עברית, סטימצקי, צומת ספרים ו-Audible</summary>
       <div className="text-[12px] text-muted mb-1">כל קישור פותח חיפוש באתר עצמו. זו בדיקה ידנית, לא אימות.</div>
       <div className="flex flex-wrap gap-1.5">
         {STORES.map(st => (
@@ -3756,7 +3813,7 @@ function RecAvailability({ r }) {
 // קישורי רכישה: דף הספר עצמו בחנות אם נמצא, אחרת חיפוש של שם הספר באתר החנות
 const REVIEW_NAMES = { 'haaretz.co.il': 'הארץ', 'ynet.co.il': 'ynet', 'simania.co.il': 'סימניה', 'goodreads.com': 'Goodreads', 'kirkusreviews.com': 'Kirkus', 'publishersweekly.com': 'Publishers Weekly', 'nybooks.com': 'NYRB', 'lrb.co.uk': 'LRB' };
 const BUY_STORES = [['e-vrit.co.il', 'עברית'], ['steimatzky.co.il', 'סטימצקי'], ['booknet.co.il', 'צומת ספרים']];
-function BuyLinks({ book, offers = [] }) {
+function BuyLinks({ book, offers = [], busy = false, onRetry }) {
   const q = `${book.title} ${(book.authors || [])[0] || ''}`.trim();
   const direct = (site) => offers.find(o => o.site === site);
   const publishers = offers.filter(o => !BUY_STORES.some(([s]) => s === o.site) && o.site !== 'Google Play');
@@ -3771,7 +3828,9 @@ function BuyLinks({ book, offers = [] }) {
         })}
         {publishers.slice(0, 2).map(o => <a key={o.url} href={o.url} target="_blank" rel="noopener noreferrer" className="min-h-[40px] px-3 rounded-full btn-primary text-accentInk text-[14px] font-semibold inline-flex items-center gap-1"><Icon name="ExternalLink" size={14} />בהוצאה ({STORE_NAMES[o.site] || o.site})</a>)}
       </div>
-      {!offers.length && <p className="text-[12px] text-muted">לא נמצא דף מכירה ישיר; הקישורים פותחים חיפוש באתר החנות.</p>}
+      {busy && !offers.length && <p className="text-[12px] text-muted inline-flex items-center gap-1.5" aria-live="polite"><Spinner size={12} />מחפש את דף הספר בחנויות ובהוצאות…</p>}
+      {!busy && !offers.length && <p className="text-[12px] text-muted">לא נמצא דף מכירה ישיר; הקישורים פותחים חיפוש באתר החנות.{onRetry && <> <button type="button" onClick={onRetry} className="text-accent font-semibold underline min-h-[32px]">חיפוש מחדש</button></>}</p>}
+      {offers.length > 0 && (() => { const k = new Set(offers.flatMap(o => o.kinds || [])); const l = [['print', 'מודפס'], ['ebook', 'דיגיטלי'], ['audio', 'קולי']].filter(([x]) => k.has(x)).map(([, y]) => y); return l.length ? <p className="text-[12px] text-muted">נמצא בחנויות: {l.join(' · ')}</p> : null; })()}
     </div>
   );
 }
@@ -4013,7 +4072,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
     language: r.language, isbns: (r.isbns || []).slice(0, 3), link: r.link, publisher: r.publisher || '', reasons: r.reasons || [],
     verifiedAt: r.verifiedAt, verifiedVia: r.verifiedVia || '', ebook: !!r.ebook, ebookLink: r.ebookLink || '', olEbook: !!r.olEbook,
     sources: r.sources || [], aiFormats: r.aiFormats || null, genres: r.genres || [], descSource: r.descSource || '', descriptionHe: (r.descriptionHe || '').slice(0, 1500),
-    offers: (r.offers || []).slice(0, 8), availability: r.availability || null, reviews: r.reviews || null, original: r.original || '', country: r.country || ''
+    offers: (r.offers || []).slice(0, 8), availability: r.availability || null, reviews: r.reviews || null, original: r.original || '', country: r.country || '', detailsAt: r.detailsAt || 0
   });
   const saveSession = (ans, usedLang, allRecs) => {
     if (!st.session.id) st.session = { id: uid(), at: Date.now() };
@@ -5573,6 +5632,7 @@ const GUIDE = [
     ['איך מוסיפים ספר אחד?', 'בלשונית "הוספת ספר" כותבים שם בעברית או באנגלית, ISBN או קישור לדף הספר. בוחרים את הספר (ואם רוצים, את המהדורה המדויקת), ואז את המדף והדירוג.'],
     ['יש לי רשימה של הרבה ספרים', 'בוחרים "רשימה" ומדביקים ספר בכל שורה (אפשר להוסיף מחבר אחרי מקף). עוברים על הספרים אחד אחרי השני, ואפשר לדייק או לחפש מחדש.'],
     ['אפשר פשוט לכתוב מה קראתי?', 'כן. ב"טקסט חופשי" כותבים בחופשיות, ו-Claude מזהה את הספרים. אחר כך בוחרים ומדרגים כל אחד.'],
+    ['מאיפה מגיעים התקציר והקישורים לחנויות?', 'לכל ספר האפליקציה מחפשת את דף הספר אצל ההוצאה ובחנויות (עברית, סטימצקי, צומת ספרים ועוד), ומשם מביאה את התקציר המקורי וקישור ישיר. התקציר מועתק מהדף כמו שהוא, ונבדק שהוא באמת מופיע שם. הכול נשמר עם הספר ומתעדכן מעצמו; אם לא נמצא, יש כפתור "חיפוש מחדש".'],
     ['למה ספר לא נמצא?', 'כל ספר נבדק מול Google Books, הספרייה הלאומית, Open Library והחנויות. אפשר לנסות את השם המלא, איות אחר, את השם בשפת המקור, ISBN מהכריכה האחורית, או "זיהוי חכם".'],
     ['אפשר לייבא מ-Goodreads או StoryGraph?', 'כן: הגדרות ← "ייצוא וייבוא" ← "ייבוא מקובץ CSV". כל ספר נבדק, ומה שלא אומת מחכה ברשימה בלשונית ההוספה.']] },
   { id: 'recs', title: 'המלצות', icon: 'Sparkles', intro: 'Claude קורא את הפרופיל הספרותי שלך וממליץ, וכל המלצה נבדקת מול המאגרים והחנויות לפני שהיא מוצגת.', qa: [

@@ -218,8 +218,21 @@ export function checkPage(html, expectTitle, expectAuthor) {
     ok: titleOk && authorOk, titleOk, authorOk,
     title: metaOf(html, ['og:title', 'twitter:title']) || decodeEntities((titleTag && titleTag[1] || '').trim()),
     image: metaOf(html, ['og:image', 'twitter:image']),
-    description: metaOf(html, ['og:description', 'description', 'twitter:description'])
+    description: metaOf(html, ['og:description', 'description', 'twitter:description']),
+    synopsis: pageSynopsis(html)
   };
+}
+// התקציר מדף ספר: הארוך מבין og:description / description / JSON-LD (לרוב שם נמצא התקציר המלא של ההוצאה)
+export function pageSynopsis(html) {
+  const cands = [metaOf(html, ['og:description']), metaOf(html, ['description']), metaOf(html, ['twitter:description'])];
+  for (const m of String(html || '').matchAll(/<script[^>]+application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const walk = (o) => { if (!o || typeof o !== 'object') return; if (typeof o.description === 'string' && /Book|Product/i.test(String(o['@type'] || ''))) cands.push(o.description); Object.values(o).forEach(walk); };
+      walk(JSON.parse(m[1]));
+    } catch (e) { /* JSON לא תקין */ }
+  }
+  const clean = (t) => decodeEntities(String(t || '').replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, ' ')).replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim();
+  return cands.map(clean).filter(t => hasHeb(t) && t.length >= 80).sort((a, b) => b.length - a.length)[0] || '';
 }
 async function handlePage(req, cors, ctx) {
   const q = new URL(req.url).searchParams;
@@ -549,7 +562,7 @@ async function handleJobs(req, env, cors, path) {
 // 3. הספר לא נמצא באף אחד משלושת המאגרים → חיפוש בחנויות ובהוצאות לפי שם עברי מדויק + מחבר.
 // 4. תקציר: קודם מהמאגרים. רק אם אין תקציר עברי → מדף הספר בחנות.
 // 5. מטמון: לפי ISBN או שם+מחבר, 4 ימים.
-const BOOKINFO_TTL = 4 * 86400;
+const BOOKINFO_TTL = 14 * 86400, BOOKINFO_MISS_TTL = 86400;   // נמצא: שבועיים; לא נמצא: מנסים שוב אחרי יום
 const ISBN_STORES = ['steimatzky.co.il', 'booknet.co.il'];
 const ISBN_SEARCH_URLS = [
   (isbn) => 'https://www.steimatzky.co.il/catalogsearch/result/?q=' + isbn,
@@ -611,7 +624,7 @@ const storeKinds = (site, text) => {
   if (site === 'steimatzky.co.il') return /דיגיטלי|e-?book/i.test(t) ? ['ebook'] : /קולי|אודיו/.test(t) ? ['audio'] : ['print'];
   return ['print'];
 };
-export async function bookInfo(env, ctx, { isbn, title, author }) {
+export async function bookInfo(env, ctx, { isbn, title, author, deep = true }) {
   // שלב 1: שלושת המאגרים במקביל
   const q = { isbn, title, author };
   const [g, n, o] = await Promise.all([googleQuery(env, q), nliQuery(env, q), olQuery(q)]);
@@ -649,39 +662,124 @@ export async function bookInfo(env, ctx, { isbn, title, author }) {
     }
     if (out.urls.length) break;
   }
-  // שלב 3: הספר לא במאגרים → חנויות והוצאות לפי שם עברי מדויק + מחבר
-  if (!found && heTitle) {
+  // שלב 3: עדיין אין קישור לחנות → חיפוש לפי השם העברי בחנויות ובהוצאות (גם כשהספר נמצא במאגרים)
+  if (!out.urls.length && heTitle) {
     const qq = author ? `${heTitle} ${author}` : heTitle;
     let cands = (await Promise.all(STORE_SEARCH_URLS.map(f => f(heTitle)).map(u => fetchHtml(u, ctx, 3600).then(h => h ? storeLinksFromHtml(h, u, heTitle) : [])))).flat();
     if (!cands.length) cands = (await storeSearchViaClaude(env, qq)).filter(x => titleHas(x.title, heTitle));
     for (const c of cands.slice(0, 4)) {
       if (out.urls.some(u => u.url === c.url)) continue;
       const html = await fetchHtml(c.url, ctx);
-      const page = html ? checkPage(html, heTitle, author || '') : null;
+      // שם הסופר נבדק רק כשהוא בעברית (בדף עברי שם לועזי לא יופיע)
+      const page = html ? checkPage(html, heTitle, hasHeb(author) ? author : '') : null;
       if (page && !page.ok) continue;
       out.urls.push({ site: c.site, url: c.url, kinds: storeKinds(c.site, `${c.title} ${page ? page.title : ''}`) });
       if (page) pages.push({ site: c.site, ...page });
     }
-    out.found = out.urls.length > 0;
+    out.found = out.found || out.urls.length > 0;
   }
   out.urls.forEach(u => u.kinds.forEach(k => { out.available[k] = true; }));
   // שלב 4: תקציר עברי מהחנות רק אם אין תקציר עברי מהמאגרים
   if (!hasHeb(out.synopsis)) {
-    const p = pages.find(x => x.description && hasHeb(x.description) && x.description.length > 60);
-    if (p) { out.synopsis = p.description; out.synopsisSource = p.site; }
+    const p = pages.map(x => ({ ...x, best: x.synopsis || (hasHeb(x.description) && x.description.length > 60 ? x.description : '') })).filter(x => x.best).sort((a, b) => b.best.length - a.best.length)[0];
+    if (p) { out.synopsis = p.best; out.synopsisSource = p.site; }
   }
   if (!out.cover) out.cover = (pages.find(x => x.image) || {}).image || '';
+  // שלב 5: עדיין חסר תקציר עברי או קישור → Claude מחפש וקורא את דף הספר בחנויות ובהוצאות (מהשרתים של Anthropic,
+  // כך שחסימה של Cloudflare לא מפריעה). כל קישור נבדק מול תוצאות החיפוש, והתקציר נבדק מול הטקסט של הדף שנקרא.
+  if (deep && (heTitle || title) && (!hasHeb(out.synopsis) || !out.urls.length)) {
+    const d = await claudeBookPage(env, { title: heTitle || title, author, isbn: isbns[0] || '' }).catch(() => null);
+    if (d) {
+      d.pages.forEach(pg => { if (!out.urls.some(u => u.url === pg.url)) out.urls.push({ site: pg.site, url: pg.url, kinds: storeKinds(pg.site, pg.title) }); });
+      if (!hasHeb(out.synopsis) && d.synopsis) { out.synopsis = d.synopsis; out.synopsisSource = d.synopsisSite; }
+      out.urls.forEach(u => u.kinds.forEach(k => { out.available[k] = true; }));
+      out.found = out.found || d.pages.length > 0;
+    }
+    out.deep = true;
+  }
   return out;
+}
+// תקציר: כל משפט (בנתחים של 6 מילים) צריך להופיע בטקסט של הדף שנקרא; לפחות 80% מהנתחים, ואורך סביר
+export function quoteInPage(quote, pageText) {
+  const q = heNorm(quote).split(' ').filter(Boolean), page = ' ' + heNorm(pageText) + ' ';
+  if (q.length < 12) return false;
+  const chunks = [];
+  for (let i = 0; i < q.length; i += 6) chunks.push(q.slice(i, i + 6).join(' '));
+  const hit = chunks.filter(c => page.includes(' ' + c + ' ') || page.includes(c)).length;
+  return hit / chunks.length >= 0.8;
+}
+const PAGE_SITES = [...STORE_SITES, 'simania.co.il'];
+const PAGE_TOOL = {
+  name: 'submit_book_page', description: 'Return the pages of this exact book and its blurb copied from a fetched page.',
+  input_schema: { type: 'object', additionalProperties: false, required: ['pages', 'synopsis_he', 'synopsis_url'], properties: {
+    pages: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['url'], properties: { url: { type: 'string', description: 'URL of a page (from the search results) that is this exact book' } } } },
+    synopsis_he: { type: 'string', description: 'the book blurb copied word for word from a fetched page, in Hebrew; empty if none' },
+    synopsis_url: { type: 'string', description: 'the fetched page the blurb was copied from' } } }
+};
+export async function claudeBookPage(env, { title, author, isbn }) {
+  if (!env.ANTHROPIC_API_KEY) return null;
+  const day = new Date().toISOString().slice(0, 10), counterKey = 'store-count:' + day;
+  const used = parseInt((await env.LIBRARY.get(counterKey)) || '0', 10);
+  if (used >= STORE_DAILY_LIMIT) return null;
+  await env.LIBRARY.put(counterKey, String(used + 1), { expirationTtl: 60 * 60 * 48 });
+  let blocked = (await env.LIBRARY.get('blocked-domains', 'json')) || [];
+  const messages = [{ role: 'user', content: `Book: "${title}"${author ? ` by ${author}` : ''}${isbn ? `, ISBN ${isbn}` : ''}.
+1. Search the Israeli bookstores and publishers for this exact book's own page (a product page of this book, not a list or another book).
+2. Fetch the best page (prefer the publisher, e-vrit, Steimatzky or Tzomet Sfarim; Simania also has blurbs).
+3. Call submit_book_page with the URLs of pages that are this exact book, the book's blurb copied word for word from the fetched page (in Hebrew), and the URL you copied it from.
+Never write, shorten or translate the blurb yourself. If no fetched page has a blurb, leave synopsis_he empty.` }];
+  const searched = new Map(), fetched = new Map();
+  let input = null;
+  for (let turn = 0; turn < 4 && !input; turn++) {
+    const sites = PAGE_SITES.filter(d => !blocked.includes(d));
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 3000, messages,
+        tools: [{ type: 'web_search_20250305', name: 'web_search', allowed_domains: sites, max_uses: 2 },
+          { type: 'web_fetch_20250910', name: 'web_fetch', allowed_domains: sites, max_uses: 2, max_content_tokens: 8000 }, PAGE_TOOL] })
+    });
+    if (!r.ok) {
+      // אתר שהכלים לא יכולים לגשת אליו: מסירים, זוכרים, ומנסים שוב
+      const more = r.status === 400 ? blockedDomainsFrom(await r.text()).filter(d => !blocked.includes(d)) : [];
+      if (!more.length) return null;
+      blocked = [...blocked, ...more]; await env.LIBRARY.put('blocked-domains', JSON.stringify(blocked));
+      continue;
+    }
+    const msg = await r.json();
+    for (const b of msg.content || []) {
+      if (b.type === 'web_search_tool_result' && Array.isArray(b.content)) b.content.forEach(x => x && x.url && searched.set(x.url, x.title || ''));
+      if (b.type === 'web_fetch_tool_result' && b.content && b.content.type === 'web_fetch_result') {
+        const doc = b.content.content || {};
+        if (doc.source && doc.source.type === 'text') fetched.set(b.content.url, { text: String(doc.source.data || ''), title: doc.title || '' });
+      }
+      if (b.type === 'tool_use' && b.name === 'submit_book_page') input = b.input;
+    }
+    if (input || msg.stop_reason !== 'pause_turn') break;
+    messages.push({ role: 'assistant', content: msg.content });
+  }
+  if (!input) return null;
+  const siteOf = (u) => { try { const h = new URL(u).hostname.replace(/^www\./, ''); return PAGE_SITES.find(d => h === d || h.endsWith('.' + d)) || ''; } catch (e) { return ''; } };
+  // קישור נשמר רק אם הופיע בתוצאות, ואם שם הספר מופיע בכותרת התוצאה או בטקסט של הדף שנקרא
+  const pages = (input.pages || []).map(x => x && x.url).filter(u => u && siteOf(u) && (searched.has(u) || fetched.has(u)))
+    .filter(u => titleHas(`${searched.get(u) || ''} ${(fetched.get(u) || {}).title || ''} ${((fetched.get(u) || {}).text || '').slice(0, 3000)}`, title))
+    .filter((u, i, a) => a.indexOf(u) === i).slice(0, 4)
+    .map(u => ({ url: u, site: siteOf(u), title: cleanStoreTitle(searched.get(u) || (fetched.get(u) || {}).title || '') }));
+  const src = fetched.get(input.synopsis_url);
+  const syn = String(input.synopsis_he || '').trim();
+  const synopsis = syn && src && hasHeb(syn) && quoteInPage(syn, src.text) ? syn.slice(0, 3000) : '';
+  return { pages: pages.filter(p => p.site !== 'simania.co.il'), synopsis, synopsisSite: synopsis ? siteOf(input.synopsis_url) : '' };
 }
 async function handleBookInfo(req, env, cors, ctx) {
   const p = new URL(req.url).searchParams;
   const isbn = digits(p.get('isbn')).slice(0, 13), title = (p.get('title') || '').slice(0, 150).trim(), author = (p.get('author') || '').slice(0, 80).trim();
   if (!isbn && !title) return json({ error: 'missing' }, 400, cors);
-  const key = 'bookinfo:' + (isbn || `${title}|${author}`.toLowerCase());
-  const cached = env.LIBRARY ? await env.LIBRARY.get(key, 'json') : null;
+  // bookinfo2: גרסה חדשה של המנגנון; תוצאות ריקות ישנות לא נשארות תקועות. fresh=1: בלי מטמון (כפתור "חיפוש מחדש")
+  const key = 'bookinfo2:' + (isbn || `${title}|${author}`.toLowerCase());
+  const cached = env.LIBRARY && p.get('fresh') !== '1' ? await env.LIBRARY.get(key, 'json') : null;
   if (cached) return json({ ...cached, cached: true }, 200, cors);
   const info = await bookInfo(env, ctx, { isbn: isbn.length === 10 || isbn.length === 13 ? isbn : '', title, author });
-  if (env.LIBRARY) ctx.waitUntil(env.LIBRARY.put(key, JSON.stringify(info), { expirationTtl: BOOKINFO_TTL }));
+  const good = hasHeb(info.synopsis) || info.urls.length > 0;
+  if (env.LIBRARY) ctx.waitUntil(env.LIBRARY.put(key, JSON.stringify(info), { expirationTtl: good ? BOOKINFO_TTL : BOOKINFO_MISS_TTL }));
   return json(info, 200, cors);
 }
 

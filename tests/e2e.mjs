@@ -28,7 +28,7 @@ const BOOKS = [
   vol('en2', 'The Remains of the Day', ['Kazuo Ishiguro'], '9780679731726', { language: 'en', description: 'A butler looks back.' })
 ];
 let store = { rev: 0, data: null };
-const aiCalls = [], aiScript = [], errors = [], feedbacks = [];
+const aiCalls = [], aiScript = [], errors = [], feedbacks = [], bookinfoCalls = [];
 const digestFor = new Map();
 let stallNext = false;
 const jobs = new Map(), jobBodies = [], jobHold = new Set(), profileCalls = [], countryCalls = [];
@@ -78,6 +78,8 @@ async function phone(browser, name) {
       }
       if (u.pathname === '/bookinfo') {
         const t = u.searchParams.get('title') || '';
+        bookinfoCalls.push(t);
+        if (t === 'סיפור פשוט') return route.fulfill({ headers: cors, json: { isbn: '9789650000042', found: true, urls: [{ site: 'booknet.co.il', url: 'https://www.booknet.co.il/product/sipur-pashut', kinds: ['print'] }], available: { print: true, ebook: false, audio: false }, synopsis: 'הירשל, בן למשפחת סוחרים בשבוש, מתאהב בבלומה, קרובת משפחה ענייה שעובדת בבית הוריו, אך נאלץ להתחתן עם אחרת.', synopsisSource: 'booknet.co.il', cover: '', checked_at: Date.now() } });
         return route.fulfill({ headers: cors, json: t === 'יש ואין'
           ? { isbn: '9789650000028', found: true, urls: [{ site: 'steimatzky.co.il', url: 'https://www.steimatzky.co.il/yesh-veein', kinds: ['print'] }], available: { print: true, ebook: false, audio: false }, synopsis: '', synopsisSource: '', cover: '', checked_at: Date.now() }
           : { isbn: '', found: false, urls: [], available: { print: false, ebook: false, audio: false }, synopsis: '', synopsisSource: '', cover: '', checked_at: Date.now() } });
@@ -609,6 +611,33 @@ try {
     await dlg.locator('button[aria-label="סגירה"]').click();
     await A.click('nav >> text=ספרים שלי'); await A.waitForSelector('main h2:has-text("היכרות מהירה עם הטעם שלך")');
     await A.click('button:has-text("לא צריך יותר")');
+  });
+  await step('book details: synopsis and direct store link are fetched for a library book, saved, and not fetched again', async () => {
+    await A.click('nav >> text=ספרים שלי'); await A.click('button[role=tab]:has-text("קראתי")');
+    const before = bookinfoCalls.filter(t => t === 'סיפור פשוט').length;
+    await A.click('main li:has-text("סיפור פשוט") button >> nth=0');
+    const sheet = A.locator('[role=dialog]');
+    // לספר כבר יש תקציר עברי מהמאגר: הוא נשאר (לא מוחלף), ומתווסף קישור ישיר לחנות
+    await sheet.locator('a:has-text("לקנייה בצומת ספרים")').waitFor();
+    assert.equal(await sheet.locator('a:has-text("לקנייה בצומת ספרים")').getAttribute('href'), 'https://www.booknet.co.il/product/sipur-pashut');
+    await sheet.locator('text=נמצא בחנויות: מודפס').waitFor();
+    await A.waitForTimeout(400); await shot(A, 'book-details', false);
+    // הקישור נשלף כבר כשהספר נוסף מתוצאות החיפוש, ונשמר איתו: לכל היותר בקשה אחת
+    assert.ok(bookinfoCalls.filter(t => t === 'סיפור פשוט').length <= Math.max(1, before + 1));
+    const after = bookinfoCalls.filter(t => t === 'סיפור פשוט').length;
+    await A.keyboard.press('Escape');
+    await A.reload(); await A.click('button[role=tab]:has-text("קראתי")'); await A.click('main li:has-text("סיפור פשוט") button >> nth=0');
+    await A.locator('[role=dialog] a:has-text("לקנייה בצומת ספרים")').waitFor();
+    assert.equal(bookinfoCalls.filter(t => t === 'סיפור פשוט').length, after, 'saved with the book, not fetched again');
+    // ספר בלי תקציר: הודעה ברורה וכפתור "חיפוש מחדש" (בלי מטמון)
+    await A.keyboard.press('Escape');
+    await A.click('main li:has-text("עשרה סיפורים") button >> nth=0');
+    await A.locator('[role=dialog] >> text=לא נמצא דף מכירה ישיר').waitFor();
+    const n = bookinfoCalls.length;
+    await A.click('[role=dialog] button:has-text("חיפוש מחדש")');
+    await A.waitForFunction((k) => true, n); await A.waitForTimeout(500);
+    assert.ok(bookinfoCalls.length > n, 'retry asks the server again');
+    await A.keyboard.press('Escape');
   });
   await step('Google Books goes through the family server (shared key + cache)', async () => {
     assert.ok(viaProxy > 0, 'no proxied Google requests');
