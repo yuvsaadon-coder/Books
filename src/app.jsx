@@ -7,7 +7,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const DEFAULT_LOCALE = 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '35';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '36';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -734,6 +734,9 @@ function sanitizeDB(raw) {
     profileNote: typeof raw.profileNote === 'string' ? raw.profileNote.slice(0, 1500) : '',
     // ביקורת על המלצות מהצ'אט: חומר לפרופיל (בזהירות: חלק מזה מצב רוח רגעי)
     feedback: Array.isArray(raw.feedback) ? raw.feedback.filter(x => x && x.id && x.text).slice(0, 200) : [],
+    // סימון המלצות שקיבלתי: טובה / לא טובה, עם הערה (רשות) – לפי מפתח הספר
+    recVotes: raw.recVotes && typeof raw.recVotes === 'object' ? Object.fromEntries(Object.entries(raw.recVotes).filter(([, v]) => v && (v.vote === 'up' || v.vote === 'down' || v.vote === '')).slice(0, 1000)
+      .map(([k, v]) => [k, { vote: v.vote, note: String(v.note || '').slice(0, 500), at: Number(v.at) || 0, title: String(v.title || '').slice(0, 200), author: String(v.author || '').slice(0, 100) }])) : {},
     profileNoteAt: Number(raw.profileNoteAt) || 0,
     updatedAt: Number(raw.updatedAt) || 0,
     lastBackupAt: Number(raw.lastBackupAt) || 0
@@ -918,6 +921,7 @@ function mergeDB(a, b) {
     dismissed: uniq([...(a.dismissed || []), ...(b.dismissed || [])]),
     rejections: mergeByIdNewest(a.rejections, b.rejections, x => x.editedAt || x.at || 0).filter(alive).sort((x, y) => (y.at || 0) - (x.at || 0)),
     feedback: mergeByIdNewest(a.feedback, b.feedback, x => x.at || 0).filter(alive).sort((x, y) => (y.at || 0) - (x.at || 0)).slice(0, 200),
+    recVotes: (() => { const o = { ...(a.recVotes || {}) }; Object.entries(b.recVotes || {}).forEach(([k, v]) => { if (!o[k] || (v.at || 0) > (o[k].at || 0)) o[k] = v; }); return o; })(),
     litProfile: (() => { const lp = ((a.litProfile && a.litProfile.at) || 0) >= ((b.litProfile && b.litProfile.at) || 0) ? a.litProfile || null : b.litProfile || null; return lp && tomb.misc.litProfile >= lp.at ? null : lp; })(),
     lastBackupAt: Math.max(a.lastBackupAt || 0, b.lastBackupAt || 0),
     updatedAt: Math.max(a.updatedAt || 0, b.updatedAt || 0)
@@ -1526,12 +1530,20 @@ const PROFILE_TOOL = {
 };
 // עדכון של תקציר/קישורים בלבד (editedAt ≈ detailsAt) לא נחשב שינוי בטעם
 const changedSince = (db, at) => db.books.filter(b => (b.editedAt || b.addedAt || 0) > at && !(b.detailsAt && Math.abs((b.editedAt || 0) - b.detailsAt) < 5000));
+// הסימונים על המלצות קודמות (טובה / לא טובה + הערה), לשליחה למודל
+const recVoteKey = (b) => b.key || dedupeKey(b);
+function votesForPrompt(db, since = 0, n = 30) {
+  const list = Object.values(db.recVotes || {}).filter(v => v.vote && (v.at || 0) > since).sort((a, b) => b.at - a.at).slice(0, n);
+  const line = (v) => `${v.title}${v.author ? ` — ${v.author}` : ''}${v.note ? ` ("${v.note}")` : ''}`;
+  const good = list.filter(v => v.vote === 'up').map(line), bad = list.filter(v => v.vote === 'down').map(line);
+  return (good.length ? `good: ${good.join('; ')}` : '') + (good.length && bad.length ? '\n' : '') + (bad.length ? `not good: ${bad.join('; ')}` : '');
+}
 function profileStale(db) {
   const read = db.books.filter(isRated);
   if (read.length < 3) return false;
   const p = db.litProfile;
   if (!p) return true;
-  return changedSince(db, p.at).length + (db.rejections || []).filter(x => (x.at || 0) > p.at && x.note).length + (db.feedback || []).filter(x => (x.at || 0) > p.at).length + ((db.profileNoteAt || 0) > p.at ? 3 : 0) >= 3;
+  return changedSince(db, p.at).length + (db.rejections || []).filter(x => (x.at || 0) > p.at && x.note).length + (db.feedback || []).filter(x => (x.at || 0) > p.at).length + Object.values(db.recVotes || {}).filter(v => v.vote && (v.at || 0) > p.at).length + ((db.profileNoteAt || 0) > p.at ? 3 : 0) >= 3;
 }
 async function aiBuildProfile(db) {
   const p = db.litProfile;
@@ -1539,7 +1551,9 @@ async function aiBuildProfile(db) {
   const rej = (db.rejections || []).filter(x => x.note).slice(0, 30).map(x => `${x.title} (${x.note})`).join('; ');
   const note = db.profileNote ? `\nREADER'S OWN NOTE ABOUT THEIR TASTE: ${db.profileNote}` : '';
   const fbs = (db.feedback || []).filter(x => !p || (x.at || 0) > p.at).slice(0, 20).map(x => `"${x.text}"${x.request ? ` (when asking for: ${x.request})` : ''}`).join('; ');
-  const fb = fbs ? `\nFEEDBACK THE READER GAVE ON RECOMMENDATIONS: ${fbs}\nTreat feedback carefully: a single remark may reflect a passing mood or a specific request. Turn it into a lasting trait only if it repeats or matches their ratings; otherwise record it as a situational preference (e.g. "sometimes wants lighter books").` : '';
+  const votes = votesForPrompt(db, p ? p.at : 0, 40);
+  const vb = votes ? `\nRECOMMENDATIONS THE READER MARKED (their verdict on books suggested to them, with optional reasons):\n${votes}\nLearn from these what kind of suggestion works for this reader and what doesn't.` : '';
+  const fb = vb + (fbs ? `\nFEEDBACK THE READER GAVE ON RECOMMENDATIONS: ${fbs}\nTreat feedback carefully: a single remark may reflect a passing mood or a specific request. Turn it into a lasting trait only if it repeats or matches their ratings; otherwise record it as a situational preference (e.g. "sometimes wants lighter books").` : '');
   const prompt = p && p.text
     ? `CURRENT PROFILE:\n${p.text}${note}${fb}\n\n${readingTimeline(db.books)}\n\nCHANGES SINCE IT WAS WRITTEN (title (published) — author | rating | when read | tags | notes):\n${libraryForPrompt(changedSince(db, p.at), 60) || '(none)'}${wish ? `\nWISHLIST NOW: ${wish}` : ''}${rej ? `\nREJECTED RECOMMENDATIONS WITH REASONS: ${rej}` : ''}\n\nUpdate the profile: keep what still holds, add what the changes show.`
     : `${readingTimeline(db.books)}\n\nREADER'S LIBRARY (title (published) — author | rating 1-5 | when read | tags | notes):\n${libraryForPrompt(db.books, 200)}${note}${fb}${wish ? `\nWISHLIST: ${wish}` : ''}${rej ? `\nREJECTED RECOMMENDATIONS WITH REASONS: ${rej}` : ''}\n\nWrite the profile.`;
@@ -1552,10 +1566,10 @@ async function aiBuildProfile(db) {
 
 function recRequest(opts) {
   // מצב מתנה: בלי הטעם, ההיסטוריה והשלילות של המשתמש; רק הבקשה והתשובות על מקבל המתנה
-  if (opts.gift) return recRequestBase({ ...opts, books: [], history: [], profile: null, profileNote: '', rejections: [], friendsLoved: [], feedback: [], genreMix: '', candidates: [], dismissed: [], giftFor: true });
+  if (opts.gift) return recRequestBase({ ...opts, books: [], history: [], profile: null, profileNote: '', rejections: [], friendsLoved: [], feedback: [], recVotes: '', genreMix: '', candidates: [], dismissed: [], giftFor: true });
   return recRequestBase(opts);
 }
-function recRequestBase({ books, request, focus, qa, lang, exclude, dismissed, history, want, profile, profileNote, rejections = [], friendsLoved = [], feedback = [], genreMix = '', candidates = [], giftFor = false }) {
+function recRequestBase({ books, request, focus, qa, lang, exclude, dismissed, history, want, profile, profileNote, rejections = [], friendsLoved = [], feedback = [], genreMix = '', candidates = [], giftFor = false, recVotes = '' }) {
   const candBlock = candidates.length ? `\n\nCANDIDATES (real books already found in the catalogues for this reader, with the signals that surfaced them). Prefer choosing from these by number when they fit the request; you may add up to 2 books of your own (candidate 0):\n${candidates.map(candidateLine).join('\n')}` : '';
   const langText = { he: 'Hebrew only. Recommend ONLY books that have a published Hebrew edition (original Hebrew or translated to Hebrew), and give its exact Hebrew title in title_he. Books without a Hebrew edition are dropped automatically, so do not suggest them', en: 'English only', both: 'Hebrew or English editions', any: 'any language', auto: 'Hebrew or English' }[lang] || 'Hebrew or English';
   const excludeTitles = uniq([...books.map(b => b.title), ...exclude, ...(history || []).flatMap(h => (h.recs || []).map(r => r.title))]).slice(0, 300);
@@ -1568,6 +1582,7 @@ function recRequestBase({ books, request, focus, qa, lang, exclude, dismissed, h
     : `READER'S LIBRARY (title (published) — author | rating 1-5 | when read | tags | notes):\n${libraryForPrompt(read) || '(empty)'}`;
   const wishBlock = wish.length ? `\nWISHLIST (they already plan to read these; do not recommend them, but they show current interests): ${wish.slice(0, 40).map(b => b.title).join('; ')}` : '';
   const rejBlock = rejections.length ? `\nREJECTED RECOMMENDATIONS (do not recommend; learn from the reasons): ${rejections.slice(0, 30).map(x => `${x.title}${x.note ? ` (${x.note})` : ''}`).join('; ')}` : '';
+  const voteBlock = recVotes ? `\nEARLIER SUGGESTIONS THE READER MARKED (good = more like this; not good = avoid what they share, and read the reasons):\n${recVotes}` : '';
   const fbBlock = feedback.length ? `\nRECENT FEEDBACK ON EARLIER SUGGESTIONS (may be a passing mood; weigh it for this request): ${feedback.slice(0, 5).map(x => `"${x.text}"`).join('; ')}` : '';
   const cMix = giftFor ? '' : countryMixText(books);
   const mixBlock = (genreMix ? `\nGENRE MIX OF WHAT THEY READ: ${genreMix}` : '') + (cMix ? `\nCOUNTRIES OF WHAT THEY READ (by author): ${cMix}. Consider where the reader likes their books to come from; a book from a new country can be a good surprise when it fits the taste.` : '') + (giftFor ? '' : (() => { const t = readingTimeline(books); return t ? '\n' + t : ''; })());
@@ -1584,7 +1599,7 @@ function recRequestBase({ books, request, focus, qa, lang, exclude, dismissed, h
       '`why` must connect the book to specific books and notes from the reader\'s library, to their answers, and to how critics describe it, in 2–4 sentences.',
       `Language: ${langText}. ` + HEBREW_OUT + addressRule(addressOf())
     ].join('\n'),
-    prompt: `${readerBlock}${profileNote ? `\nREADER'S NOTE ABOUT THEIR TASTE: ${profileNote}` : ''}${mixBlock}${wishBlock}${rejBlock}${fbBlock}${friendsBlock}\n\nALREADY READ, OWNED OR SEEN (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 450).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history.slice(0, profile ? 3 : 6), books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs.length ? `\nPREFERENCES: ${prefs.join('; ')}` : ''}${qa && qa.length ? `\nFOLLOW-UP ANSWERS:\n${qa.map(x => `- ${x.q} → ${x.a}`).join('\n')}` : ''}${candBlock}\n\nRecommend ${want + (lang === 'he' ? 4 : 2)} books.`
+    prompt: `${readerBlock}${profileNote ? `\nREADER'S NOTE ABOUT THEIR TASTE: ${profileNote}` : ''}${mixBlock}${wishBlock}${rejBlock}${voteBlock}${fbBlock}${friendsBlock}\n\nALREADY READ, OWNED OR SEEN (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 450).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history.slice(0, profile ? 3 : 6), books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs.length ? `\nPREFERENCES: ${prefs.join('; ')}` : ''}${qa && qa.length ? `\nFOLLOW-UP ANSWERS:\n${qa.map(x => `- ${x.q} → ${x.a}`).join('\n')}` : ''}${candBlock}\n\nRecommend ${want + (lang === 'he' ? 4 : 2)} books.`
   };
 }
 
@@ -3889,7 +3904,7 @@ function RecReviews({ r, loading }) {
     </div>
   );
 }
-function RecCard({ r, onRead, onWant, onDismiss, inLib, onEnrich }) {
+function RecCard({ r, onRead, onWant, onDismiss, inLib, onEnrich, voteSlot = null }) {
   const [extra, setExtra] = useState({});
   const [enriching, setEnriching] = useState(false);
   useEffect(() => {
@@ -3917,6 +3932,7 @@ function RecCard({ r, onRead, onWant, onDismiss, inLib, onEnrich }) {
       <Synopsis book={r} className="mt-2.5" onChange={(patch) => setExtra(x => ({ ...x, ...patch }))} />
       <RecReviews r={r} loading={enriching && !r.offers} />
       {r.offers ? <RecAvailability r={r} /> : enriching ? <div className="mt-2.5 text-[13px] text-muted inline-flex items-center gap-1.5"><Spinner size={14} />בודק זמינות בחנויות…</div> : <FormatInfo book={r} />}
+      {voteSlot && <div className="mt-3">{voteSlot}</div>}
       <div className="grid gap-2 mt-3">
         {inLib
           ? <div className="min-h-[48px] rounded-xl bg-surface2 text-ok font-semibold grid place-items-center text-[14px]">{libLabel(inLib)}</div>
@@ -3966,7 +3982,7 @@ function HistoryView({ db, update, onPick, notify, openId, setOpenId }) {
         <h2 className="font-display font-medium text-[20px]">{open.recs.length} המלצות</h2>
         <ul className="grid gap-3">
           {open.recs.map(r => (
-            <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)} onRead={(b) => onPick(b)} onWant={(b, stt = 'want') => onPick(open.answers && open.answers.gift ? { ...b, presetTags: ['מתנה'] } : b, { status: stt, fromRec: !(open.answers && open.answers.gift) })}
+            <RecCard key={r.key} r={r} voteSlot={<RecVote book={r} db={db} update={update} />} inLib={findInLibrary(r, db.books)} onRead={(b) => onPick(b)} onWant={(b, stt = 'want') => onPick(open.answers && open.answers.gift ? { ...b, presetTags: ['מתנה'] } : b, { status: stt, fromRec: !(open.answers && open.answers.gift) })}
               onDismiss={(b) => setRejecting(b)} />
           ))}
         </ul>
@@ -4047,6 +4063,99 @@ function RecStepper({ log }) {
     </div>
   );
 }
+/* ---------- כל ההמלצות שקיבלתי: סימון טובה / לא טובה (עם הערה, רשות), כדי שההמלצות הבאות ילמדו ---------- */
+function RecVote({ book, db, update, onVote, onDone }) {
+  const k = recVoteKey(book), v = (db.recVotes || {})[k] || {};
+  const [edit, setEdit] = useState(false);
+  const [note, setNote] = useState(v.note || '');
+  const set = (vote, n) => update(d => {
+    const cur = (d.recVotes || {})[k] || {};
+    return { ...d, recVotes: { ...(d.recVotes || {}), [k]: { vote, note: n != null ? n : cur.note || '', at: Date.now(), title: book.title, author: (book.authors || [])[0] || '' } } };
+  });
+  const click = (vote) => { onVote && onVote(k); if (v.vote === vote) { set(''); setEdit(false); onDone && onDone(k); } else { set(vote); setEdit(true); } };
+  const btn = (vote, icon, label) => (
+    <button type="button" aria-pressed={v.vote === vote} onClick={() => click(vote)}
+      className={`min-h-[38px] px-3 rounded-full border text-[13px] font-semibold inline-flex items-center gap-1 ${v.vote === vote ? (vote === 'up' ? 'bg-accent text-accentInk border-transparent' : 'bg-surface2 text-ink border-line') : 'border-line text-muted'}`}>
+      <Icon name={icon} size={15} />{label}</button>
+  );
+  return (
+    <div className="grid gap-1.5" role="group" aria-label={`סימון ההמלצה ${book.title}`}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[13px] text-muted">ההמלצה הזו:</span>
+        {btn('up', 'ThumbsUp', 'טובה')}{btn('down', 'ThumbsDown', 'לא טובה')}
+      </div>
+      {edit && v.vote && (
+        <form className="flex gap-2 flex-wrap" onSubmit={(e) => { e.preventDefault(); set(v.vote, note.trim()); setEdit(false); onDone && onDone(k); }}>
+          <label htmlFor={'vote-note-' + k} className="sr-only">הערה על ההמלצה</label>
+          <input id={'vote-note-' + k} value={note} onChange={e => setNote(e.target.value)} maxLength={500}
+            placeholder={v.vote === 'down' ? 'מה לא התאים? (רשות, עוזר ללמוד)' : 'מה היה טוב בה? (רשות)'} className="flex-1 min-w-0 min-h-[40px] px-3 rounded-xl border border-line bg-bg text-[15px]" />
+          <Btn variant="soft" type="submit" className="!min-h-[40px]">שמירה</Btn>
+          <button type="button" className="text-[13px] text-muted underline min-h-[40px]" onClick={() => { setEdit(false); onDone && onDone(k); }}>דילוג</button>
+        </form>
+      )}
+      {!edit && v.vote && v.note && <div className="text-[13px] text-muted">"{v.note}" <button type="button" className="text-accent font-semibold underline" onClick={() => setEdit(true)}>עריכה</button></div>}
+    </div>
+  );
+}
+function AllRecsView({ db, update, onPick, digests }) {
+  const items = useMemo(() => {
+    const m = new Map();
+    (db.history || []).forEach(h => (h.recs || []).forEach(r => {
+      const k = recVoteKey(r);
+      if (!m.has(k) || m.get(k).at < h.at) m.set(k, { k, book: r, at: h.at, src: h.answers && h.answers.gift ? 'מצב מתנה' : 'שיחת המלצה', why: (r.reasons || [])[0] || '' });
+    }));
+    (digests || []).forEach(d => (d.books || []).forEach(b => {
+      const bk = digestBook(b, d), k = recVoteKey(bk);
+      if (!m.has(k)) m.set(k, { k, book: bk, at: d.at, src: 'הצעות דו-שבועיות', why: b.why || '' });
+    }));
+    return [...m.values()].sort((a, b) => b.at - a.at);
+  }, [db.history, digests]);
+  // המלצה שסומנה עכשיו נשארת במקומה עד שמסיימים עם ההערה (שמירה או דילוג), ורק אז עוברת לקבוצה שלה
+  const [sticky, setSticky] = useState({});
+  const vote0 = (k) => ((db.recVotes || {})[k] || {}).vote || '';
+  const vote = (k) => k in sticky ? sticky[k] : vote0(k);
+  const stick = (k) => setSticky(x => k in x ? x : { ...x, [k]: vote0(k) });
+  const unstick = (k) => setSticky(x => { const n = { ...x }; delete n[k]; return n; });
+  const good = items.filter(i => vote(i.k) === 'up'), open = items.filter(i => !vote(i.k)), bad = items.filter(i => vote(i.k) === 'down');
+  // פונקציה ולא קומפוננטה: כך השורה לא נבנית מחדש בכל שינוי, ותיבת ההערה נשארת פתוחה
+  const row = (it, muted = false) => {
+    const b = it.book, inLib = findInLibrary(b, db.books);
+    return (
+      <li key={it.k} className={`bg-surface border border-line rounded-xl p-3 grid gap-2 ${muted ? 'opacity-75' : ''}`}>
+        <div className="flex gap-3">
+          <Cover book={b} className="w-12 h-[4.5rem]" />
+          <div className="min-w-0 flex-1">
+            <div className="font-display font-bold text-[16px] leading-snug">{b.title}</div>
+            <div className="text-[14px] text-muted truncate">{[(b.authors || [])[0], b.country, b.year].filter(Boolean).join(' · ')}</div>
+            <div className="text-[12px] text-muted">{fmtDate(it.at)} · {it.src}</div>
+          </div>
+        </div>
+        {it.why && !muted && <p className="text-[14px] font-reading clamp-2">{it.why}</p>}
+        {inLib ? <div className="text-[13px] text-ok font-semibold">{libLabel(inLib)}</div> : !muted && (
+          <div className="flex gap-1.5 flex-wrap">
+            <Chip onClick={() => onPick(b, { status: 'want', fromRec: true })}><Icon name="Bookmark" size={14} />רוצה לקרוא</Chip>
+            <Chip onClick={() => onPick(b, { status: 'reading', fromRec: true })}><Icon name="BookOpen" size={14} />{STATUSES[1][1]}</Chip>
+            <Chip onClick={() => onPick(b)}><Icon name="BookCheck" size={14} />קראתי</Chip>
+          </div>
+        )}
+        <RecVote book={b} db={db} update={update} onVote={stick} onDone={unstick} />
+      </li>
+    );
+  };
+  if (!items.length) return <p className="text-center text-muted py-8">{T('עוד אין המלצות. אחרי השיחה הראשונה, כל ההמלצות יתרכזו כאן.')}</p>;
+  return (
+    <div className="grid gap-4" aria-label="כל ההמלצות">
+      <p className="text-[14px] text-muted">{items.length} המלצות שקיבלת, משיחות ומההצעות הדו-שבועיות. {T('סמנו "טובה" או "לא טובה" (ואם בא לכם, גם למה), וההמלצות הבאות ילמדו מזה.')}</p>
+      {good.length > 0 && <section><h2 className="font-display font-bold text-[18px] mb-2 flex items-center gap-2"><Icon name="ThumbsUp" size={18} className="text-accent" />ההמלצות הטובות ({good.length})</h2><ul className="grid gap-2.5">{good.map(it => row(it))}</ul></section>}
+      {open.length > 0 && <section><h2 className="font-display font-bold text-[18px] mb-2">עוד לא סימנתי ({open.length})</h2><ul className="grid gap-2.5">{open.map(it => row(it))}</ul></section>}
+      {bad.length > 0 && <details className="bg-surface2 rounded-xl p-3">
+        <summary className="cursor-pointer font-semibold text-[15px] text-muted min-h-[36px] flex items-center gap-2"><Icon name="ThumbsDown" size={16} />לא התאימו ({bad.length})</summary>
+        <ul className="grid gap-2 mt-2">{bad.map(it => row(it, true))}</ul>
+      </details>}
+    </div>
+  );
+}
+
 function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
   const digests = useDigest().digests.filter(d => d.books.length);
   // מצב השיחה נשמר מחוץ ללשונית (לכל משתמש): יציאה מהלשונית לא מאפסת את השיחה, והמלצה שרצה ממשיכה ברקע
@@ -4131,7 +4240,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
         candidates, gift,
         books: db.books, request: ans.request, focus: ans.focus, qa, lang, exclude: excludeNow(),
         dismissed: db.dismissed, history: db.history, want: 5, onProgress: progress, ctx: { ans, qa },
-        profile: db.litProfile, profileNote: db.profileNote, rejections: activeRejections(db).concat((db.rejections || []).filter(x => x.note && x.until && x.until <= Date.now())), friendsLoved: friendsLovedTitles(db.books), feedback: db.feedback || [], genreMix: genreMixText(db.books)
+        profile: db.litProfile, profileNote: db.profileNote, rejections: activeRejections(db).concat((db.rejections || []).filter(x => x.note && x.until && x.until <= Date.now())), friendsLoved: friendsLovedTitles(db.books), feedback: db.feedback || [], genreMix: genreMixText(db.books), recVotes: votesForPrompt(db)
       });
       applyRecs(ans, r, interpretation);
     } catch (e) { progress(e.message); }
@@ -4201,18 +4310,19 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
   return (
     <div className="fade-in">
       <PageHero tab="discover" title="גלה ספר חדש" sub={hasAi ? T('ספרו מה בא לכם, בחרו מיקוד, ו-Claude ישאל 2–4 שאלות לדיוק. כל המלצה נבדקת מול המאגרים והחנויות.') : '4 שאלות קצרות. כל המלצה נבדקת מחדש מול המאגר לפני שהיא מוצגת.'} />
-      <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2 mb-4" role="tablist" aria-label="תצוגה">
-        {[['chat', 'שיחה', 'MessageCircle'], ['history', `היסטוריה (${(db.history || []).length})`, 'History']].map(([k, l, ic]) => {
-          const on = k === 'chat' ? view === 'chat' : view !== 'chat';
+      <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-surface2 mb-4" role="tablist" aria-label="תצוגה">
+        {[['chat', 'שיחה', 'MessageCircle'], ['all', 'כל ההמלצות', 'ListChecks'], ['history', `שיחות (${(db.history || []).length})`, 'History']].map(([k, l, ic]) => {
+          const on = k === 'chat' || k === 'all' ? view === k : view !== 'chat' && view !== 'all';
           return (
             <button key={k} type="button" role="tab" aria-selected={on} onClick={() => setView(k)}
-              className={`min-h-[44px] rounded-xl font-semibold text-[15px] inline-flex items-center justify-center gap-1.5 ${on ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}>
-              <Icon name={ic} size={17} />{l}
+              className={`min-h-[44px] rounded-xl font-semibold text-[14px] inline-flex items-center justify-center gap-1 px-1 ${on ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}>
+              <Icon name={ic} size={16} />{l}
             </button>
           );
         })}
       </div>
-      {view !== 'chat' && <HistoryView db={db} update={update} onPick={onPick} notify={notify} openId={view === 'history' ? null : view} setOpenId={(id) => setView(id || 'history')} />}
+      {view === 'all' && <AllRecsView db={db} update={update} onPick={onPick} digests={digests} />}
+      {view !== 'chat' && view !== 'all' && <HistoryView db={db} update={update} onPick={onPick} notify={notify} openId={view === 'history' ? null : view} setOpenId={(id) => setView(id || 'history')} />}
       {view === 'chat' && <>
       {!db.settings.apiKey && !hasAi && (
         <div className="mb-3"><Notice tone="info">בלי מפתח Google Books ההמלצות מגיעות בעיקר מ-Open Library, ויש שם מעט ספרים בעברית. אפשר להוסיף מפתח חינמי בלשונית "הגדרות".</Notice></div>
@@ -4327,7 +4437,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
           <h2 className="font-display font-medium text-[22px] mb-2">ההמלצות שלך</h2>
           <ul className="grid gap-3">
             {recs.map(r => (
-              <RecCard key={r.key} r={r} inLib={findInLibrary(r, db.books)}
+              <RecCard key={r.key} r={r} voteSlot={<RecVote book={r} db={db} update={update} />} inLib={findInLibrary(r, db.books)}
                 onRead={(b) => onPick(b)} onWant={(b, stt = 'want') => onPick(st.answers.gift ? { ...b, presetTags: ['מתנה'] } : b, { status: stt, fromRec: !st.answers.gift })}
                 onEnrich={(e) => { const all = st.recs.map(x => x.key === e.key ? e : x); recSet(st, { recs: all }); if (st.session.id) saveSession(st.answers, lang, all); }}
                 onDismiss={(b) => setRejecting(b)} />
@@ -4528,7 +4638,7 @@ function KnowsAboutMe({ db, update, notify }) {
       <button type="button" onClick={() => setOpen(o => !o)} aria-expanded={open} className="flex items-center gap-2 text-right min-h-[44px]">
         <Icon name="UserSearch" size={20} className="text-accent" />
         <span className="flex-1"><span className="block font-semibold text-[17px]">מה האפליקציה יודעת עליי</span>
-          <span className="block text-[13px] text-muted">{db.books.filter(isRated).length} דירוגים · {notes} הערות · {rej.length} ספרים שנשללו · {fb.length} משובים{db.litProfile ? ' · פרופיל ספרותי' : ''}</span></span>
+          <span className="block text-[13px] text-muted">{db.books.filter(isRated).length} דירוגים · {notes} הערות · {rej.length} ספרים שנשללו · {fb.length} משובים · {Object.values(db.recVotes || {}).filter(v => v.vote).length} סימוני המלצות{db.litProfile ? ' · פרופיל ספרותי' : ''}</span></span>
         <Icon name={open ? 'ChevronUp' : 'ChevronDown'} size={20} className="text-muted" />
       </button>
       {open && <div className="grid gap-3 fade-in">
@@ -4554,6 +4664,7 @@ function KnowsAboutMe({ db, update, notify }) {
           {rej.length ? <ul>{rej.slice(0, 80).map(x => <Row key={x.id} label={x.title} onDel={() => delItem('rejections', x.id)}><b>{x.title}</b>{x.note ? ` · ${x.note}` : ''}<div className="text-[12px] text-muted">{x.until ? `עד ${fmtDate(x.until)}` : 'לתמיד'}</div></Row>)}</ul>
             : <p className="text-[13px] text-muted">אין.</p>}
         </div>
+        <p className="text-[13px] text-muted">הסימונים "טובה / לא טובה" על המלצות (ומה שכתבת עליהן) מנוהלים ב"גלה ספר חדש" ← "כל ההמלצות"; לחיצה חוזרת על הסימון מבטלת אותו.</p>
         <p className="text-[13px] text-muted">עוד: {(db.history || []).length} שיחות המלצה (נמחקות בלשונית "המלצות" ← היסטוריה), והספרים, הדירוגים וההערות שבספרייה.</p>
       </div>}
     </section>
@@ -5640,6 +5751,7 @@ const GUIDE = [
     ['כמה זמן זה לוקח?', 'בדרך כלל דקה-שתיים. אפשר לצאת מהאפליקציה: ההמלצה ממשיכה בשרת, ואפשר לקבל התראה כשהיא מוכנה.'],
     ['למה אפשר לסמוך על ההמלצות?', 'כל ספר שהמודל מציע נבדק מול הספרייה הלאומית, Google Books והחנויות; ספר שלא נמצא נפסל. בכל המלצה מופיעים זמינות (מודפס, דיגיטלי, קולי), קישורים לרכישה וביקורות מאתרים מוכרים.'],
     ['ההמלצות לא מתאימות לי', 'כותבים בתיבה "לא בדיוק זה?" מה לא מתאים, ומקבלים הצעות מעודכנות. על ספר מסוים לוחצים "לא בשבילי" ובוחרים לחודש או לתמיד, עם הערה שמדייקת את הפרופיל.'],
+    ['איפה כל ההמלצות שקיבלתי?', 'בלשונית "גלה ספר חדש" ← "כל ההמלצות": כל ההמלצות מהשיחות ומההצעות הדו-שבועיות. מסמנים "טובה" או "לא טובה", ואפשר להוסיף למה (רשות). הטובות מופיעות למעלה, אלה שלא התאימו מוצנעות בסוף הרשימה, והסימונים מלמדים את ההמלצות הבאות ואת הפרופיל הספרותי.'],
     ['באיזו שפה הספרים?', 'כברירת מחדל רק ספרים שיש להם מהדורה בעברית. אפשר לשנות ל"עברית ואנגלית", "אנגלית" או "כל שפה".'],
     ['מה זה "ספר בשביל מישהו אחר"?', 'מצב מתנה: מתארים את מי שמקבל את הספר, וההמלצה לא נשענת על הטעם שלך ולא משנה אותו. ספר שנשמר נכנס ל"רוצה לקרוא" עם התגית "מתנה".'],
     ['מה זה הפרופיל הספרותי?', 'תקציר של הטעם שלך, שנבנה מהספרים, מהדירוגים ומההערות, ומתעדכן לבד. הוא לוקח בחשבון מתי קראת כל ספר, כדי לזהות לאן הטעם מתפתח. אפשר להוסיף לו הערה משלך.'],

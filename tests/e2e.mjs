@@ -639,6 +639,36 @@ try {
     assert.ok(bookinfoCalls.length > n, 'retry asks the server again');
     await A.keyboard.press('Escape');
   });
+  await step('all recommendations: mark good / not good (with an optional reason), good ones up front, the rest tucked away, and the model learns', async () => {
+    await A.click('nav >> text=גלה ספר חדש');
+    await A.click('button[role=tab]:has-text("כל ההמלצות")');
+    const view = A.locator('[aria-label="כל ההמלצות"]');
+    await view.locator('h2:has-text("עוד לא סימנתי")').waitFor();
+    const remains = view.locator('[role=group][aria-label="סימון ההמלצה The Remains of the Day"]');
+    await remains.locator('button:has-text("לא טובה")').click();
+    await remains.locator('input').fill('רציתי רק ספרים בעברית');
+    await remains.locator('button:has-text("שמירה")').click();
+    await view.locator('summary:has-text("לא התאימו (1)")').waitFor();
+    assert.equal(await view.locator('li:has-text("The Remains of the Day")').first().isVisible(), false, 'not-good recommendation tucked away (not deleted)');
+    const yesh = view.locator('[role=group][aria-label="סימון ההמלצה יש ואין"]').first();
+    await yesh.locator('button[aria-pressed]', { hasText: /^טובה$/ }).click();
+    await yesh.locator('button:has-text("דילוג")').click();   // ההערה רשות
+    await view.locator('h2:has-text("ההמלצות הטובות (1)")').waitFor();
+    await A.waitForTimeout(300); await shot(A, 'all-recs');
+    await syncBoth(); await A.reload();
+    await A.click('nav >> text=גלה ספר חדש'); await A.click('button[role=tab]:has-text("כל ההמלצות")');
+    await A.locator('[aria-label="כל ההמלצות"] h2:has-text("ההמלצות הטובות (1)")').waitFor();
+    await A.locator('[aria-label="כל ההמלצות"] summary:has-text("לא התאימו (1)")').waitFor();
+    // ההמלצה הבאה מקבלת את הסימונים ואת הסיבה
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 'vq', name: 'submit_questions', input: { questions: [] } }], stop: 'tool_use' });
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 'vr', name: 'submit_recommendations', input: { interpretation: 'לומד מהסימונים.', recommendations: [] } }], stop: 'tool_use' });
+    await A.click('button[role=tab]:has-text("שיחה")');
+    if (await A.locator('button:has-text("שאלון חדש")').count()) await A.click('button:has-text("שאלון חדש")');
+    await A.fill('#ai-request', 'משהו חדש'); await A.click('button:has-text("המלצה חכמה")');
+    await A.waitForSelector('text=לומד מהסימונים.', { timeout: 30000 });
+    const jp = jobBodies.at(-1).messages[0].content;
+    assert.ok(jp.includes('EARLIER SUGGESTIONS THE READER MARKED') && jp.includes('רציתי רק ספרים בעברית') && /good: יש ואין/.test(jp), 'marks reach the model');
+  });
   await step('Google Books goes through the family server (shared key + cache)', async () => {
     assert.ok(viaProxy > 0, 'no proxied Google requests');
     assert.equal(direct, 0, `${direct} direct Google requests`);
