@@ -1,13 +1,37 @@
 import { STARTER } from './starter-books.js';
+import { EN } from './i18n-en.js';
+import { STARTER_EN } from './starter-en.js';
 const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+/* ============================================================
+   שפת הממשק: עברית (ברירת מחדל) או אנגלית. נקבעת בכניסה הראשונה ובהגדרות, נשמרת במכשיר (vrt-lang)
+   ובהגדרות המשתמש (settings.uiLang, כדי שהשרת ידע באיזו שפה לכתוב). החלפת שפה טוענת את האפליקציה מחדש.
+   L(text) מחזיר את התרגום; tools/i18n.mjs עוטף בזמן הבנייה את כל הטקסט שבתצוגה, וכאן עוטפים ידנית רק רשימות קבועות.
+   ============================================================ */
+const LANG_KEY = 'vrt-lang';
+const UI_LANG = (() => { try { return localStorage.getItem(LANG_KEY) === 'en' ? 'en' : 'he'; } catch (e) { return 'he'; } })();
+const IS_EN = UI_LANG === 'en';
+// שפות הספרים בהמלצות כברירת מחדל: בממשק אנגלית – אנגלית בלבד; בעברית – עברית ואנגלית
+const DEFAULT_LANGS = IS_EN ? ['en'] : ['he', 'en'];
+function L(text, vars) {
+  let r = text;
+  if (IS_EN && typeof text === 'string') { const k = text.trim(); r = EN[text] ?? EN[k] ?? text; }
+  if (vars && typeof r === 'string') r = r.replace(/\{(\d+)\}/g, (m, i) => (vars[i] ?? ''));
+  // אנגלית: "1 books" → "1 book"
+  if (IS_EN && vars && typeof r === 'string') r = r.replace(/(^|[^\d.,])1 (book|rating|author|candidate|edition|topic|friend|page|genre|countrie|question|recommendation)s\b/g, (m, a, w) => `${a}1 ${w === 'countrie' ? 'country' : w}`);
+  return r;
+}
+function setUiLang(lang) {
+  try { localStorage.setItem(LANG_KEY, lang === 'en' ? 'en' : 'he'); } catch (e) { /* */ }
+}
 
 /* ============================================================
    קבועים
    ============================================================ */
-const DEFAULT_LOCALE = 'he-IL';
+const DEFAULT_LOCALE = IS_EN ? 'en-GB' : 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '37';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '38';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -30,31 +54,31 @@ const TAG_SUBJECTS = {
 };
 
 const MOODS = {
-  thrill: { label: 'מותח וסוחף', en: 'thriller', he: 'מותחן', kw: ['thriller', 'suspense', 'mystery', 'crime', 'detective', 'מתח', 'מותחן', 'בלש', 'פשע'] },
-  light: { label: 'קליל ומצחיק', en: 'humor', he: 'הומור', kw: ['humor', 'humorous', 'comedy', 'comic', 'funny', 'satire', 'הומור', 'מצחיק', 'סאטירה'] },
-  deep: { label: 'מעמיק ומעורר מחשבה', en: 'literary fiction', he: 'ספרות יפה', kw: ['literary', 'philosoph', 'psycholog', 'existential', 'ספרות', 'פילוסופ', 'הגות'] },
-  emotional: { label: 'מרגש ונוגע ללב', en: 'family', he: 'רומן משפחתי', kw: ['family', 'friendship', 'love', 'coming of age', 'grief', 'משפחה', 'חברות', 'אהבה', 'התבגרות'] },
-  imaginative: { label: 'עולמות דמיוניים', en: 'fantasy', he: 'פנטזיה', kw: ['fantasy', 'science fiction', 'magic', 'dystop', 'פנטזיה', 'מדע בדיוני', 'קסם'] },
-  surprise: { label: 'תפתיעו אותי', en: '', he: '', kw: [] }
+  thrill: { label: L('מותח וסוחף'), en: 'thriller', he: 'מותחן', kw: ['thriller', 'suspense', 'mystery', 'crime', 'detective', 'מתח', 'מותחן', 'בלש', 'פשע'] },
+  light: { label: L('קליל ומצחיק'), en: 'humor', he: 'הומור', kw: ['humor', 'humorous', 'comedy', 'comic', 'funny', 'satire', 'הומור', 'מצחיק', 'סאטירה'] },
+  deep: { label: L('מעמיק ומעורר מחשבה'), en: 'literary fiction', he: 'ספרות יפה', kw: ['literary', 'philosoph', 'psycholog', 'existential', 'ספרות', 'פילוסופ', 'הגות'] },
+  emotional: { label: L('מרגש ונוגע ללב'), en: 'family', he: 'רומן משפחתי', kw: ['family', 'friendship', 'love', 'coming of age', 'grief', 'משפחה', 'חברות', 'אהבה', 'התבגרות'] },
+  imaginative: { label: L('עולמות דמיוניים'), en: 'fantasy', he: 'פנטזיה', kw: ['fantasy', 'science fiction', 'magic', 'dystop', 'פנטזיה', 'מדע בדיוני', 'קסם'] },
+  surprise: { label: L('תפתיעו אותי'), en: '', he: '', kw: [] }
 };
 const PACING = {
-  fast: { label: 'מהיר, קשה להניח מהיד', kw: ['thriller', 'action', 'adventure', 'suspense', 'page-turner', 'fast-paced', 'מתח', 'הרפתק', 'מותחן'] },
-  medium: { label: 'מאוזן', kw: [] },
-  slow: { label: 'איטי ומתבשל', kw: ['literary', 'saga', 'contemplative', 'classic', 'ספרות', 'סאגה', 'קלאסי'] },
-  any: { label: 'לא משנה לי', kw: [] }
+  fast: { label: L('מהיר, קשה להניח מהיד'), kw: ['thriller', 'action', 'adventure', 'suspense', 'page-turner', 'fast-paced', 'מתח', 'הרפתק', 'מותחן'] },
+  medium: { label: L('מאוזן'), kw: [] },
+  slow: { label: L('איטי ומתבשל'), kw: ['literary', 'saga', 'contemplative', 'classic', 'ספרות', 'סאגה', 'קלאסי'] },
+  any: { label: L('לא משנה לי'), kw: [] }
 };
 const AVOID = {
-  violence: { label: 'אלימות קשה ואימה', kw: ['horror', 'gore', 'serial killer', 'violent', 'אימה', 'רוצח סדרתי'] },
-  romance: { label: 'רומנטיקה', kw: ['romance', 'romantic', 'רומנטי', 'רומנטיקה'] },
-  speculative: { label: 'מד"ב ופנטזיה', kw: ['fantasy', 'science fiction', 'sci-fi', 'dystop', 'פנטזיה', 'מדע בדיוני'] },
-  war: { label: 'מלחמה ושואה', kw: ['world war', 'wwii', 'military', 'holocaust', 'מלחמה', 'שואה'] },
-  tragedy: { label: 'טרגדיה ועצב כבד', kw: ['tragedy', 'tragic', 'grief', 'bereavement', 'טרגדיה', 'אבל', 'שכול'] }
+  violence: { label: L('אלימות קשה ואימה'), kw: ['horror', 'gore', 'serial killer', 'violent', 'אימה', 'רוצח סדרתי'] },
+  romance: { label: L('רומנטיקה'), kw: ['romance', 'romantic', 'רומנטי', 'רומנטיקה'] },
+  speculative: { label: L('מד"ב ופנטזיה'), kw: ['fantasy', 'science fiction', 'sci-fi', 'dystop', 'פנטזיה', 'מדע בדיוני'] },
+  war: { label: L('מלחמה ושואה'), kw: ['world war', 'wwii', 'military', 'holocaust', 'מלחמה', 'שואה'] },
+  tragedy: { label: L('טרגדיה ועצב כבד'), kw: ['tragedy', 'tragic', 'grief', 'bereavement', 'טרגדיה', 'אבל', 'שכול'] }
 };
 const LENGTHS = {
-  short: { label: 'קצר (עד 250 עמ\')', range: [1, 250] },
-  medium: { label: 'בינוני (250–450 עמ\')', range: [250, 450] },
-  long: { label: 'ארוך (450+ עמ\')', range: [450, 100000] },
-  any: { label: 'לא משנה לי', range: null }
+  short: { label: L('קצר (עד 250 עמ\')'), range: [1, 250] },
+  medium: { label: L('בינוני (250–450 עמ\')'), range: [250, 450] },
+  long: { label: L('ארוך (450+ עמ\')'), range: [450, 100000] },
+  any: { label: L('לא משנה לי'), range: null }
 };
 const JUNK_TITLE = /(summary of|study guide|sparknotes|cliffsnotes|cliff'?s notes|workbook|analysis of|quicklet|book review|סיכום הספר|מדריך למורה)/i;
 
@@ -74,18 +98,18 @@ const dedupeKey = (b) => normTitle(b.title) + '|' + norm((b.authors || [])[0] ||
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const fmtDate = (ts) => { try { return new Date(ts).toLocaleDateString(DEFAULT_LOCALE, { day: 'numeric', month: 'short', year: 'numeric' }); } catch (e) { return ''; } };
 // סטטוסים של ספר: קראתי / קורא עכשיו / רוצה לקרוא / קראתי חלקית
-const STATUSES = [['read', 'קראתי', 'BookCheck'], ['reading', 'קורא עכשיו', 'BookOpen'], ['want', 'רוצה לקרוא', 'Bookmark'], ['partial', 'קראתי חלקית', 'BookX']];
+const STATUSES = [['read', L('קראתי'), 'BookCheck'], ['reading', L('קורא עכשיו'), 'BookOpen'], ['want', L('רוצה לקרוא'), 'Bookmark'], ['partial', L('קראתי חלקית'), 'BookX']];
 // צבע לכל סטטוס (תג בכרטיס הספר)
 const STATUS_COLOR = { read: 'var(--accent)', reading: 'var(--teal)', want: 'var(--brass)', partial: 'var(--rose)' };
-const STATUS_HINT = { read: 'סיימתי, עם דירוג', reading: 'באמצע הספר', want: 'לקרוא בהמשך', partial: 'הפסקתי באמצע' };
+const STATUS_HINT = { read: L('סיימתי, עם דירוג'), reading: L('באמצע הספר'), want: L('לקרוא בהמשך'), partial: L('הפסקתי באמצע') };
 const STATUS_TONE = { reading: 'bg-tealSoft text-teal', want: 'bg-brassSoft text-brass', partial: 'bg-roseSoft text-rose' };
 const statusOf = (b) => (b && ['want', 'reading', 'partial'].includes(b.status)) ? b.status : 'read';
 // ספר שיש בו אות על הטעם (קראתי, או קראתי חלקית עם דירוג)
-const libLabel = (b) => ({ want: 'ברשימת "רוצה לקרוא"', reading: 'בקריאה עכשיו', partial: 'קראת חלקית' }[statusOf(b)] || `כבר בספרייה (${b.rating}★)`);
+const libLabel = (b) => ({ want: L('ברשימת "רוצה לקרוא"'), reading: L('בקריאה עכשיו'), partial: L('קראת חלקית') }[statusOf(b)] || L('כבר בספרייה ({0}★)', [b.rating]));
 const isRated = (b) => statusOf(b) === 'read' || (statusOf(b) === 'partial' && b.rating > 0);
 const fmtMonth = (ts) => { try { return new Date(ts).toLocaleDateString(DEFAULT_LOCALE, { month: 'long', year: 'numeric' }); } catch (e) { return ''; } };
 const fmtDateTime = (ts) => { try { return new Date(ts).toLocaleString(DEFAULT_LOCALE, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; } };
-const langLabel = (l) => ({ iw: 'עברית', he: 'עברית', heb: 'עברית', en: 'אנגלית', eng: 'אנגלית' }[l] || (l ? l.toUpperCase() : ''));
+const langLabel = (l) => ({ iw: L('עברית'), he: L('עברית'), heb: L('עברית'), en: L('אנגלית'), eng: L('אנגלית') }[l] || (l ? l.toUpperCase() : ''));
 
 function cleanText(html) {
   if (!html) return '';
@@ -163,9 +187,9 @@ async function googleFetch(url) {
   catch (e) {
     if (e.status === 429 || e.status === 403) {
       googleState.blockedUntil = Date.now() + 10 * 60 * 1000;
-      googleState.lastError = e.status === 429 ? 'חרגנו ממכסת השאילתות היומית של Google Books' : 'Google Books דחה את הבקשה';
+      googleState.lastError = e.status === 429 ? L('חרגנו ממכסת השאילתות היומית של Google Books') : L('Google Books דחה את הבקשה');
     } else if (!e.status) {
-      googleState.lastError = 'אין חיבור ל-Google Books';
+      googleState.lastError = L('אין חיבור ל-Google Books');
     }
     throw e;
   }
@@ -287,7 +311,7 @@ function groupEditions(list) {
   });
   groups.forEach(g => {
     // הרשומה הראשית: זו עם הכי הרבה מידע (תקציר, כריכה)
-    const info = (c) => (isHebrewEdition(c) ? 3 : 0) + (isIsraeliRecord(c) ? 2.5 : 0) + (hasHebrew(c.description) ? 1.5 : 0) + (c.description ? 2 : 0) + (c.cover ? 1 : 0) + (c.pageCount ? 0.5 : 0) + (c.authors.length ? 1 : 0) + (c.authors.some(hasHebrew) ? 0.5 : 0);
+    const info = (c) => (isUiEdition(c) ? 3 : 0) + (isIsraeliRecord(c) ? 2.5 * IL_W : 0) + (hasHebrew(c.description) ? 1.5 * IL_W : 0) + (c.description ? 2 : 0) + (c.cover ? 1 : 0) + (c.pageCount ? 0.5 : 0) + (c.authors.length ? 1 : 0) + (c.authors.some(hasHebrew) ? 0.5 * IL_W : 0);
     g.main = g.editions.slice().sort((a, b) => info(b) - info(a))[0];
   });
   return groups.slice(0, 10);
@@ -369,15 +393,15 @@ function queryVariants(text, author) {
   const words = clean.split(' ').filter(Boolean);
   const withAuthor = (t) => author ? `${t} inauthor:${author.split(/\s+/).pop()}` : t;
   if (author) {
-    add(`${clean} inauthor:${author.split(/\s+/).pop()}`, `מחבר לפי שם משפחה: ${author.split(/\s+/).pop()}`);
-    add(clean, 'בלי שם המחבר');
+    add(`${clean} inauthor:${author.split(/\s+/).pop()}`, L('מחבר לפי שם משפחה: {0}', [author.split(/\s+/).pop()]));
+    add(clean, L('בלי שם המחבר'));
   } else if (words.length >= 2) {
     for (const k of [1, 2]) {
       if (words.length - k < 1) continue;
       const tEnd = words.slice(0, -k).join(' '), aEnd = words.slice(-k).join(' ');
       const tStart = words.slice(k).join(' '), aStart = words.slice(0, k).join(' ');
-      add(`${tEnd} inauthor:${aEnd}`, `"${tEnd}" מאת ${aEnd}`);
-      add(`${tStart} inauthor:${aStart}`, `"${tStart}" מאת ${aStart}`);
+      add(`${tEnd} inauthor:${aEnd}`, L('"{0}" מאת {1}', [tEnd, aEnd]));
+      add(`${tStart} inauthor:${aStart}`, L('"{0}" מאת {1}', [tStart, aStart]));
     }
   }
   if (hasHebrew(clean)) {
@@ -386,9 +410,9 @@ function queryVariants(text, author) {
       [/(?<=[\u05D0-\u05EA])וו(?=[\u05D0-\u05EA])/g, 'ב'], [/(?<=[\u05D0-\u05EA])ב(?=[\u05D0-\u05EA])/g, 'וו'],
       [/(?<=[\u05D0-\u05EA])י(?=[\u05D0-\u05EA]{2})/g, '']
     ];
-    swaps.forEach(([re, rep]) => { const v = clean.replace(re, rep); if (v !== clean) add(withAuthor(v), `כתיב: ${v}`); });
+    swaps.forEach(([re, rep]) => { const v = clean.replace(re, rep); if (v !== clean) add(withAuthor(v), L('כתיב: {0}', [v])); });
   }
-  if (clean !== text) add(withAuthor(clean), 'בלי סימני פיסוק');
+  if (clean !== text) add(withAuthor(clean), L('בלי סימני פיסוק'));
   return out.slice(0, 8);
 }
 
@@ -396,11 +420,14 @@ function queryVariants(text, author) {
 const isIsraeliRecord = (b) => b.source === 'web' || b.source === 'nli' || (b.isbns || []).some(x => /^(978)?965/.test(String(x).replace(/[^\d]/g, '')));
 const isHebrewEdition = (b) => ['iw', 'he', 'heb'].includes(b.language) || hasHebrew(b.title);
 const isHebrewOrIsraeli = (b) => !!b && (isHebrewEdition(b) || isIsraeliRecord(b));
+// המהדורה שמעדיפים בתוצאות: עברית בממשק עברית, אנגלית בממשק אנגלית
+const isUiEdition = (b) => IS_EN ? ['en', 'eng'].includes(b.language) && !hasHebrew(b.title) : isHebrewEdition(b);
+const IL_W = IS_EN ? 0 : 1;
 function rankByTitle(list, text) {
   const score = (b) => {
     b.match = matchScore(b, text);
     // עדיפות לעברית: מהדורה עברית עולה מעל מהדורה לועזית עם התאמה דומה
-    return b.match * 10 + (isHebrewEdition(b) ? 2 : 0) + (isIsraeliRecord(b) ? 1.5 : 0) + (b.cover ? 0.3 : 0) + (b.description ? 0.3 : 0) + (b.authors.length ? 0.2 : 0);
+    return b.match * 10 + (isUiEdition(b) ? 2 : 0) + (isIsraeliRecord(b) ? 1.5 * IL_W : 0) + (b.cover ? 0.3 : 0) + (b.description ? 0.3 : 0) + (b.authors.length ? 0.2 : 0);
   };
   return list.map((b, i) => ({ b, i, s: score(b) })).sort((x, y) => y.s - x.s || x.i - y.i).map(x => x.b);
 }
@@ -469,7 +496,7 @@ async function bridgeFromWikidata(text, author) {
     if (b) {
       if (w.heTitle && w.heTitle !== b.title) { b.subtitle = b.title; b.title = w.heTitle; }
       if (w.heAuthors.length && hasHebrew(text)) b.authors = w.heAuthors;
-      if (!b.description && wiki && wiki.text) { b.description = wiki.text; b.descSource = 'ויקיפדיה'; }
+      if (!b.description && wiki && wiki.text) { b.description = wiki.text; b.descSource = L('ויקיפדיה'); }
       if (!b.cover && wiki && wiki.thumb) b.cover = wiki.thumb;
       b.isbns = Array.from(new Set((b.isbns || []).concat(w.isbns)));
       b.verifiedVia = 'Open Library + Wikidata';
@@ -481,7 +508,7 @@ async function bridgeFromWikidata(text, author) {
         key: 'wd:' + w.qid, source: 'wikidata', sourceId: w.qid, title,
         subtitle: w.heTitle && w.enTitle && w.heTitle !== w.enTitle ? w.enTitle : '',
         authors: w.heAuthors.length ? w.heAuthors : w.enAuthors, year: w.year,
-        description: (wiki && wiki.text) || '', descSource: wiki && wiki.text ? 'ויקיפדיה' : '',
+        description: (wiki && wiki.text) || '', descSource: wiki && wiki.text ? L('ויקיפדיה') : '',
         categories: [], cover: (wiki && wiki.thumb) || '', pageCount: 0, language: w.heTitle ? 'he' : '',
         isbns: w.isbns, link: (wiki && wiki.url) || ('https://www.wikidata.org/wiki/' + w.qid),
         avgRating: 0, ratingsCount: 0, publisher: '', verifiedVia: 'Wikidata'
@@ -504,9 +531,9 @@ async function nliSearch(params) {
 }
 
 // חנויות והוצאות (דרך השרת): עברית, סטימצקי, צומת ספרים והוצאות הספרים. דף ספר אמיתי שם = הספר קיים
-const STORE_NAMES = { 'e-vrit.co.il': 'עברית', 'steimatzky.co.il': 'סטימצקי', 'booknet.co.il': 'צומת ספרים', 'kinbooks.co.il': 'כנרת זמורה', 'ybook.co.il': 'ידיעות ספרים',
+const STORE_NAMES = Object.fromEntries(Object.entries({ 'e-vrit.co.il': 'עברית (e-vrit)', 'steimatzky.co.il': 'סטימצקי', 'booknet.co.il': 'צומת ספרים', 'kinbooks.co.il': 'כנרת זמורה', 'ybook.co.il': 'ידיעות ספרים',
   'am-oved.co.il': 'עם עובד', 'kibutz-poalim.co.il': 'הקיבוץ המאוחד', 'keter-books.co.il': 'כתר', 'modan.co.il': 'מודן', 'simania.co.il': 'סימניה',
-  '9livespress.com': 'תשע נשמות', 'abayit-books.com': 'הוצאת הבית', 'pardes.co.il': 'פרדס', 'resling.co.il': 'רסלינג' };
+  '9livespress.com': 'תשע נשמות', 'abayit-books.com': 'הוצאת הבית', 'pardes.co.il': 'פרדס', 'resling.co.il': 'רסלינג' }).map(([k, v]) => [k, IS_EN ? L(v) : v.replace(' (e-vrit)', '')]));
 async function storeSearch(title, author) {
   const c = loadCloud();
   if (!c || !title) return [];
@@ -557,7 +584,7 @@ async function searchBooks(input, author) {
     notes.push((googleState.lastError || 'Google Books לא זמין כרגע') + ' — משתמשים ב-Open Library.');
   }
   const nli = await nliP;
-  if (nli.length) { results = mergeByKey(results, nli); sources.add('הספרייה הלאומית'); }
+  if (nli.length) { results = mergeByKey(results, nli); sources.add(L('הספרייה הלאומית')); }
   // ספר עברי שלא נמצא טוב במאגרים: מחפשים בחנויות (שם נמצאים גם ספרים חדשים ומהוצאות קטנות)
   if ((hasHebrew(text) || hasHebrew(author)) && best(results) < 0.75) {
     try {
@@ -610,7 +637,7 @@ async function lookupISBN(isbn) {
   } catch (e) { /* לא נמצא */ }
   try {
     const n = await nliSearch({ isbn });
-    if (n.length) return { candidates: n.slice(0, 5), notes, sources: ['הספרייה הלאומית'] };
+    if (n.length) return { candidates: n.slice(0, 5), notes, sources: [L('הספרייה הלאומית')] };
   } catch (e) { /* לא נמצא */ }
   notes.push(`לא נמצא ספר עם ISBN ${isbn} באף מקור. ${T('בדקו את המספר או חפשו לפי שם.')}`);
   return { candidates: [], notes, sources: [] };
@@ -640,7 +667,7 @@ async function resolveLink(url) {
   const isbn = extractISBN(decodeURIComponent(url.pathname + url.search));
   if (isbn) {
     const r = await lookupISBN(isbn);
-    r.notes = notes.concat(['זוהה ISBN ' + isbn + ' מתוך הקישור.'], r.notes);
+    r.notes = notes.concat([L('זוהה ISBN {0} מתוך הקישור.', [isbn])], r.notes);
     return r;
   }
   notes.push('לא הצלחנו לחלץ מזהה ספר מהקישור. נתמכים: Google Books, Open Library, או כל קישור שמכיל ISBN (למשל חנויות ספרים). אפשר גם לחפש לפי שם.');
@@ -683,7 +710,7 @@ async function lookupHebrewTitle(b) {
 /* ============================================================
    שכבת אחסון: localStorage + IndexedDB
    ============================================================ */
-const emptyDB = () => ({ version: SCHEMA_VERSION, books: [], tagLibrary: DEFAULT_TAGS.slice(), dismissed: [], settings: { theme: 'system', apiKey: '', recLang: 'both', recLangs: ['he', 'en'] }, history: [], tombstones: { books: {}, history: {}, misc: {} }, updatedAt: 0, lastBackupAt: 0 });
+const emptyDB = () => ({ version: SCHEMA_VERSION, books: [], tagLibrary: DEFAULT_TAGS.slice(), dismissed: [], settings: { theme: 'system', apiKey: '', recLang: IS_EN ? 'en' : 'both', recLangs: DEFAULT_LANGS.slice(), uiLang: UI_LANG }, history: [], tombstones: { books: {}, history: {}, misc: {} }, updatedAt: 0, lastBackupAt: 0 });
 
 function sanitizeBook(b) {
   if (!b || typeof b !== 'object' || !b.title || !b.key) return null;
@@ -988,7 +1015,7 @@ async function syncNow() {
     }
     setSyncStatus({ status: 'ok', lastAt: Date.now(), error: '' });
   } catch (e) {
-    setSyncStatus({ status: 'error', error: 'אין חיבור לשרת. הנתונים שמורים בטלפון ויסתנכרנו כשיחזור החיבור.' });
+    setSyncStatus({ status: 'error', error: L('אין חיבור לשרת. הנתונים שמורים בטלפון ויסתנכרנו כשיחזור החיבור.') });
   } finally {
     SYNC.running = false;
     if (SYNC.again) { SYNC.again = false; setTimeout(syncNow, 400); }
@@ -1062,11 +1089,11 @@ async function aiClient() {
 }
 const WEB_TOOLS = [{ type: 'web_search_20260209', name: 'web_search' }, { type: 'web_fetch_20260209', name: 'web_fetch' }];
 function describeBlock(b) {
-  if (b.type === 'server_tool_use' && b.name === 'web_search') return 'מחפש: ' + ((b.input && b.input.query) || '');
+  if (b.type === 'server_tool_use' && b.name === 'web_search') return L('מחפש: {0}', [(b.input && b.input.query) || '']);
   if (b.type === 'server_tool_use' && b.name === 'web_fetch') {
-    try { return 'קורא: ' + new URL(b.input.url).hostname.replace(/^www\./, ''); } catch (e) { return 'קורא מקור'; }
+    try { return L('קורא: {0}', [new URL(b.input.url).hostname.replace(/^www\./, '')]); } catch (e) { return L('קורא מקור'); }
   }
-  if (b.type === 'thinking' && b.thinking) return 'חושב: ' + b.thinking.replace(/\s+/g, ' ').slice(0, 160) + (b.thinking.length > 160 ? '…' : '');
+  if (b.type === 'thinking' && b.thinking) return L('חושב:') + ' ' + b.thinking.replace(/\s+/g, ' ').slice(0, 160) + (b.thinking.length > 160 ? '…' : '');
   return '';
 }
 // אחרי מעבר למודל גיבוי באמצע תשובה, בלוקים פנימיים שלפני נקודת המעבר לא נשלחים חזרה
@@ -1113,7 +1140,7 @@ async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', 
       if (e instanceof Anthropic.RateLimitError) throw new Error(T('הגעתם למגבלת השימוש היומית ב-AI, או שהשירות עמוס. נסו שוב מאוחר יותר.'));
       if (e instanceof Anthropic.APIError) {
         const detail = (e.error && e.error.error && e.error.error.message) || e.message || '';
-        throw new Error('השירות החזיר שגיאה (' + (e.status || '') + '). ' + detail.slice(0, 140));
+        throw new Error(L('השירות החזיר שגיאה ({0}).', [e.status || '']) + ' ' + detail.slice(0, 140));
       }
       throw new Error(T('אין חיבור לשרת המשפחתי. בדקו אינטרנט ונסו שוב.'));
     }
@@ -1132,10 +1159,14 @@ async function aiRun({ system, prompt, submitTool, web = true, effort = 'high', 
   }
   throw new Error(T('המודל לא סיים לעבוד. נסו שוב.'));
 }
-const HEBREW_OUT = 'Write every free-text field in Hebrew (except original-language titles and author names in their original form).';
+// שפת הטקסט שהמודל כותב: שפת הממשק
+const OUT_LANG = IS_EN ? 'English' : 'Hebrew';
+const HEBREW_OUT = IS_EN
+  ? 'Write every free-text field in English (book titles and author names as they appear in the edition you name).'
+  : 'Write every free-text field in Hebrew (except original-language titles and author names in their original form).';
 // לשון פנייה בעברית, לפי בחירת המשתמש (הגדרות)
-const ADDRESS_FORMS = [['f', 'לשון נקבה'], ['m', 'לשון זכר'], ['n', 'לשון רבים / ניטרלי']];
-const addressRule = (a) => ({
+const ADDRESS_FORMS = [['f', L('לשון נקבה')], ['m', L('לשון זכר')], ['n', L('לשון רבים / ניטרלי')]];
+const addressRule = (a) => IS_EN ? '' : ({
   f: ' Address the reader in Hebrew in the feminine singular (את, אהבת, תאהבי).',
   m: ' Address the reader in Hebrew in the masculine singular (אתה, אהבת, תאהב).',
   n: ' Address the reader in Hebrew in a gender-neutral way (plural forms or impersonal phrasing).'
@@ -1158,6 +1189,7 @@ const PLURAL_FORMS = {
 // מילים שכתובות בזכר יחיד (למשל דוגמאות בשדות טקסט): בלשון נקבה מחליפים
 const MASC_FORMS = { 'אוהב': 'אוהבת', 'מתחבר': 'מתחברת', 'מחפש': 'מחפשת', 'תקרא': 'תקראי', 'שאתה': 'שאת', 'אתה': 'את', 'קורא': 'קוראת', 'מוכן': 'מוכנה', 'תאהב': 'תאהבי', 'קורא/ת': 'קוראת', 'ממליץ': 'ממליצה', 'ממליץ…': 'ממליצה…' };
 function T(text) {
+  if (IS_EN) return L(text);
   if (ADDR === 'n' || !text) return text;
   return String(text).replace(/[א-ת/]+/g, (w) => {
     const pl = PLURAL_FORMS[w];
@@ -1168,10 +1200,10 @@ function T(text) {
   });
 }
 // שלוש צורות מפורשות, כשהמשפט לא מתאים להחלפת מילים
-const gx = (m, f, n) => ADDR === 'f' ? f : ADDR === 'm' ? m : n;
+const gx = (m, f, n) => IS_EN ? L(n) : ADDR === 'f' ? f : ADDR === 'm' ? m : n;
 function setAddr(a) {
   ADDR = a === 'f' || a === 'm' ? a : 'n';
-  STATUSES[1][1] = ADDR === 'f' ? 'קוראת עכשיו' : 'קורא עכשיו';
+  if (!IS_EN) STATUSES[1][1] = ADDR === 'f' ? 'קוראת עכשיו' : 'קורא עכשיו';
 }
 
 // 1. פסקה חופשית ← רשימת ספרים
@@ -1185,7 +1217,7 @@ async function aiExtractBooks(paragraph) {
       input_schema: { type: 'object', additionalProperties: false, required: ['books'], properties: {
         books: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['title', 'author', 'note'], properties: {
           title: { type: 'string' }, author: { type: 'string', description: 'empty string if unknown' },
-          note: { type: 'string', description: 'what the reader said about it, in Hebrew; empty if nothing' } } } } } }
+          note: { type: 'string', description: `what the reader said about it, in ${OUT_LANG}; empty if nothing` } } } } } }
     }
   });
   return { books: (input.books || []).filter(b => b.title), cost };
@@ -1214,8 +1246,8 @@ async function aiResolveBook(text, author, onProgress) {
   }
   return {
     candidates: found, sources: ['Claude + ' + uniq(found.map(f => f.source === 'google' ? 'Google Books' : f.source === 'openlibrary' ? 'Open Library' : f.source === 'web' || f.source === 'nli' ? f.verifiedVia : 'Wikidata')).join(' + ')],
-    notes: found.length ? [] : ['גם הזיהוי החכם לא מצא ספר שאפשר לאמת במאגרים.'],
-    tried: (input.candidates || []).map(c => `${c.title}${c.author ? ' מאת ' + c.author : ''}`), cost
+    notes: found.length ? [] : [L('גם הזיהוי החכם לא מצא ספר שאפשר לאמת במאגרים.')],
+    tried: (input.candidates || []).map(c => c.author ? L('"{0}" מאת {1}', [c.title, c.author]) : c.title), cost
   };
 }
 
@@ -1322,7 +1354,7 @@ async function verifyPage(url, title, author) {
 // 3. השלמת תקציר, ז'אנרים וזמינות מהמקורות
 const FORMAT_SCHEMA = { type: 'object', additionalProperties: false, required: ['print', 'ebook', 'audiobook', 'notes'], properties: {
   print: { type: 'string', enum: ['yes', 'no', 'unknown'] }, ebook: { type: 'string', enum: ['yes', 'no', 'unknown'] },
-  audiobook: { type: 'string', enum: ['yes', 'no', 'unknown'] }, notes: { type: 'string', description: 'where, in Hebrew (e.g. e-vrit, Storytel)' } } };
+  audiobook: { type: 'string', enum: ['yes', 'no', 'unknown'] }, notes: { type: 'string', description: `where, in ${OUT_LANG} (e.g. e-vrit, Storytel, Audible)` } } };
 const SOURCES_SCHEMA = { type: 'array', items: { type: 'object', additionalProperties: false, required: ['title', 'url'], properties: { title: { type: 'string' }, url: { type: 'string' } } } };
 async function aiBookDetails(book, onProgress) {
   const { input, cost } = await aiRun({
@@ -1332,7 +1364,7 @@ async function aiBookDetails(book, onProgress) {
     submitTool: {
       name: 'submit_details', description: 'Return what the sources say about this book.',
       input_schema: { type: 'object', additionalProperties: false, required: ['synopsis_he', 'genres', 'formats', 'sources'], properties: {
-        synopsis_he: { type: 'string', description: 'the official synopsis, translated to Hebrew if needed; empty if not found' },
+        synopsis_he: { type: 'string', description: `the official synopsis, translated to ${OUT_LANG} if needed; empty if not found` },
         genres: { type: 'array', items: { type: 'string' } }, formats: FORMAT_SCHEMA, sources: SOURCES_SCHEMA } }
     }
   });
@@ -1343,9 +1375,10 @@ async function aiBookDetails(book, onProgress) {
 async function aiTranslate(text) {
   const { input, cost } = await aiRun({
     web: false, fast: true,
-    system: 'Translate the book synopsis into natural, literary Hebrew. Keep names of people and places in their common Hebrew spelling. Do not add or remove content.',
+    system: IS_EN ? 'Translate the book synopsis into natural, literary English. Keep names of people and places in their common English spelling. Do not add or remove content.'
+      : 'Translate the book synopsis into natural, literary Hebrew. Keep names of people and places in their common Hebrew spelling. Do not add or remove content.',
     prompt: text,
-    submitTool: { name: 'submit_translation', description: 'Return the Hebrew translation.',
+    submitTool: { name: 'submit_translation', description: `Return the ${OUT_LANG} translation (in the field "hebrew").`,
       input_schema: { type: 'object', additionalProperties: false, required: ['hebrew'], properties: { hebrew: { type: 'string' } } } }
   });
   return { text: input.hebrew || '', cost };
@@ -1394,21 +1427,21 @@ function historyForPrompt(history, books) {
 }
 // ההעדפות מהשאלון המשולב, כטקסט למודל
 const FOCUS = {
-  mood: { label: 'מצב רוח', multi: true, options: Object.entries(MOODS).filter(([k]) => k !== 'surprise').map(([k, v]) => [k, v.label]) },
-  genre: { label: "ז'אנר", multi: true, options: STARTER.map(g => [g.tag, g.genre]) },
-  origin: { label: 'מקור', options: [['il', 'ספרות ישראלית'], ['tr', 'ספרות מתורגמת']] },
-  fame: { label: 'מוכר או פנינה', options: [['known', 'ספרים מוכרים ואהובים'], ['gems', 'פנינים פחות מוכרות']] },
-  era: { label: 'תקופה', options: [['new', 'חדשים (5 השנים האחרונות)'], ['modern', 'מודרני (1950–2000)'], ['classic', 'קלאסי (לפני 1950)']] },
-  pacing: { label: 'קצב', options: Object.entries(PACING).map(([k, v]) => [k, v.label]) },
-  length: { label: 'אורך', options: Object.entries(LENGTHS).map(([k, v]) => [k, v.label]) },
-  format: { label: 'פורמט', multi: true, options: [['print', 'מודפס'], ['ebook', 'דיגיטלי'], ['audio', 'קולי']] },
-  avoid: { label: 'בלי', multi: true, options: Object.entries(AVOID).map(([k, v]) => [k, v.label]) }
+  mood: { label: L('מצב רוח'), multi: true, options: Object.entries(MOODS).filter(([k]) => k !== 'surprise').map(([k, v]) => [k, v.label]) },
+  genre: { label: L("ז'אנר"), multi: true, options: STARTER.map(g => [g.tag, L(g.genre)]) },
+  origin: { label: L('מקור'), options: [['il', L('ספרות ישראלית')], ['tr', L('ספרות מתורגמת')]] },
+  fame: { label: L('מוכר או פנינה'), options: [['known', L('ספרים מוכרים ואהובים')], ['gems', L('פנינים פחות מוכרות')]] },
+  era: { label: L('תקופה'), options: [['new', L('חדשים (5 השנים האחרונות)')], ['modern', L('מודרני (1950–2000)')], ['classic', L('קלאסי (לפני 1950)')]] },
+  pacing: { label: L('קצב'), options: Object.entries(PACING).map(([k, v]) => [k, v.label]) },
+  length: { label: L('אורך'), options: Object.entries(LENGTHS).map(([k, v]) => [k, v.label]) },
+  format: { label: L('פורמט'), multi: true, options: [['print', L('מודפס')], ['ebook', L('דיגיטלי')], ['audio', L('קולי')]] },
+  avoid: { label: L('בלי'), multi: true, options: Object.entries(AVOID).map(([k, v]) => [k, v.label]) }
 };
 function focusSummary(focus) {
   return Object.entries(FOCUS).map(([id, f]) => {
     const v = focus && focus[id];
     const keys = Array.isArray(v) ? v : v ? [v] : [];
-    const labels = keys.map(k => (f.options.find(o => o[0] === k) || [])[1]).filter(Boolean).filter(l => l !== 'לא משנה' && l !== 'לא משנה לי');
+    const labels = keys.map(k => (f.options.find(o => o[0] === k) || [])[1]).filter(Boolean).filter(l => l !== L('לא משנה') && l !== L('לא משנה לי'));
     return labels.length ? `${f.label}: ${labels.join(', ')}` : '';
   }).filter(Boolean);
 }
@@ -1431,17 +1464,17 @@ async function aiClarify({ books, request, focus, profile, avoid = [], count = 0
 
 // מאיזו מדינה הספר: לפי המדינה שהסופר/ת מזוהה/ת איתה. נקבע ברקע ע"י המודל המהיר, פעם אחת לכל סופר
 // בלי מודל: רק ספר מתויג 'ספרות ישראלית' (תרגום לעברית נראה כמו מקור עברי, כולל שם הסופר, ולכן לא מנחשים לפי שפה)
-const guessCountry = (b) => (b.tags || []).includes('ספרות ישראלית') ? 'ישראל' : '';
+const guessCountry = (b) => (b.tags || []).includes('ספרות ישראלית') ? L('ישראל') : '';
 async function aiCountries(authors) {
   const { input } = await aiRun({
     fast: true, web: false,
-    system: 'For each author, give the country they are mainly identified with as a writer (usually their country of citizenship or where they write), as the common Hebrew name of the country (e.g. ישראל, ארצות הברית, יפן, בריטניה, צרפת, רוסיה). Use the country as it is called today. If you are not sure who the author is, return an empty string.',
+    system: `For each author, give the country they are mainly identified with as a writer (usually their country of citizenship or where they write), as the common ${OUT_LANG} name of the country (e.g. ${IS_EN ? 'Israel, United States, Japan, United Kingdom, France, Russia' : 'ישראל, ארצות הברית, יפן, בריטניה, צרפת, רוסיה'}). Use the country as it is called today. If you are not sure who the author is, return an empty string.`,
     prompt: authors.map(a => '- ' + a).join('\n'),
     submitTool: { name: 'submit_countries', description: 'Return the country for each author.',
       input_schema: { type: 'object', additionalProperties: false, required: ['items'], properties: { items: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['author', 'country_he'], properties: { author: { type: 'string' }, country_he: { type: 'string' } } } } } } }
   });
   const out = {};
-  (input.items || []).forEach(x => { if (x && x.author && x.country_he && hasHebrew(x.country_he)) out[x.author] = x.country_he.trim().slice(0, 40); });
+  (input.items || []).forEach(x => { if (x && x.author && x.country_he && (IS_EN || hasHebrew(x.country_he))) out[x.author] = x.country_he.trim().slice(0, 40); });
   return out;
 }
 const countryMixText = (books) => {
@@ -1452,14 +1485,14 @@ const countryMixText = (books) => {
 const REC_TOOL = {
   name: 'submit_recommendations', description: 'Return the final recommendations.',
   input_schema: { type: 'object', additionalProperties: false, required: ['interpretation', 'recommendations'], properties: {
-    interpretation: { type: 'string', description: 'one or two sentences in Hebrew: how you understood the reader and the request' },
+    interpretation: { type: 'string', description: `one or two sentences in ${OUT_LANG}: how you understood the reader and the request` },
     recommendations: { type: 'array', items: { type: 'object', additionalProperties: false,
       required: ['title_he', 'title_original', 'author', 'isbn', 'why', 'genres'], properties: {
         title_he: { type: 'string', description: 'exact title of a Hebrew edition you know exists; empty if none. Never translate a title yourself.' },
         title_original: { type: 'string' }, author: { type: 'string' }, isbn: { type: 'string', description: 'only if sure, else empty' },
         candidate: { type: 'integer', description: 'the number of the book in CANDIDATES, or 0 for a book of your own' },
         why: { type: 'string' }, genres: { type: 'array', items: { type: 'string' } },
-        country: { type: 'string', description: 'the country the book comes from (the author\'s country), in Hebrew' } } } } } }
+        country: { type: 'string', description: `the country the book comes from (the author's country), in ${OUT_LANG}` } } } } } }
 };
 REC_TOOL.input_schema.properties.recommendations.items.required.push('candidate', 'country');
 
@@ -1497,13 +1530,13 @@ async function buildCandidates(db, focus = {}, limit = 30, lang = 'he') {
   const jobs = topAuthors.map(([a, w]) => (googleAvailable() ? googleSearch(`inauthor:"${a}"`, { lang: heOnly || hasHebrew(a) ? 'iw' : undefined, max: 15 }) : Promise.resolve([])).catch(() => []).then(list => {
     const sur = norm(a).split(' ').pop();
     list.filter(c => (c.authors || []).some(x => norm(x).includes(sur)) && !owned(c) && c.title).slice(0, 6).forEach(c =>
-      add({ book: c }, 2 + w * 0.5 + (isHebrewEdition(c) ? 1 : 0) + (isIsraeliRecord(c) ? 0.5 : 0) + eraOk(c.year), `סופר/ת שאהבת: ${a}`));
+      add({ book: c }, 2 + w * 0.5 + (isHebrewEdition(c) ? 1 : 0) + (isIsraeliRecord(c) ? 0.5 : 0) + eraOk(c.year), L('סופר/ת שאהבת: {0}', [a])));
   }));
   // 2. חברים
   try {
     const s = loadSocial(); const rel = friendsOf(s.items, ACTIVE.id);
     const fr = [...rel.entries()].filter(([, x]) => x.status === 'accepted').map(([p]) => p);
-    lovedBy(fr, books).slice(0, 15).forEach(x => add({ book: x.book }, 1.5 + x.fans.length + (x.fans[0] ? (x.fans[0].rating - 4) : 0) + eraOk(x.book.year), x.fans.length ? `חברים אהבו (${x.fans.length})` : 'חברים רוצים לקרוא'));
+    lovedBy(fr, books).slice(0, 15).forEach(x => add({ book: x.book }, 1.5 + x.fans.length + (x.fans[0] ? (x.fans[0].rating - 4) : 0) + eraOk(x.book.year), x.fans.length ? L('חברים אהבו ({0})', [x.fans.length]) : L('חברים רוצים לקרוא')));
   } catch (e) { /* בלי חברים */ }
   // 3. ז'אנרים אהובים מתוך רשימת הספרים המוכרים (+ ז'אנר שנבחר במיקוד)
   const gs = genreStats(books).filter(x => GENRE_OF_TAG[x.tag] && x.count >= 1).map(x => ({ tag: x.tag, w: (x.sum / x.count) - 3 + Math.min(x.count, 10) / 10 }));
@@ -1513,7 +1546,7 @@ async function buildCandidates(db, focus = {}, limit = 30, lang = 'he') {
     const g = STARTER.find(x => x.tag === tag);
     if (!g) return;
     g.books.filter(b => !owned({ title: b[0], authors: [b[1]] }) && !(b[2] && owned({ title: b[2], authors: [b[1]] })))
-      .slice(0, 8).forEach(b => add({ seed: b, genre: tag }, 1 + w + (focusG.has(tag) ? 2 : 0), focusG.has(tag) ? `הז'אנר שביקשת: ${g.genre}` : T(`ז'אנר שאתה אוהב: ${g.genre}`)));
+      .slice(0, 8).forEach(b => add({ seed: b, genre: tag }, 1 + w + (focusG.has(tag) ? 2 : 0), focusG.has(tag) ? L("הז'אנר שביקשת: {0}", [L(g.genre)]) : T(`ז'אנר שאתה אוהב: ${L(g.genre)}`)));
   });
   await withTimeout(Promise.all(jobs), 8000).catch(() => {});
   return [...out.values()].sort((a, b) => b.score - a.score).slice(0, limit);
@@ -1525,7 +1558,9 @@ const slimCandidate = (c) => ({ title: c.title, author: c.author, signals: c.sig
 const PROFILE_TOOL = {
   name: 'submit_profile', description: 'Return the literary profile.',
   input_schema: { type: 'object', additionalProperties: false, required: ['profile_he', 'brief_en'], properties: {
-    profile_he: { type: 'string', description: 'the reader\'s literary profile in Hebrew, 130-240 words, as short labelled lines: אוהב/ת, פחות מתחבר/ת, סופרים, נושאים ורגש, סגנון וקצב, התפתחות לאורך הזמן (מה קרא/ה פעם לעומת לאחרונה), מה לא להציע' },
+    profile_he: { type: 'string', description: IS_EN
+      ? 'the reader\'s literary profile in English, 130-240 words, as short labelled lines: Loves, Connects less with, Authors, Themes and emotion, Style and pace, How the taste has evolved (earlier reading versus lately), What not to suggest'
+      : 'the reader\'s literary profile in Hebrew, 130-240 words, as short labelled lines: אוהב/ת, פחות מתחבר/ת, סופרים, נושאים ורגש, סגנון וקצב, התפתחות לאורך הזמן (מה קרא/ה פעם לעומת לאחרונה), מה לא להציע' },
     brief_en: { type: 'string', description: 'the same profile compressed for another model, in English, at most 120 words, dense and specific' } } }
 };
 // עדכון של תקציר/קישורים בלבד (editedAt ≈ detailsAt) לא נחשב שינוי בטעם
@@ -1571,7 +1606,7 @@ function recRequest(opts) {
 }
 function recRequestBase({ books, request, focus, qa, lang, exclude, dismissed, history, want, profile, profileNote, rejections = [], friendsLoved = [], feedback = [], genreMix = '', candidates = [], giftFor = false, recVotes = '' }) {
   const candBlock = candidates.length ? `\n\nCANDIDATES (real books already found in the catalogues for this reader, with the signals that surfaced them). Prefer choosing from these by number when they fit the request; you may add up to 2 books of your own (candidate 0):\n${candidates.map(candidateLine).join('\n')}` : '';
-  const langText = { he: 'Hebrew only. Recommend ONLY books that have a published Hebrew edition (original Hebrew or translated to Hebrew), and give its exact Hebrew title in title_he. Books without a Hebrew edition are dropped automatically, so do not suggest them', en: 'English only', both: 'Hebrew or English editions', any: 'any language', auto: 'Hebrew or English' }[lang] || 'Hebrew or English';
+  const langText = { he: 'Hebrew only. Recommend ONLY books that have a published Hebrew edition (original Hebrew or translated to Hebrew), and give its exact Hebrew title in title_he. Books without a Hebrew edition are dropped automatically, so do not suggest them', en: 'English only. Recommend books that have a published English edition (original English or translated into English), and give its English title in title_original', both: 'Hebrew or English editions', any: 'any language', auto: 'Hebrew or English' }[lang] || 'Hebrew or English';
   const excludeTitles = uniq([...books.map(b => b.title), ...exclude, ...(history || []).flatMap(h => (h.recs || []).map(r => r.title))]).slice(0, 300);
   const prefs = focusSummary(focus);
   const read = books.filter(isRated), wish = books.filter(b => ['want', 'reading'].includes(statusOf(b)) && !(b.tags || []).includes('מתנה'));   // ספרי מתנה לא מעידים על הטעם שלי
@@ -1610,10 +1645,10 @@ async function startJob({ system, prompt, submitTool, effort }) {
   const c = loadCloud();
   const r = await fetch(c.url + '/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
     model: AI_MODEL, max_tokens: 16000, thinking: { type: 'adaptive' }, output_config: { effort }, system,
-    tools: [{ ...submitTool, strict: true }], messages: [{ role: 'user', content: prompt }], submit: submitTool.name, pid: ACTIVE.id
+    tools: [{ ...submitTool, strict: true }], messages: [{ role: 'user', content: prompt }], submit: submitTool.name, pid: ACTIVE.id, lang: UI_LANG
   }) });
   if (r.status === 429) throw new Error(T('הגעתם למגבלת השימוש היומית ב-AI. נסו שוב מחר.'));
-  if (!r.ok) throw new Error('השרת לא הצליח להתחיל את ההמלצה (' + r.status + ').');
+  if (!r.ok) throw new Error(L('השרת לא הצליח להתחיל את ההמלצה ({0}).', [r.status]));
   return (await r.json()).id;
 }
 async function pollJob(id, onProgress) {
@@ -1747,7 +1782,7 @@ function useBookDetails(book, onPatch, { auto = true } = {}) {
 async function fetchReviews(book) {
   const c = loadCloud();
   if (!c) return null;
-  return fetchJSON(c.url + '/reviews?' + new URLSearchParams({ title: book.title || '', author: (book.authors || [])[0] || '', original: book.original || book.subtitle || '' }), 40000);
+  return fetchJSON(c.url + '/reviews?' + new URLSearchParams({ title: book.title || '', author: (book.authors || [])[0] || '', original: book.original || book.subtitle || '', ...(IS_EN ? { lang: 'en' } : {}) }), 40000);
 }
 async function enrichRec(rec) {
   const [info, rv] = await Promise.all([fetchBookInfo(rec).catch(() => null), fetchReviews(rec).catch(() => null)]);
@@ -1845,16 +1880,15 @@ const langOk = (c, lang) => {
   if (lang === 'both') return ['iw', 'he', 'heb', 'en', 'eng'].includes(c.language);
   return true;
 };
-const REC_LANGS = [['he', 'עברית'], ['both', 'עברית ואנגלית'], ['en', 'אנגלית'], ['any', 'כל שפה'], ['auto', 'אוטומטי']];
+const REC_LANGS = [['he', L('עברית')], ['both', L('עברית ואנגלית')], ['en', L('אנגלית')], ['any', L('כל שפה')], ['auto', L('אוטומטי')]];
 // שפות הספרים בהמלצות: עברית / אנגלית / שפות זרות אחרות (אפשר כמה). ברירת המחדל: עברית ואנגלית
-const LANG_TOGGLES = [['he', 'עברית'], ['en', 'אנגלית'], ['other', 'שפות זרות']];
-const DEFAULT_LANGS = ['he', 'en'];
+const LANG_TOGGLES = [['he', L('עברית')], ['en', L('אנגלית')], ['other', L('שפות זרות')]];
 function langsOf(settings = {}) {
   if (Array.isArray(settings.recLangs) && settings.recLangs.length) return settings.recLangs.filter(x => ['he', 'en', 'other'].includes(x));
   return { he: ['he'], en: ['en'], both: ['he', 'en'], any: ['he', 'en', 'other'] }[settings.recLang] || DEFAULT_LANGS.slice();
 }
 const langCode = (langs) => { const s = new Set(langs); return s.has('other') ? 'any' : s.has('he') && s.has('en') ? 'both' : s.has('en') ? 'en' : 'he'; };
-const langsLabel = (langs) => LANG_TOGGLES.filter(([k]) => langs.includes(k)).map(([, l]) => l).join(' ו');
+const langsLabel = (langs) => LANG_TOGGLES.filter(([k]) => langs.includes(k)).map(([, l]) => l).join(IS_EN ? ' and ' : ' ו');
 function LangToggles({ value, onChange, label }) {
   const toggle = (k) => { const n = value.includes(k) ? value.filter(x => x !== k) : [...value, k]; if (n.length) onChange(LANG_TOGGLES.map(([x]) => x).filter(x => n.includes(x))); };
   return (
@@ -1894,7 +1928,7 @@ function scoreCandidate(c, prof, answers) {
   if (lengthFit(c, answers) === true) s += 1;
   if (c.cover) s += 0.5;
   if (c.description) s += 0.5;
-  if (isHebrewEdition(c)) s += 1.5;
+  if (isUiEdition(c)) s += 1.5;
   if (c.avgRating >= 4) s += 0.5;
   if (c.ratingsCount) s += Math.min(1, Math.log10(c.ratingsCount + 1) / 3);
   return s;
@@ -1940,7 +1974,7 @@ function explain(c, prof, answers) {
   const catHit = c.hits.find(h => h.kind === 'category');
   if (catHit) {
     const titles = Array.from(new Set(catHit.sig.books.map(b => b.title))).slice(0, 2);
-    out.push(`באותה קטגוריה (${catHit.sig.name}) כמו ${titles.map(q).join(' ו-')} שאהבת`);
+    out.push(`באותה קטגוריה (${catHit.sig.name}) כמו ${titles.map(q).join(L(' ו-'))} שאהבת`);
   }
   const tagHit = c.hits.find(h => h.kind === 'tag');
   if (tagHit) {
@@ -2016,7 +2050,10 @@ async function recommend({ books, answers, lang, exclude, dismissed, want = 5, o
    רכיבי ממשק בסיסיים
    ============================================================ */
 const toCamel = (k) => k.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-function Icon({ name, size = 20, className = '', strokeWidth = 2, style }) {
+// חצים וחצי-כיוון מתהפכים בממשק אנגלית (שמאל-לימין): "קדימה" בעברית הוא שמאלה
+const ICON_FLIP = { ChevronLeft: 'ChevronRight', ChevronRight: 'ChevronLeft', ArrowLeft: 'ArrowRight', ArrowRight: 'ArrowLeft', ChevronsLeft: 'ChevronsRight', ChevronsRight: 'ChevronsLeft' };
+function Icon({ name: rawName, size = 20, className = '', strokeWidth = 2, style }) {
+  const name = IS_EN ? ICON_FLIP[rawName] || rawName : rawName;
   const lib = window.lucide && window.lucide.icons;
   const node = lib && lib[name];
   if (!node) return <span aria-hidden="true" className={'inline-block ' + className} style={{ width: size, height: size }} />;
@@ -2044,7 +2081,7 @@ function Stars({ value, onChange, size = 22, label }) {
     );
   }
   return (
-    <div role="radiogroup" aria-label={label || 'דירוג'} className="flex items-center gap-1" dir="rtl" onMouseLeave={() => setHover(0)}>
+    <div role="radiogroup" aria-label={label || 'דירוג'} className="flex items-center gap-1" onMouseLeave={() => setHover(0)}>
       {[1, 2, 3, 4, 5].map(n => (
         <button key={n} type="button" role="radio" aria-checked={value === n} aria-label={`${n} כוכבים`}
           onClick={() => onChange(n)} onMouseEnter={() => setHover(n)}
@@ -2072,10 +2109,10 @@ function Cover({ book, className = 'w-16 h-24' }) {
 
 function SourceBadge({ book }) {
   const SITE_NAMES = STORE_NAMES;
-  const src = SITE_NAMES[book.verifiedVia] || book.verifiedVia || (book.source === 'google' ? 'Google Books' : book.source === 'openlibrary' ? 'Open Library' : book.source === 'wikidata' ? 'Wikidata' : 'מקור');
+  const src = SITE_NAMES[book.verifiedVia] || book.verifiedVia || (book.source === 'google' ? 'Google Books' : book.source === 'openlibrary' ? 'Open Library' : book.source === 'wikidata' ? 'Wikidata' : L('מקור חיצוני'));
   return (
     <span className="inline-flex items-center gap-1 text-[12px] font-semibold px-2 py-0.5 rounded-full bg-accentSoft text-accent">
-      <Icon name="ShieldCheck" size={13} /> מאומת · {src}
+      <Icon name="ShieldCheck" size={13} /> מאומת · {L(src)}
     </span>
   );
 }
@@ -2185,7 +2222,7 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose, initialStatus 
     if (t && !tags.includes(t)) setTags([...tags, t]);
     setDraft('');
   };
-  const ratingText = ['', 'לא אהבתי', 'פחות התחברתי', 'סביר', 'אהבתי', 'אהבתי מאוד'][rating];
+  const ratingText = ['', L('לא אהבתי'), L('פחות התחברתי'), L('סביר'), L('אהבתי'), L('אהבתי מאוד')][rating];
   return (
     <Sheet open={!!book} onClose={onClose} title={existing ? 'עריכת דירוג ותגיות' : 'דירוג ותיוג'}>
       <div className="flex gap-3 items-start mb-4">
@@ -2202,7 +2239,7 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose, initialStatus 
           const on = status === k, c = STATUS_COLOR[k];
           return (
             <button key={k} type="button" role="tab" aria-selected={on} onClick={() => setStatus(k)}
-              className={`min-h-[64px] rounded-xl border-2 text-right px-3 py-2 flex items-center gap-2.5 transition-all ${on ? 'shadow-md' : 'border-line bg-surface'}`}
+              className={`min-h-[64px] rounded-xl border-2 text-start px-3 py-2 flex items-center gap-2.5 transition-all ${on ? 'shadow-md' : 'border-line bg-surface'}`}
               style={on ? { borderColor: c, background: `color-mix(in srgb, ${c} 12%, var(--surface))` } : undefined}>
               <span className="w-9 h-9 rounded-xl grid place-items-center shrink-0" style={{ color: on ? '#fff' : c, background: on ? c : `color-mix(in srgb, ${c} 13%, transparent)` }}><Icon name={ic} size={18} /></span>
               <span className="min-w-0"><span className="block font-bold text-[15px] leading-tight">{l}</span>
@@ -2231,8 +2268,8 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose, initialStatus 
       <fieldset className="mb-4">
         <legend className="text-[13px] font-semibold tracking-wide text-muted mb-2">תגיות</legend>
         <div className="flex flex-wrap gap-2 mb-3">
-          {suggested.map(t => <Chip key={t} active={tags.includes(t)} onClick={() => toggle(t)}>{t}</Chip>)}
-          {tags.filter(t => !suggested.includes(t)).map(t => <Chip key={t} active onClick={() => toggle(t)}>{t}</Chip>)}
+          {suggested.map(t => <Chip key={t} active={tags.includes(t)} onClick={() => toggle(t)}>{L(t)}</Chip>)}
+          {tags.filter(t => !suggested.includes(t)).map(t => <Chip key={t} active onClick={() => toggle(t)}>{L(t)}</Chip>)}
         </div>
         <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); addDraft(); }}>
           <label htmlFor="new-tag" className="sr-only">תגית חדשה</label>
@@ -2261,8 +2298,12 @@ function RateSheet({ book, existing, tagLibrary, onSave, onClose, initialStatus 
 /* ---------- היכרות ראשונה: סימון ספרים מוכרים ---------- */
 // צבע לכל ז'אנר (נגיעת צבע בכרטיסים)
 const GENRE_HUES = ['#3446B0', '#B5534A', '#14897F', '#7A4FC2', '#2E8BD6', '#4E8A3E', '#D4506C', '#A8660F', '#5B5F6B', '#1F7A9E', '#8A4F9E', '#C06A2B', '#2D8C6A', '#D4506C', '#DF8A1F'];
-const STARTER_RATINGS = [[5, 'אהבתי'], [3, 'בסדר'], [2, 'פחות']];
+const STARTER_RATINGS = [[5, L('אהבתי')], [3, L('בסדר')], [2, L('פחות')]];
 const STARTER_KEY = (b) => b[0] + '|' + b[1];
+// בממשק אנגלית: שם הספר והמחבר באנגלית (src/starter-en.js); המפתח נשאר העברי
+const stEn = (b) => IS_EN ? STARTER_EN[STARTER_KEY(b)] || null : null;
+const stTitle = (b) => (stEn(b) || b)[0];
+const stAuthor = (b) => (stEn(b) || b)[1];
 // חפיסה אחת לפי ז'אנרים; "ז'אנר הבא" קופץ לתחילת הז'אנר הבא
 const STARTER_DECK = STARTER.flatMap((g, gi) => g.books.map(b => [b, gi]));
 const GENRE_START = STARTER.map((_, gi) => STARTER_DECK.findIndex(x => x[1] === gi));
@@ -2283,7 +2324,7 @@ function starterCover(b) {
   if (typeof hit === 'string' && hit) return Promise.resolve(hit);
   if (hit && typeof hit === 'object' && Date.now() - hit.miss < 7 * 864e5) return Promise.resolve('');
   if (coverPending[k]) return coverPending[k];
-  const [title, author, original] = b;
+  const [title, author, original] = stEn(b) ? [stEn(b)[0], stEn(b)[1], b[2]] : b;
   const surname = (author || '').split(' ').pop();
   coverPending[k] = (async () => {
     let url = '', failed = false;
@@ -2352,7 +2393,7 @@ function StarterCover({ b, className }) {
   if (url && !bad) return <img src={url} alt="" className={`object-contain ${className}`} onError={() => setBad(true)} referrerPolicy="no-referrer" draggable="false" />;
   return (
     <div className={`bg-accentSoft text-accent grid place-items-center text-center p-3 ${className}`} aria-hidden="true">
-      {done ? <span className="font-display font-medium text-[18px] leading-snug">{b[0]}</span> : <Spinner />}
+      {done ? <span className="font-display font-medium text-[18px] leading-snug">{stTitle(b)}</span> : <Spinner />}
     </div>
   );
 }
@@ -2389,7 +2430,7 @@ function SwipeCard({ b, gi, onSwipe, top }) {
   const x = gone ? gone * 480 : dx;
   const hint = x > 30 ? 'read' : x < -30 ? 'unread' : '';
   return (
-    <div role={top ? 'group' : undefined} aria-label={top ? `${b[0]}, ${b[1]}` : undefined} aria-hidden={top ? undefined : 'true'}
+    <div role={top ? 'group' : undefined} aria-label={top ? `${stTitle(b)}, ${stAuthor(b)}` : undefined} aria-hidden={top ? undefined : 'true'}
       onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
       className={`absolute inset-0 bg-surface border border-line rounded-2xl shadow-md overflow-hidden select-none flex flex-col ${top ? 'cursor-grab' : 'scale-[.96] translate-y-2 opacity-70'}`}
       style={top ? { transform: `translateX(${x}px) rotate(${x / 22}deg)`, transition: drag.current ? 'none' : 'transform .18s ease-out', touchAction: 'pan-y' } : undefined}>
@@ -2401,9 +2442,9 @@ function SwipeCard({ b, gi, onSwipe, top }) {
         )}
       </div>
       <div className="px-4 py-3 text-center">
-        <div className="font-display font-medium text-[21px] leading-snug">{b[0]}</div>
-        <div className="text-muted text-[14px]">{b[1]}{b[2] && b[2] !== b[0] ? <> · <bdi>{b[2]}</bdi></> : null}</div>
-        <div className="text-[12.5px] mt-0.5 font-semibold" style={{ color: GENRE_HUES[gi % GENRE_HUES.length] }}>{STARTER[gi].genre}</div>
+        <div className="font-display font-medium text-[21px] leading-snug">{stTitle(b)}</div>
+        <div className="text-muted text-[14px]">{stAuthor(b)}{!IS_EN && b[2] && b[2] !== b[0] ? <> · <bdi>{b[2]}</bdi></> : null}</div>
+        <div className="text-[12.5px] mt-0.5 font-semibold" style={{ color: GENRE_HUES[gi % GENRE_HUES.length] }}>{L(STARTER[gi].genre)}</div>
       </div>
     </div>
   );
@@ -2440,7 +2481,7 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
   const count = Object.values(picks).filter(p => !owned(p.b)).length;
   const wantCount = Object.values(picks).filter(p => p.want && !owned(p.b)).length;
   const nq = norm(q);
-  const found = nq ? STARTER_DECK.filter(([b]) => norm(b.join(' ')).includes(nq)) : [];
+  const found = nq ? STARTER_DECK.filter(([b]) => norm([...b, ...(stEn(b) || [])].join(' ')).includes(nq)) : [];
 
   // true = קראתי, false = לא קראתי, 'want' = רוצה לקרוא
   const swipe = (read) => {
@@ -2452,7 +2493,7 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
     const no = (state.no || []).filter(x => x !== k).concat(read ? [] : [k]);
     save({ pos: idx + 1, picks: n, no, trail: [...trail, idx].slice(-50) });
     setRateKey(read === true ? k : '');
-    setLast({ title: b[0], read });
+    setLast({ title: stTitle(b), read });
   };
   const undo = () => {
     if (!trail.length) return;
@@ -2486,20 +2527,21 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
     const added = [], queued = [];
     const one = async ({ b, gi, rating, want }) => {
       const [title, author, original] = b;
+      const en = stEn(b);   // ממשק אנגלית: קודם המהדורה האנגלית, ואם אין – העברית או המקור
       let best = null;
-      for (const [t, a] of [[title, author], original ? [original, ''] : null].filter(Boolean)) {
+      for (const [t, a] of [en ? [en[0], en[1]] : null, [title, author], original ? [original, ''] : null].filter(Boolean)) {
         const res = await searchBooks(t, a).catch(() => null);
         const c = res && res.candidates[0];
-        if (c && (c.match >= 0.6 || matchScore(c, `${title} ${author}`) >= 0.6 || (original && matchScore(c, original) >= 0.6))) { best = c; break; }
+        if (c && (c.match >= 0.6 || matchScore(c, `${title} ${author}`) >= 0.6 || (original && matchScore(c, original) >= 0.6) || (en && matchScore(c, en[0]) >= 0.6))) { best = c; break; }
       }
       if (best) {
-        best = withHebrewTitle(best, title);
+        if (!IS_EN) best = withHebrewTitle(best, title);
         if (!best.cover) best.cover = coverCacheGet()[STARTER_KEY(b)] || '';
       }
       if (best && !findInLibrary(best, db.books) && !findInLibrary(best, added)) {
         const now = Date.now();
         added.push(sanitizeBook({ ...best, id: uid(), status: want ? 'want' : 'read', rating: want ? 0 : rating, tags: [STARTER[gi].tag], addedAt: now, editedAt: now, verifiedAt: now }));
-      } else if (!best) queued.push({ id: uid(), raw: title, title, author: author || '', rating: want ? 0 : rating, want: !!want, note: '', status: 'pending', savedTitle: '' });
+      } else if (!best) queued.push({ id: uid(), raw: en ? en[0] : title, title: en ? en[0] : title, author: (en ? en[1] : author) || '', rating: want ? 0 : rating, want: !!want, note: '', status: 'pending', savedTitle: '' });
       setProg(p => ({ ...p, done: p.done + 1, added: added.length, queued: queued.length }));
     };
     for (let i = 0; i < entries.length; i += 3) await Promise.all(entries.slice(i, i + 3).map(one));
@@ -2546,7 +2588,7 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
         <span className="absolute top-1/2 -translate-y-1/2 right-3 text-muted"><Icon name="Search" size={18} /></span>
         <label htmlFor="starter-q" className="sr-only">חיפוש ברשימה</label>
         <input id="starter-q" value={q} onChange={e => setQ(e.target.value)} placeholder="מחפשים ספר מסוים? שם או סופר"
-          className="w-full min-h-[46px] pr-10 pl-3 rounded-xl border border-line bg-surface text-[16px]" />
+          className="w-full min-h-[46px] ps-10 pe-3 rounded-xl border border-line bg-surface text-[16px]" />
       </div>
       {nq ? (
         <ul className="grid gap-1.5">
@@ -2558,10 +2600,10 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
               <li key={STARTER_KEY(b)} className={`bg-surface border rounded-xl px-3 py-2.5 flex items-center gap-2 ${pick ? 'border-accent' : 'border-line'} ${have ? 'opacity-60' : ''}`}>
                 <StarterCover b={b} className="w-10 h-14 rounded shrink-0 text-[0px]" />
                 <div className="flex-1 min-w-0">
-                  <div className="font-display font-medium text-[17px] leading-snug">{b[0]}</div>
-                  <div className="text-muted text-[13px] truncate">{b[1]} · {STARTER[gi].genre}</div>
+                  <div className="font-display font-medium text-[17px] leading-snug">{stTitle(b)}</div>
+                  <div className="text-muted text-[13px] truncate">{stAuthor(b)} · {L(STARTER[gi].genre)}</div>
                 </div>
-                {have ? <span className="shrink-0 text-[13px] text-muted">כבר בספרייה</span> : <div className="flex gap-1 shrink-0" role="group" aria-label={`דירוג ${b[0]}`}>
+                {have ? <span className="shrink-0 text-[13px] text-muted">כבר בספרייה</span> : <div className="flex gap-1 shrink-0" role="group" aria-label={`דירוג ${stTitle(b)}`}>
                   {STARTER_RATINGS.map(([r, l]) => (
                     <button key={r} type="button" aria-pressed={!!(pick && pick.rating === r)} onClick={() => togglePick(b, gi, r)}
                       className={`min-h-[36px] px-2.5 rounded-lg border text-[13px] ${pick && pick.rating === r ? 'bg-accentSoft text-accent border-accent font-semibold' : 'border-line text-muted'}`}>{l}</button>
@@ -2598,8 +2640,8 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
             </div>
           )}
           {rated ? (
-            <div className="fade-in bg-surface border border-line rounded-xl p-2.5 grid gap-2" role="group" aria-label={`דירוג ${rated.b[0]}`}>
-              <div className="text-[14px] text-center">איך היה <span className="font-semibold">{rated.b[0]}</span>? <span className="text-muted">(לא חובה)</span></div>
+            <div className="fade-in bg-surface border border-line rounded-xl p-2.5 grid gap-2" role="group" aria-label={`דירוג ${stTitle(rated.b)}`}>
+              <div className="text-[14px] text-center">איך היה <span className="font-semibold">{stTitle(rated.b)}</span>? <span className="text-muted">(לא חובה)</span></div>
               <div className="flex gap-1.5 justify-center">
                 {STARTER_RATINGS.map(([r, l]) => (
                   <button key={r} type="button" onClick={() => rate(rateKey, r)}
@@ -2609,7 +2651,7 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
             </div>
           ) : (
             <div className="flex justify-between items-center text-[13px] text-muted px-1">
-              <span className="tabular">{STARTER[cur[1]].genre} · {inGenre[0]} מתוך {inGenre[1]}</span>
+              <span className="tabular">{L(STARTER[cur[1]].genre)} · {L('{0} מתוך {1}', [inGenre[0], inGenre[1]])}</span>
               <span className="tabular">קראתי {count - wantCount} · רוצה {wantCount} · לא {(state.no || []).length}</span>
             </div>
           )}
@@ -2632,13 +2674,13 @@ function AiDetailsButton({ book, onUpdate }) {
   const [st, setSt] = useState({ busy: false, msg: '', err: '' });
   if (!aiAvailable()) return null;
   const run = async () => {
-    setSt({ busy: true, msg: 'מחפש במקורות…', err: '' });
+    setSt({ busy: true, msg: L('מחפש במקורות…'), err: '' });
     try {
       const r = await aiBookDetails(book, (m) => setSt(x => ({ ...x, msg: m })));
       const patch = { aiFormats: r.formats, genres: r.genres, sources: r.sources };
       // לא שומרים תקציר שהמודל ניסח: רק תקציר רשמי מהמאגרים או מדף הספר בחנות/בהוצאה
       onUpdate(patch);
-      setSt({ busy: false, msg: `עודכן. עלות משוערת: $${r.cost.toFixed(2)}`, err: '' });
+      setSt({ busy: false, msg: L('עודכן. עלות משוערת: ${0}', [r.cost.toFixed(2)]), err: '' });
     } catch (e) { setSt({ busy: false, msg: '', err: e.message }); }
   };
   return (
@@ -2724,7 +2766,7 @@ function LibraryStats({ books, onSummary }) {
         <div className="text-[13px] font-semibold text-muted mb-1.5">לפי ז'אנר</div>
         <ul className="grid gap-1.5">{gs.map(x => (
           <li key={x.tag} className="grid grid-cols-[7.5rem_1fr_auto] items-center gap-2 text-[13px]">
-            <span className="truncate">{GENRE_OF_TAG[x.tag] || x.tag}</span>
+            <span className="truncate">{L(GENRE_OF_TAG[x.tag] || x.tag)}</span>
             <span className="h-2.5 rounded-full bg-surface2 overflow-hidden"><span className="block h-full rounded-full" style={{ width: `${(x.count / max) * 100}%`, background: x.tag === 'לא מסווג' ? 'var(--muted)' : GENRE_HUES[tagIndex(x.tag) % GENRE_HUES.length] }} /></span>
             <span className="tabular text-muted">{x.count} · {(x.sum / x.count).toFixed(1)}★</span>
           </li>))}</ul>
@@ -2848,7 +2890,7 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
             className={`shelf-tab min-h-[46px] rounded-xl font-semibold text-[14px] inline-flex items-center justify-start gap-2 px-3 border-2 bg-surface text-ink ${shelf === k ? '' : 'border-line'}`}
             style={shelf === k ? { borderColor: STATUS_COLOR[k], background: `color-mix(in srgb, ${STATUS_COLOR[k]} 9%, var(--surface))` } : undefined}>
             <span className="w-7 h-7 rounded-lg grid place-items-center shrink-0" style={{ color: STATUS_COLOR[k], background: `color-mix(in srgb, ${STATUS_COLOR[k]} 13%, transparent)` }}><Icon name={ic} size={16} /></span>
-            <span className="flex-1 text-right truncate">{l}</span><span className="tabular text-[13px] text-muted">{byShelf(k).length}</span>
+            <span className="flex-1 text-start truncate">{l}</span><span className="tabular text-[13px] text-muted">{byShelf(k).length}</span>
           </button>
         ))}
       </div>
@@ -2857,7 +2899,7 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
           <span className="absolute top-1/2 -translate-y-1/2 right-3 text-muted"><Icon name="Search" size={18} /></span>
           <label htmlFor="lib-search" className="sr-only">חיפוש בספרייה</label>
           <input id="lib-search" value={q} onChange={e => setQ(e.target.value)} placeholder="חיפוש לפי שם, מחבר או תגית"
-            className="w-full min-h-[48px] pr-10 pl-3 rounded-xl border border-line bg-surface text-[16px]" />
+            className="w-full min-h-[48px] ps-10 pe-3 rounded-xl border border-line bg-surface text-[16px]" />
         </div>
         <div className="flex rounded-xl border border-line bg-surface overflow-hidden shrink-0" role="group" aria-label="תצוגה">
           {[['list', 'List', 'תצוגת רשימה'], ['grid', 'LayoutGrid', 'תצוגת קוביות']].map(([k, ic, l]) => (
@@ -2877,14 +2919,14 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
       {allTags.length > 0 && (
         <div className="flex gap-2 overflow-x-auto pb-2 mb-2 -mx-4 px-4" role="group" aria-label="סינון לפי תגית">
           <Chip active={!tag} onClick={() => setTag('')} className="shrink-0">הכל</Chip>
-          {allTags.map(([t, n]) => <Chip key={t} active={tag === t} onClick={() => setTag(tag === t ? '' : t)} className="shrink-0">{t} <span className="tabular opacity-70">{n}</span></Chip>)}
+          {allTags.map(([t, n]) => <Chip key={t} active={tag === t} onClick={() => setTag(tag === t ? '' : t)} className="shrink-0">{L(t)} <span className="tabular opacity-70">{n}</span></Chip>)}
         </div>
       )}
       {layout === 'grid' ? (
         <ul className="grid grid-cols-3 gap-x-3 gap-y-4" aria-label="הספרים בקוביות">
           {list.map(b => (
             <li key={b.id}>
-              <button type="button" onClick={() => { setOpen(b.id); setConfirmDel(false); }} className="w-full text-right grid gap-1.5 active:scale-[.98] transition-transform">
+              <button type="button" onClick={() => { setOpen(b.id); setConfirmDel(false); }} className="w-full text-start grid gap-1.5 active:scale-[.98] transition-transform">
                 <span className="relative block">
                   <Cover book={b} className="w-full aspect-[2/3] h-auto rounded-lg" />
                   {!(statusOf(b) === 'read' || b.rating > 0)
@@ -2902,15 +2944,15 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
         {list.map(b => (
           <li key={b.id} className="relative">
             <button type="button" onClick={() => { setOpen(b.id); setConfirmDel(false); }}
-              className="w-full text-right flex gap-3 p-3 bg-surface border border-line rounded-xl active:bg-surface2 transition-colors overflow-hidden relative">
-              <span aria-hidden="true" className="absolute right-0 inset-y-0 w-1 opacity-60" style={{ background: spineColor(b) }} />
+              className="w-full text-start flex gap-3 p-3 bg-surface border border-line rounded-xl active:bg-surface2 transition-colors overflow-hidden relative">
+              <span aria-hidden="true" className="absolute start-0 inset-y-0 w-1 opacity-60" style={{ background: spineColor(b) }} />
               <Cover book={b} className="w-14 h-20" />
               <div className="min-w-0 flex-1">
                 <div className="font-display font-medium text-[17px] leading-snug clamp-2">{b.title}</div>
-                <div className="text-muted text-[14px] truncate">{[b.authors.join(', '), b.country, b.year].filter(Boolean).join(' · ')}</div>
+                <div className="text-muted text-[14px] truncate">{[b.authors.join(', '), L(b.country), b.year].filter(Boolean).join(' · ')}</div>
                 {statusOf(b) === 'read' || b.rating > 0 ? <div className="mt-1"><Stars value={b.rating} size={15} /></div>
                   : <div className={`mt-1 text-[12px] font-semibold inline-flex items-center gap-1 px-2 py-0.5 rounded-full ${STATUS_TONE[statusOf(b)] || ''}`}><Icon name={(STATUSES.find(x => x[0] === statusOf(b)) || [])[2]} size={13} />{(STATUSES.find(x => x[0] === statusOf(b)) || [])[1]}</div>}
-                {b.tags.length > 0 && <div className="flex flex-wrap gap-1 mt-1.5">{b.tags.slice(0, 4).map(t => <span key={t} className="text-[12px] px-2 py-0.5 rounded-full bg-surface2 text-muted font-semibold">{t}</span>)}{b.tags.length > 4 && <span className="text-[12px] text-muted">+{b.tags.length - 4}</span>}</div>}
+                {b.tags.length > 0 && <div className="flex flex-wrap gap-1 mt-1.5">{b.tags.slice(0, 4).map(t => <span key={t} className="text-[12px] px-2 py-0.5 rounded-full bg-surface2 text-muted font-semibold">{L(t)}</span>)}{b.tags.length > 4 && <span className="text-[12px] text-muted">+{b.tags.length - 4}</span>}</div>}
               </div>
             </button>
             {statusOf(b) === 'reading' && <button type="button" onClick={() => onEdit(b)} aria-label={`סיימתי את ${b.title}`}
@@ -2933,7 +2975,7 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
               <div className="mt-2">{statusOf(current) === 'read' ? <Stars value={current.rating} size={18} /> : <span className="text-accent font-semibold inline-flex items-center gap-1"><Icon name={(STATUSES.find(x => x[0] === statusOf(current)) || [])[2]} size={15} />{(STATUSES.find(x => x[0] === statusOf(current)) || [])[1]}{current.rating > 0 ? ` · ${current.rating}★` : ''}</span>}</div>
             </div>
           </div>
-          <div className="flex flex-wrap gap-1.5 mb-3"><SourceBadge book={current} />{current.tags.map(t => <span key={t} className="text-[13px] px-2 py-0.5 rounded-full bg-surface2 font-semibold">{t}</span>)}</div>
+          <div className="flex flex-wrap gap-1.5 mb-3"><SourceBadge book={current} />{current.tags.map(t => <span key={t} className="text-[13px] px-2 py-0.5 rounded-full bg-surface2 font-semibold">{L(t)}</span>)}</div>
           <BookDetailsBody key={current.id} book={current} onUpdateBook={onUpdateBook} notify={notify} />
           {current.note && (
             <div className="mb-3 rounded-xl bg-surface2 p-2.5">
@@ -2962,7 +3004,7 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
    לשונית: הוספת ספר
    ============================================================ */
 function metaLine(c) {
-  return [c.publisher, c.year, c.pageCount ? c.pageCount + ' עמ\'' : '', langLabel(c.language)].filter(Boolean).join(' · ');
+  return [c.publisher, c.year, c.pageCount ? c.pageCount + L(' עמ\'') : '', langLabel(c.language)].filter(Boolean).join(' · ');
 }
 
 function EditionRow({ ed, main, onPick, disabled }) {
@@ -2973,7 +3015,7 @@ function EditionRow({ ed, main, onPick, disabled }) {
         {normTitle(ed.title) !== normTitle(main.title) && <div className="font-semibold text-[14px] truncate">{ed.title}</div>}
         {ed.authors.length > 0 && ed.authors.join(',') !== main.authors.join(',') && <div className="text-muted truncate">{ed.authors.join(', ')}</div>}
         <div className="tabular">{metaLine(ed) || 'פרטי הדפסה לא צוינו'}</div>
-        {ed.isbns && ed.isbns[0] && <div className="text-muted tabular" dir="ltr" style={{ textAlign: 'right' }}>ISBN {ed.isbns[0]}</div>}
+        {ed.isbns && ed.isbns[0] && <div className="text-muted tabular" dir="ltr" style={{ textAlign: IS_EN ? 'left' : 'right' }}>ISBN {ed.isbns[0]}</div>}
       </div>
       <button type="button" disabled={disabled} onClick={() => onPick(withWorkInfo(ed, main))}
         className="shrink-0 min-h-[44px] px-3 rounded-xl border border-accent text-accent font-semibold text-[14px] disabled:opacity-40">בחירה</button>
@@ -3033,19 +3075,19 @@ function Synopsis({ book, onChange, className = '', status = '', onRetry }) {
   return (
     <div className={className}>
       {book.descSource && !he && <div className="text-[12px] font-semibold text-muted mb-0.5">תקציר מ{book.descSource}</div>}
-      {srcBusy && !hasHebrew(orig) && <div className="text-[12px] text-muted mb-0.5 inline-flex items-center gap-1"><Spinner size={12} />מחפש את התקציר העברי מההוצאה…</div>}
+      {srcBusy && !IS_EN && !hasHebrew(orig) && <div className="text-[12px] text-muted mb-0.5 inline-flex items-center gap-1"><Spinner size={12} />מחפש את התקציר העברי מההוצאה…</div>}
       {he && !showOrig && <div className="text-[12px] font-semibold text-muted mb-0.5">תרגום מכונה (AI) של התקציר הרשמי</div>}
       <p ref={ref} dir="auto" className={`font-reading whitespace-pre-line ${expanded ? '' : 'clamp-4'}`}>{text}</p>
       <div className="flex flex-wrap gap-x-4 gap-y-0">
         {(overflow || expanded || looksCut || book.source === 'google') && (
-          <button type="button" className="text-accent font-semibold text-[14px] min-h-[40px]" onClick={expand}>{expanded ? 'פחות' : 'לתקציר המלא'}</button>
+          <button type="button" className="text-accent font-semibold text-[14px] min-h-[40px]" onClick={expand}>{expanded ? 'לתקציר הקצר' : 'לתקציר המלא'}</button>
         )}
-        {!hasHebrew(orig) && !he && aiAvailable() && (
+        {(IS_EN ? hasHebrew(orig) : !hasHebrew(orig)) && !he && aiAvailable() && (
           <button type="button" className="text-accent font-semibold text-[14px] min-h-[40px] inline-flex items-center gap-1" disabled={tr.busy} onClick={translate}>
-            {tr.busy ? <Spinner size={14} /> : <Icon name="Languages" size={15} />}תרגום מכונה לעברית
+            {tr.busy ? <Spinner size={14} /> : <Icon name="Languages" size={15} />}{IS_EN ? 'Machine translation into English' : 'תרגום מכונה לעברית'}
           </button>
         )}
-        {he && <button type="button" className="text-muted font-semibold text-[14px] min-h-[40px]" onClick={() => setShowOrig(!showOrig)}>{showOrig ? 'הצגת העברית' : 'הצגת המקור'}</button>}
+        {he && <button type="button" className="text-muted font-semibold text-[14px] min-h-[40px]" onClick={() => setShowOrig(!showOrig)}>{showOrig ? (IS_EN ? 'Show the English' : 'הצגת העברית') : 'הצגת המקור'}</button>}
       </div>
       {tr.err && <p className="text-[13px] text-danger">{tr.err}</p>}
     </div>
@@ -3129,11 +3171,11 @@ function CandidateGroup({ group, inLib, onPick, autoDetails = false }) {
 function useSmartSearch(onResult) {
   const [st, setSt] = useState({ busy: false, msg: '', err: '' });
   const run = async (text, author) => {
-    setSt({ busy: true, msg: 'Claude מנסה לזהות את הספר…', err: '' });
+    setSt({ busy: true, msg: L('Claude מנסה לזהות את הספר…'), err: '' });
     try {
       const res = await aiResolveBook(text, author, (m) => setSt(x => ({ ...x, msg: m })));
       onResult(res);
-      setSt({ busy: false, msg: `עלות משוערת: $${res.cost.toFixed(2)}`, err: '' });
+      setSt({ busy: false, msg: L('עלות משוערת: ${0}', [res.cost.toFixed(2)]), err: '' });
     } catch (e) { setSt({ busy: false, msg: '', err: e.message }); }
   };
   return [st, run];
@@ -3222,14 +3264,14 @@ function SingleSearch({ db, onPick, goSettings }) {
           <span className="absolute top-1/2 -translate-y-1/2 right-3 text-muted"><Icon name={mode === 'link' ? 'Link' : mode === 'isbn' ? 'ScanBarcode' : 'Search'} size={20} /></span>
           <input id="book-q" value={text} onChange={e => setText(e.target.value)} autoComplete="off" enterKeyHint="search"
             placeholder="למשל: סיפור על אהבה וחושך / Project Hail Mary"
-            className="w-full min-h-[54px] pr-11 pl-3 rounded-xl border border-line bg-surface text-[17px]" />
+            className="w-full min-h-[54px] ps-11 pe-3 rounded-xl border border-line bg-surface text-[17px]" />
         </div>
         {mode !== 'text' && <p className="text-[13px] text-accent font-semibold">{mode === 'link' ? 'זוהה קישור: נאמת אותו ישירות מול המקור' : 'זוהה ISBN: נחפש מהדורה מדויקת'}</p>}
         {mode === 'text' && (showAuthor
           ? <><label htmlFor="book-author" className="sr-only">שם המחבר</label>
               <input id="book-author" value={author} onChange={e => setAuthor(e.target.value)} placeholder="שם המחבר (לדיוק החיפוש)"
                 className="w-full min-h-[48px] px-3 rounded-xl border border-line bg-surface text-[16px]" /></>
-          : <button type="button" className="text-accent font-semibold text-[14px] text-right min-h-[36px]" onClick={() => setShowAuthor(true)}>+ צמצום לפי מחבר</button>)}
+          : <button type="button" className="text-accent font-semibold text-[14px] text-start min-h-[36px]" onClick={() => setShowAuthor(true)}>+ צמצום לפי מחבר</button>)}
         <Btn type="submit" disabled={!text.trim() || state.loading}>{state.loading ? <><Spinner />מחפש ומאמת…</> : <><Icon name="Search" size={20} />חיפוש</>}</Btn>
       </form>
       {state.error && <Notice tone="error">{state.error}</Notice>}
@@ -3265,14 +3307,14 @@ function saveQueue(q) {
   try { if (q) localStorage.setItem(ACTIVE.queueKey, JSON.stringify(q)); else localStorage.removeItem(ACTIVE.queueKey); } catch (e) { /* */ }
 }
 const Q_STATUS = {
-  pending: { label: 'ממתין', cls: 'bg-surface2 text-muted' },
-  searching: { label: 'מחפש', cls: 'bg-surface2 text-muted' },
-  ready: { label: 'לבחירה', cls: 'bg-accentSoft text-accent' },
-  notfound: { label: 'לא נמצא', cls: 'bg-surface2 text-warn' },
-  error: { label: 'שגיאה', cls: 'bg-surface2 text-danger' },
-  saved: { label: 'נוסף', cls: 'bg-accentSoft text-ok' },
-  exists: { label: 'כבר קיים', cls: 'bg-surface2 text-ok' },
-  skipped: { label: 'דולג', cls: 'bg-surface2 text-muted' }
+  pending: { label: L('ממתין'), cls: 'bg-surface2 text-muted' },
+  searching: { label: L('מחפש'), cls: 'bg-surface2 text-muted' },
+  ready: { label: L('לבחירה'), cls: 'bg-accentSoft text-accent' },
+  notfound: { label: L('לא נמצא'), cls: 'bg-surface2 text-warn' },
+  error: { label: L('שגיאה'), cls: 'bg-surface2 text-danger' },
+  saved: { label: L('נוסף'), cls: 'bg-accentSoft text-ok' },
+  exists: { label: L('כבר קיים'), cls: 'bg-surface2 text-ok' },
+  skipped: { label: L('דולג'), cls: 'bg-surface2 text-muted' }
 };
 const isDone = (st) => st === 'saved' || st === 'skipped' || st === 'exists';
 
@@ -3474,7 +3516,7 @@ function BulkImport({ db, onPick, goSettings }) {
               {shownItems.map(it => (
                 <li key={it.id} className="flex items-center gap-1.5">
                   <button type="button" onClick={() => { setQueue(q => ({ ...q, current: it.id })); setListOpen(false); }}
-                    className={`flex-1 min-w-0 min-h-[44px] flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-right border ${it.id === queue.current ? 'border-accent bg-accentSoft' : 'border-transparent'}`}>
+                    className={`flex-1 min-w-0 min-h-[44px] flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-start border ${it.id === queue.current ? 'border-accent bg-accentSoft' : 'border-transparent'}`}>
                     <span className="flex-1 min-w-0 text-[14px] font-semibold truncate">{it.savedTitle || it.title}{it.author ? <span className="text-muted font-normal"> · {it.author}</span> : null}</span>
                     <span className={`shrink-0 text-[11px] font-semibold px-2 py-0.5 rounded-full ${Q_STATUS[it.status].cls}`}>{Q_STATUS[it.status].label}</span>
                   </button>
@@ -3652,10 +3694,10 @@ function AddTab({ db, update, onPick, goSettings, onOpenStarter }) {
    לשונית: גלה ספר חדש (ראיון + מנוע)
    ============================================================ */
 const QUESTIONS = [
-  { id: 'mood', text: 'איזה מצב רוח מתאים לך עכשיו?', options: Object.entries(MOODS).map(([k, v]) => ({ k, label: v.label })) },
-  { id: 'pacing', text: 'איזה קצב קריאה בא לך?', options: Object.entries(PACING).map(([k, v]) => ({ k, label: v.label })) },
-  { id: 'avoid', text: 'יש נושאים שעדיף להימנע מהם? (אפשר לבחור כמה)', multi: true, options: Object.entries(AVOID).map(([k, v]) => ({ k, label: v.label })) },
-  { id: 'length', text: 'ומה לגבי האורך?', options: Object.entries(LENGTHS).map(([k, v]) => ({ k, label: v.label })) }
+  { id: 'mood', text: L('איזה מצב רוח מתאים לך עכשיו?'), options: Object.entries(MOODS).map(([k, v]) => ({ k, label: v.label })) },
+  { id: 'pacing', text: L('איזה קצב קריאה בא לך?'), options: Object.entries(PACING).map(([k, v]) => ({ k, label: v.label })) },
+  { id: 'avoid', text: L('יש נושאים שעדיף להימנע מהם? (אפשר לבחור כמה)'), multi: true, options: Object.entries(AVOID).map(([k, v]) => ({ k, label: v.label })) },
+  { id: 'length', text: L('ומה לגבי האורך?'), options: Object.entries(LENGTHS).map(([k, v]) => ({ k, label: v.label })) }
 ];
 
 // יומן השיחה: הודעות התקדמות רצופות מתקבצות לשורה אחת קטנה (האחרונה גלויה, השאר בלחיצה); הודעות חשובות תמיד גלויות
@@ -3684,17 +3726,17 @@ function Bubble({ from, children }) {
   return (
     <div className={`fade-in flex items-end gap-2 ${bot ? 'justify-start' : 'justify-end'}`}>
       {bot && <span className="shrink-0 mb-0.5"><Logo size={26} /></span>}
-      <div className={`max-w-[82%] min-w-0 break-words [overflow-wrap:anywhere] px-3.5 py-2.5 font-reading ${bot ? 'bg-surface border border-line rounded-2xl rounded-br-md' : 'btn-primary text-accentInk rounded-2xl rounded-bl-md'}`}>{children}</div>
+      <div className={`max-w-[82%] min-w-0 break-words [overflow-wrap:anywhere] px-3.5 py-2.5 font-reading ${bot ? 'bg-surface border border-line rounded-2xl rounded-es-md' : 'btn-primary text-accentInk rounded-2xl rounded-ee-md'}`}>{children}</div>
     </div>
   );
 }
 
 /* זמינות בפורמטים: מציגים כעובדה רק מה שה-API אישר; לחנויות הישראליות יש קישורי חיפוש (לא טענה) */
 const STORES = [
-  { name: 'עברית (e-vrit)', site: 'e-vrit.co.il', kind: 'דיגיטלי, קולי ומודפס' },
-  { name: 'סטימצקי', site: 'steimatzky.co.il', kind: 'מודפס ודיגיטלי' },
-  { name: 'צומת ספרים', site: 'booknet.co.il', kind: 'מודפס' },
-  { name: 'Audible', site: 'audible.com', kind: 'קולי, אנגלית' }
+  { name: L('עברית (e-vrit)'), site: 'e-vrit.co.il', kind: L('דיגיטלי, קולי ומודפס') },
+  { name: L('סטימצקי'), site: 'steimatzky.co.il', kind: L('מודפס ודיגיטלי') },
+  { name: L('צומת ספרים'), site: 'booknet.co.il', kind: L('מודפס') },
+  { name: 'Audible', site: 'audible.com', kind: L('קולי, אנגלית') }
 ];
 // דפי החיפוש של החנויות עצמן (לא דרך Google): נבדקו מול כתובות תוצאות אמיתיות של כל אתר
 const STORE_SEARCH = {
@@ -3707,11 +3749,11 @@ const storeSearchUrl = (site, q) => (STORE_SEARCH[site] || ((x) => `https://www.
 function FormatInfo({ book }) {
   const q = `"${book.title}" ${(book.authors || [])[0] || ''}`.trim();
   const facts = [];
-  if (book.ebook) facts.push({ text: 'ספר דיגיטלי זמין ב-Google Play Books', link: book.ebookLink });
-  if (book.olEbook) facts.push({ text: 'עותק דיגיטלי להשאלה ב-Open Library', link: book.link });
-  if (book.pageCount && book.isbns && book.isbns.length) facts.push({ text: `מהדורה מודפסת רשומה (ISBN ${book.isbns[0]}, ${book.pageCount} עמ')` });
+  if (book.ebook) facts.push({ text: L('ספר דיגיטלי זמין ב-Google Play Books'), link: book.ebookLink });
+  if (book.olEbook) facts.push({ text: L('עותק דיגיטלי להשאלה ב-Open Library'), link: book.link });
+  if (book.pageCount && book.isbns && book.isbns.length) facts.push({ text: L("מהדורה מודפסת רשומה (ISBN {0}, {1} עמ')", [book.isbns[0], book.pageCount]) });
   const af = book.aiFormats;
-  const yn = { yes: 'יש', no: 'אין', unknown: 'לא ידוע' };
+  const yn = { yes: L('יש'), no: L('אין'), unknown: L('לא ידוע') };
   return (
     <div className="mt-2.5 border border-line rounded-xl p-2.5 grid gap-1.5">
       <div className="text-[13px] font-semibold text-muted flex items-center gap-1"><Icon name="BookCopy" size={14} />זמינות: מודפס, דיגיטלי, קולי</div>
@@ -3801,7 +3843,7 @@ function LitProfileCard({ db, update }) {
   );
   return (
     <section className="profile-card rounded-xl mb-4 overflow-hidden">
-      <button type="button" aria-expanded={open} onClick={() => setOpen(!open)} className="w-full text-right flex items-center gap-2.5 p-3.5 min-h-[56px]">
+      <button type="button" aria-expanded={open} onClick={() => setOpen(!open)} className="w-full text-start flex items-center gap-2.5 p-3.5 min-h-[56px]">
         <span className="w-9 h-9 rounded-lg grid place-items-center shrink-0 profile-card-icon"><Icon name="Feather" size={18} /></span>
         <span className="flex-1 min-w-0">
           <span className="block font-display font-bold text-[17px] leading-tight">הפרופיל הספרותי שלי</span>
@@ -3832,7 +3874,7 @@ function FocusGroup({ id, focus, onToggle }) {
 // זמינות מהחנויות: מה נמצא בפועל (מודפס/דיגיטלי/קולי) + קישור לדף הספר
 function RecAvailability({ r }) {
   const offers = r.offers || [];
-  const KIND = { print: 'מודפס', ebook: 'דיגיטלי', audio: 'קולי' };
+  const KIND = { print: L('מודפס'), ebook: L('דיגיטלי'), audio: L('קולי') };
   const has = (k) => offers.some(o => (o.kinds || []).includes(k)) || !!(r.availability && r.availability[k === 'audio' ? 'audio' : k]);
   const site = (s) => STORE_NAMES[s] || s;
   return (
@@ -3848,8 +3890,8 @@ function RecAvailability({ r }) {
   );
 }
 // קישורי רכישה: דף הספר עצמו בחנות אם נמצא, אחרת חיפוש של שם הספר באתר החנות
-const REVIEW_NAMES = { 'haaretz.co.il': 'הארץ', 'ynet.co.il': 'ynet', 'simania.co.il': 'סימניה', 'goodreads.com': 'Goodreads', 'kirkusreviews.com': 'Kirkus', 'publishersweekly.com': 'Publishers Weekly', 'nybooks.com': 'NYRB', 'lrb.co.uk': 'LRB' };
-const BUY_STORES = [['e-vrit.co.il', 'עברית'], ['steimatzky.co.il', 'סטימצקי'], ['booknet.co.il', 'צומת ספרים']];
+const REVIEW_NAMES = { 'haaretz.co.il': L('הארץ'), 'ynet.co.il': 'ynet', 'simania.co.il': L('סימניה'), 'goodreads.com': 'Goodreads', 'kirkusreviews.com': 'Kirkus', 'publishersweekly.com': 'Publishers Weekly', 'nybooks.com': 'NYRB', 'lrb.co.uk': 'LRB' };
+const BUY_STORES = [['e-vrit.co.il', L('עברית')], ['steimatzky.co.il', L('סטימצקי')], ['booknet.co.il', L('צומת ספרים')]];
 function BuyLinks({ book, offers = [], busy = false, onRetry }) {
   const q = `${book.title} ${(book.authors || [])[0] || ''}`.trim();
   const direct = (site) => offers.find(o => o.site === site);
@@ -3867,7 +3909,7 @@ function BuyLinks({ book, offers = [], busy = false, onRetry }) {
       </div>
       {busy && !offers.length && <p className="text-[12px] text-muted inline-flex items-center gap-1.5" aria-live="polite"><Spinner size={12} />מחפש את דף הספר בחנויות ובהוצאות…</p>}
       {!busy && !offers.length && onRetry && <p className="text-[12px] text-muted">לא נמצא דף מכירה ישיר. <button type="button" onClick={onRetry} className="text-accent font-semibold underline min-h-[32px]">חיפוש מחדש</button></p>}
-      {offers.length > 0 && (() => { const k = new Set(offers.flatMap(o => o.kinds || [])); const l = [['print', 'מודפס'], ['ebook', 'דיגיטלי'], ['audio', 'קולי']].filter(([x]) => k.has(x)).map(([, y]) => y); return l.length ? <p className="text-[12px] text-muted">נמצא בחנויות: {l.join(' · ')}</p> : null; })()}
+      {offers.length > 0 && (() => { const k = new Set(offers.flatMap(o => o.kinds || [])); const l = [['print', L('מודפס')], ['ebook', L('דיגיטלי')], ['audio', L('קולי')]].filter(([x]) => k.has(x)).map(([, y]) => y); return l.length ? <p className="text-[12px] text-muted">נמצא בחנויות: {l.join(' · ')}</p> : null; })()}
     </div>
   );
 }
@@ -3919,7 +3961,7 @@ function RecReviews({ r, loading }) {
       {!rv && loading && <div className="text-[13px] text-muted inline-flex items-center gap-1.5"><Spinner size={14} />מחפש ביקורות באתרים מוכרים…</div>}
       {rv && rv.rating && <div className="text-[14px] inline-flex items-center gap-1"><Icon name="Star" size={14} className="text-brass fill-current" /><span className="font-semibold tabular">{rv.rating.value.toFixed(1)}</span><span className="text-muted">/ {rv.rating.best || 5}{rv.rating.count ? ` · ${rv.rating.count.toLocaleString(DEFAULT_LOCALE)} דירוגים` : ''}{rv.rating.site ? ` · ${REVIEW_NAMES[rv.rating.site] || rv.rating.site}` : ''}</span></div>}
       {rv && rv.list.slice(0, 3).map(x => (
-        <blockquote key={x.url} className="text-[14px] font-reading border-r-2 border-brass pr-2" dir="auto">{x.quote} <a href={x.url} target="_blank" rel="noopener noreferrer" className="text-[12px] text-muted underline whitespace-nowrap">— {REVIEW_NAMES[x.site] || x.site}</a></blockquote>
+        <blockquote key={x.url} className="text-[14px] font-reading border-s-2 border-brass ps-2" dir="auto">{x.quote} <a href={x.url} target="_blank" rel="noopener noreferrer" className="text-[12px] text-muted underline whitespace-nowrap">— {REVIEW_NAMES[x.site] || x.site}</a></blockquote>
       ))}
       {rv && !has && <div className="text-[13px] text-muted">לא מצאתי ביקורות באתרים המוכרים. אפשר לחפש ישירות:</div>}
       {rv && links}
@@ -3943,13 +3985,13 @@ function RecCard({ r, onRead, onWant, onDismiss, inLib, onEnrich, voteSlot = nul
         <div className="min-w-0 flex-1">
           <div className="font-display font-medium text-[18px] leading-snug">{r.title}</div>
           <div className="text-[15px]">{r.authors.join(', ')}</div>
-          <div className="text-muted text-[13px] tabular">{[r.year, r.country, r.pageCount ? r.pageCount + ' עמ\'' : '', langLabel(r.language)].filter(Boolean).join(' · ')}</div>
+          <div className="text-muted text-[13px] tabular">{[r.year, L(r.country), r.pageCount ? r.pageCount + ' עמ\'' : '', langLabel(r.language)].filter(Boolean).join(' · ')}</div>
           <div className="mt-1.5 flex flex-wrap gap-1 items-center"><SourceBadge book={r} /><span className="text-[12px] text-muted">{fmtDateTime(r.verifiedAt)}</span></div>
         </div>
       </div>
       <div className="mt-3 rounded-xl bg-accentSoft border border-line p-2.5">
         <div className="text-[13px] font-semibold text-accent mb-1 flex items-center gap-1"><Icon name="Sparkles" size={14} />למה זה מתאים לך</div>
-        <ul className="text-[14px] grid gap-0.5 list-disc pr-5">{r.reasons.map((x, i) => <li key={i}>{x}</li>)}</ul>
+        <ul className="text-[14px] grid gap-0.5 list-disc ps-5">{r.reasons.map((x, i) => <li key={i}>{x}</li>)}</ul>
       </div>
       <Synopsis book={r} className="mt-2.5" onChange={(patch) => setExtra(x => ({ ...x, ...patch }))} />
       <RecReviews r={r} loading={enriching && !r.offers} />
@@ -3973,10 +4015,10 @@ function RecCard({ r, onRead, onWant, onDismiss, inLib, onEnrich, voteSlot = nul
 }
 
 const answersSummary = (a) => [
-  a.request ? `"${a.request.length > 80 ? a.request.slice(0, 80) + '…' : a.request}"` : '', a.mode === 'ai' ? 'המלצה חכמה' : '',
-  MOODS[a.mood] && MOODS[a.mood].label, PACING[a.pacing] && a.pacing !== 'any' && 'קצב ' + PACING[a.pacing].label.split(',')[0],
+  a.request ? `"${a.request.length > 80 ? a.request.slice(0, 80) + '…' : a.request}"` : '', a.mode === 'ai' ? L('המלצה חכמה') : '',
+  MOODS[a.mood] && MOODS[a.mood].label, PACING[a.pacing] && a.pacing !== 'any' && L('קצב ') + PACING[a.pacing].label.split(',')[0],
   LENGTHS[a.length] && a.length !== 'any' && LENGTHS[a.length].label.split(' (')[0],
-  (a.avoid || []).length ? 'בלי ' + a.avoid.map(k => AVOID[k] && AVOID[k].label).filter(Boolean).join(', ') : ''
+  (a.avoid || []).length ? L('בלי ') + a.avoid.map(k => AVOID[k] && AVOID[k].label).filter(Boolean).join(', ') : ''
 ].filter(Boolean);
 
 function HistoryView({ db, update, onPick, notify, openId, setOpenId }) {
@@ -4023,7 +4065,7 @@ function HistoryView({ db, update, onPick, notify, openId, setOpenId }) {
           const added = h.recs.filter(r => findInLibrary(r, db.books)).length;
           return (
             <li key={h.id}>
-              <button type="button" onClick={() => setOpenId(h.id)} className="w-full text-right bg-surface border border-line rounded-xl p-3 active:bg-surface2">
+              <button type="button" onClick={() => setOpenId(h.id)} className="w-full text-start bg-surface border border-line rounded-xl p-3 active:bg-surface2">
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-semibold text-[15px] tabular">{fmtDateTime(h.at)}</span>
                   <span className="text-[13px] text-muted tabular">{h.recs.length} המלצות{added ? ` · ${added} בספרייה` : ''}</span>
@@ -4066,7 +4108,7 @@ function useRecStore(pid, db) {
 }
 
 // חיווי שלבים בזמן ההמלצה: שאלות → מועמדים מהמאגרים → Claude בוחר → אימות מול המאגרים והחנויות
-const REC_STEPS = ['שאלות', 'מועמדים', 'Claude בוחר', 'אימות'];
+const REC_STEPS = [L('שאלות'), L('מועמדים'), L('Claude בוחר'), L('אימות')];
 function RecStepper({ log }) {
   const last = [...log].reverse().find(m => m.progress);
   const t = last ? last.text : '';
@@ -4104,7 +4146,7 @@ function RecVote({ book, db, update, onVote, onDone }) {
     <div className="grid gap-1.5" role="group" aria-label={`סימון ההמלצה ${book.title}`}>
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-[13px] text-muted">ההמלצה הזו:</span>
-        {btn('up', 'ThumbsUp', 'טובה')}{btn('down', 'ThumbsDown', 'לא טובה')}
+        {btn('up', 'ThumbsUp', L('טובה'))}{btn('down', 'ThumbsDown', L('לא טובה'))}
       </div>
       {edit && v.vote && (
         <form className="flex gap-2 flex-wrap" onSubmit={(e) => { e.preventDefault(); set(v.vote, note.trim()); setEdit(false); onDone && onDone(k); }}>
@@ -4124,11 +4166,11 @@ function AllRecsView({ db, update, onPick, digests }) {
     const m = new Map();
     (db.history || []).forEach(h => (h.recs || []).forEach(r => {
       const k = recVoteKey(r);
-      if (!m.has(k) || m.get(k).at < h.at) m.set(k, { k, book: r, at: h.at, src: h.answers && h.answers.gift ? 'מצב מתנה' : 'שיחת המלצה', why: (r.reasons || [])[0] || '' });
+      if (!m.has(k) || m.get(k).at < h.at) m.set(k, { k, book: r, at: h.at, src: h.answers && h.answers.gift ? L('מצב מתנה') : L('שיחת המלצה'), why: (r.reasons || [])[0] || '' });
     }));
     (digests || []).forEach(d => (d.books || []).forEach(b => {
       const bk = digestBook(b, d), k = recVoteKey(bk);
-      if (!m.has(k)) m.set(k, { k, book: bk, at: d.at, src: 'הצעות דו-שבועיות', why: b.why || '' });
+      if (!m.has(k)) m.set(k, { k, book: bk, at: d.at, src: L('הצעות דו-שבועיות'), why: b.why || '' });
     }));
     return [...m.values()].sort((a, b) => b.at - a.at);
   }, [db.history, digests]);
@@ -4148,7 +4190,7 @@ function AllRecsView({ db, update, onPick, digests }) {
           <Cover book={b} className="w-12 h-[4.5rem]" />
           <div className="min-w-0 flex-1">
             <div className="font-display font-bold text-[16px] leading-snug">{b.title}</div>
-            <div className="text-[14px] text-muted truncate">{[(b.authors || [])[0], b.country, b.year].filter(Boolean).join(' · ')}</div>
+            <div className="text-[14px] text-muted truncate">{[(b.authors || [])[0], L(b.country), b.year].filter(Boolean).join(' · ')}</div>
             <div className="text-[12px] text-muted">{fmtDate(it.at)} · {it.src}</div>
           </div>
         </div>
@@ -4276,11 +4318,11 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
     const sum = focusSummary(st.focus);
     recSet(st, { answers: ans, step: QUESTIONS.length, running: true, qa: [] });
     st.candP = gift ? Promise.resolve([]) : buildCandidates(db, st.focus || {}, 30, lang);   // רץ במקביל לשאלות ההמשך (במתנה: בלי הטעם שלי)
-    pushLog({ from: 'me', text: [gift ? `🎁 מתנה: ${request || 'ספר טוב'}` : request || 'תמליץ לי על הספר הבא', ...sum].join(' · ') });
+    pushLog({ from: 'me', text: [gift ? L('🎁 מתנה: {0}', [request || L('ספר טוב')]) : request || L('תמליץ לי על הספר הבא'), ...sum].join(' · ') });
     let qs = [];
     try { qs = await aiClarify({ books: gift ? [] : db.books, request, focus: st.focus, profile: gift ? null : db.litProfile, gift }); } catch (e) { qs = []; }
     if (qs.length) {
-      pushLog({ from: 'bot', text: `כדי לדייק, ${qs.length} שאלות קצרות (אפשר לדלג):` });
+      pushLog({ from: 'bot', text: L('כדי לדייק, {0} שאלות קצרות (אפשר לדלג):', [qs.length]) });
       recSet(st, { questions: qs, qa: [], running: false });
     } else runAi(ans, []);
   };
@@ -4413,7 +4455,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
               {q.multi ? (
                 <>
                   {q.options.map(o => <Chip key={o.k} active={multi.includes(o.k)} onClick={() => setMulti(m => m.includes(o.k) ? m.filter(x => x !== o.k) : [...m, o.k])}>{o.label}</Chip>)}
-                  <Btn className="w-full mt-1" onClick={() => answer(q, multi, multi.length ? multi.map(k => AVOID[k].label).join(', ') : 'אין מגבלות')}>
+                  <Btn className="w-full mt-1" onClick={() => answer(q, multi, multi.length ? multi.map(k => AVOID[k].label).join(', ') : L('אין מגבלות'))}>
                     {multi.length ? `להימנע מ-${multi.length} נושאים, המשך` : 'אין מגבלות, המשך'}
                   </Btn>
                 </>
@@ -4505,7 +4547,7 @@ function downloadFile(name, content, type) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 function toText(db) {
-  const lines = [`מה שנקרא · הספרים של ${ACTIVE.name || 'הספרייה'} · ${db.books.length} ספרים · יוצא ב-${fmtDate(Date.now())}`, ''];
+  const lines = [L('מה שנקרא · הספרים של {0} · {1} ספרים · יוצא ב-{2}', [ACTIVE.name || L('הספרייה'), db.books.length, fmtDate(Date.now())]), ''];
   db.books.slice().sort((a, b) => b.rating - a.rating || a.title.localeCompare(b.title, 'he')).forEach((b, i) => {
     lines.push(`${i + 1}. ${b.title}${b.authors.length ? ' — ' + b.authors.join(', ') : ''}${b.year ? ` (${b.year})` : ''}`);
     lines.push(`   ${'★'.repeat(b.rating)}${'☆'.repeat(5 - b.rating)}${b.tags.length ? '  |  ' + b.tags.join(', ') : ''}`);
@@ -4524,8 +4566,8 @@ async function copyText(text, fallbackEl) {
 // הסנכרון אוטומטי; מוצג רק כשיש בעיה שהמשתמש צריך לדעת עליה
 // מצב קורא אלקטרוני: הגדרה של המכשיר הזה בלבד (לא מסתנכרנת), כי היא תלויה במסך
 // ערכות עיצוב ספרותיות: [מזהה, שם, צבע הדגשה, רקע] ("מתחלף": ערכה אחרת בכל יום)
-const PALETTES = [['paper', 'נייר וקלף', '#8A3B2B', '#F4EEE3'], ['library', 'ספרייה ישנה', '#1F5A40', '#E4E9DD'], ['ink', 'דיו כחול', '#233E80', '#E6EBF1'], ['stone', 'אבן ירושלמית', '#A0432A', '#F0E3D1'], ['plum', 'שזיף ולבנדר', '#6B2E5E', '#ECE7EF'], ['sea', 'ים תיכון', '#0E6264', '#E3EDEB']];
-const FONT_CHOICES = [['frank', 'פרנק רוהל', '"Frank Ruhl Libre", serif'], ['david', 'דוד', '"David Libre", serif'], ['assistant', 'אסיסטנט', 'Assistant, sans-serif'], ['alef', 'אלף', 'Alef, sans-serif']];
+const PALETTES = [['paper', L('נייר וקלף'), '#8A3B2B', '#F4EEE3'], ['library', L('ספרייה ישנה'), '#1F5A40', '#E4E9DD'], ['ink', L('דיו כחול'), '#233E80', '#E6EBF1'], ['stone', L('אבן ירושלמית'), '#A0432A', '#F0E3D1'], ['plum', L('שזיף ולבנדר'), '#6B2E5E', '#ECE7EF'], ['sea', L('ים תיכון'), '#0E6264', '#E3EDEB']];
+const FONT_CHOICES = [['frank', L('פרנק רוהל'), '"Frank Ruhl Libre", serif'], ['david', L('דוד'), '"David Libre", serif'], ['assistant', L('אסיסטנט'), 'Assistant, sans-serif'], ['alef', L('אלף'), 'Alef, sans-serif']];
 const ZOOMS = [0.9, 1, 1.1, 1.2, 1.35, 1.5];
 const paletteOf = (st) => (st.palette === 'rotate' ? PALETTES[Math.floor(Date.now() / 86400000) % PALETTES.length][0] : st.palette) || 'paper';
 const zoomOf = (st) => Math.max(Number(st.zoom) || 1, st.a11y ? 1.15 : 0);
@@ -4554,7 +4596,7 @@ function LookSettings({ db, update }) {
             const on = (st.palette || 'paper') === k;
             return (
               <button key={k} type="button" role="radio" aria-checked={on} onClick={() => set({ palette: k })}
-                className={`min-h-[52px] rounded-xl border-2 px-2.5 flex items-center gap-2 text-right ${on ? 'border-accent' : 'border-line'} bg-surface`}>
+                className={`min-h-[52px] rounded-xl border-2 px-2.5 flex items-center gap-2 text-start ${on ? 'border-accent' : 'border-line'} bg-surface`}>
                 <span className="w-8 h-8 rounded-full shrink-0 border border-line grid place-items-center overflow-hidden" style={{ background: bg || 'conic-gradient(#8A3B2B 0 17%, #1F5A40 0 33%, #233E80 0 50%, #A0432A 0 67%, #6B2E5E 0 83%, #0E6264 0)' }}>
                   {ac && <span className="w-3.5 h-3.5 rounded-full" style={{ background: ac }} />}</span>
                 <span className="text-[14px] font-semibold leading-tight">{l}</span>
@@ -4577,7 +4619,7 @@ function LookSettings({ db, update }) {
           {FONT_CHOICES.map(([k, l, fam]) => {
             const on = (st.font || 'frank') === k;
             return <button key={k} type="button" role="radio" aria-checked={on} onClick={() => set({ font: k })} style={{ fontFamily: fam }}
-              className={`min-h-[52px] rounded-xl border-2 px-3 text-right ${on ? 'border-accent' : 'border-line'} bg-surface`}>
+              className={`min-h-[52px] rounded-xl border-2 px-3 text-start ${on ? 'border-accent' : 'border-line'} bg-surface`}>
               <span className="block text-[17px] leading-tight">{l}</span><span className="block text-[13px] text-muted">מה שנקרא, ספר טוב</span></button>;
           })}
         </div>
@@ -4655,7 +4697,7 @@ function KnowsAboutMe({ db, update, notify }) {
   );
   return (
     <section className="bg-surface border border-line rounded-xl p-3 grid gap-2">
-      <button type="button" onClick={() => setOpen(o => !o)} aria-expanded={open} className="flex items-center gap-2 text-right min-h-[44px]">
+      <button type="button" onClick={() => setOpen(o => !o)} aria-expanded={open} className="flex items-center gap-2 text-start min-h-[44px]">
         <Icon name="UserSearch" size={20} className="text-accent" />
         <span className="flex-1"><span className="block font-semibold text-[17px]">מה האפליקציה יודעת עליי</span>
           <span className="block text-[13px] text-muted">{db.books.filter(isRated).length} דירוגים · {notes} הערות · {rej.length} ספרים שנשללו · {fb.length} משובים · {Object.values(db.recVotes || {}).filter(v => v.vote).length} סימוני המלצות{db.litProfile ? ' · פרופיל ספרותי' : ''}</span></span>
@@ -4845,7 +4887,7 @@ function SettingsGroup({ icon, title, summary, children }) {
   return (
     <section data-group={title} className="settings-group bg-surface border border-line rounded-2xl">
       <h2 className="m-0">
-        <button type="button" aria-expanded={open} onClick={toggle} className="w-full text-right flex items-center gap-2.5 p-3.5 min-h-[60px]">
+        <button type="button" aria-expanded={open} onClick={toggle} className="w-full text-start flex items-center gap-2.5 p-3.5 min-h-[60px]">
           <span className="w-8 h-8 rounded-lg grid place-items-center shrink-0 bg-accentSoft text-accent"><Icon name={icon} size={17} /></span>
           <span className="flex-1 min-w-0">
             <span className="block font-display font-bold text-[18px] leading-tight">{title}</span>
@@ -4881,11 +4923,11 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
     setKeyTest('testing');
     try {
       const r = await fetch(googleUrl('', { q: 'isbn:9780099448822', maxResults: 1 }));
-      if (r.ok) setKeyTest({ ok: true, msg: 'המפתח עובד. החיפוש ב-Google Books פעיל.' });
+      if (r.ok) setKeyTest({ ok: true, msg: L('המפתח עובד. החיפוש ב-Google Books פעיל.') });
       else {
         const body = await r.json().catch(() => ({}));
-        const m = (body.error && body.error.message) || ('שגיאה ' + r.status);
-        setKeyTest({ ok: false, msg: /not been used|disabled/i.test(m) ? T('המפתח תקין, אבל Books API לא הופעל בפרויקט. חזרו לשלב 2 ולחצו Enable.') : /API key not valid/i.test(m) ? T('המפתח לא תקין. בדקו שהעתקתם אותו במלואו.') : /referer|referrer/i.test(m) ? T('המפתח מוגבל לאתר אחר. בדקו את Website restrictions.') : 'Google החזיר שגיאה: ' + m });
+        const m = (body.error && body.error.message) || (L('שגיאה ') + r.status);
+        setKeyTest({ ok: false, msg: /not been used|disabled/i.test(m) ? T('המפתח תקין, אבל Books API לא הופעל בפרויקט. חזרו לשלב 2 ולחצו Enable.') : /API key not valid/i.test(m) ? T('המפתח לא תקין. בדקו שהעתקתם אותו במלואו.') : /referer|referrer/i.test(m) ? T('המפתח מוגבל לאתר אחר. בדקו את Website restrictions.') : L('Google החזיר שגיאה:') + ' ' + m });
       }
     } catch (err) { setKeyTest({ ok: false, msg: T('אין חיבור לרשת. נסו שוב.') }); }
   };
@@ -4942,7 +4984,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
       <SyncPanel />
 
 
-      <SettingsGroup icon="UserRound" title="החשבון שלי" summary={`${profile.name} · ${(ADDRESS_FORMS.find(([k]) => k === (db.settings.address || 'n')) || [])[1] || ''}`}>
+      <SettingsGroup icon="UserRound" title="החשבון שלי" summary={IS_EN ? `${profile.name} · English` : `${profile.name} · ${(ADDRESS_FORMS.find(([k]) => k === (db.settings.address || 'n')) || [])[1] || ''}`}>
         <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (nameDraft.trim()) { onRenameProfile(nameDraft.trim()); notify('השם עודכן'); } }}>
           <label htmlFor="profile-name" className="sr-only">שם המשתמש</label>
           <input id="profile-name" value={nameDraft} onChange={e => setNameDraft(e.target.value)} maxLength={24}
@@ -4953,13 +4995,17 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
           {confirmProfileDel ? T(`לחצו שוב: מחיקת "${profile.name}" וכל הספרים שלו`) : 'מחיקת המשתמש מהמכשיר'}
         </Btn>
         <div>
+          <div className="text-[14px] text-muted mb-1.5">{UI_LANG_LABEL}</div>
+          <UiLangPicker />
+        </div>
+        {!IS_EN && <div>
           <div className="text-[14px] text-muted mb-1.5">איך לפנות אליך?</div>
           <div className="flex gap-2 flex-wrap" role="group" aria-label="לשון פנייה">
             {ADDRESS_FORMS.map(([k, l]) => (
               <Chip key={k} active={(db.settings.address || 'n') === k} onClick={() => update(d => ({ ...d, settings: { ...d.settings, address: k } }))}>{l}</Chip>
             ))}
           </div>
-        </div>
+        </div>}
       </SettingsGroup>
       <SettingsGroup icon="Sparkles" title="המלצות" summary={`שפות: ${langsLabel(langsOf(db.settings))} · רשימת הספרים המוכרים`}>
         <div>
@@ -4982,7 +5028,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
           <p className="text-[14px] text-muted">בלי מפתח, Google חוסם בדרך כלל את החיפוש בגלל מכסה משותפת לכל העולם, והאפליקציה עוברת ל-Open Library ו-Wikidata (כיסוי חלקי בעברית). מפתח אישי הוא בחינם ומאפשר 1,000 חיפושים ביום.</p>
           <details className="text-[14px] bg-bg border border-line rounded-xl p-2.5">
             <summary className="font-semibold text-accent cursor-pointer min-h-[32px]">איך משיגים מפתח (3 דקות, בחינם)</summary>
-            <ol className="list-decimal pr-5 mt-2 grid gap-1.5">
+            <ol className="list-decimal ps-5 mt-2 grid gap-1.5">
               <li>נכנסים עם חשבון Google ל-<a className="text-accent font-semibold underline" href="https://console.cloud.google.com/apis/library/books.googleapis.com" target="_blank" rel="noopener noreferrer">דף Books API ב-Google Cloud</a>. אם מתבקשים, יוצרים פרויקט חדש (כל שם).</li>
               <li>לוחצים <b dir="ltr">Enable</b>.</li>
               <li>עוברים ל-<a className="text-accent font-semibold underline" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Credentials</a>, לוחצים <b dir="ltr">Create credentials ← API key</b> ומעתיקים את המפתח (מתחיל ב-<span dir="ltr">AIza</span>).</li>
@@ -5118,7 +5164,7 @@ function InstallPrompt() {
           <div className="text-[14px] text-muted">נפתח כמו אפליקציה, במסך מלא, וגם בלי אינטרנט.</div>
         </div>
         {iosHelp ? (
-          <ol className="text-[14px] list-decimal pr-5 grid gap-1">
+          <ol className="text-[14px] list-decimal ps-5 grid gap-1">
             <li>לוחצים על כפתור השיתוף <Icon name="Share" size={15} className="inline align-text-bottom" /> בתחתית Safari.</li>
             <li>בוחרים <b>"הוספה למסך הבית"</b>.</li>
             <li>לוחצים <b>"הוסף"</b>.</li>
@@ -5150,7 +5196,7 @@ function useProfilesList() {
   return p;
 }
 // מה חברים רואים עליי: בלשונית ההגדרות
-const SHARE_ITEMS = [['read', 'הספרים שקראתי והדירוגים'], ['want', 'רשימת "רוצה לקרוא"'], ['notes', 'ההערות שכתבתי על ספרים'], ['community', 'להיכלל (בלי שם) ב"אהובים בקהילה"']];
+const SHARE_ITEMS = [['read', L('הספרים שקראתי והדירוגים')], ['want', L('רשימת "רוצה לקרוא"')], ['notes', L('ההערות שכתבתי על ספרים')], ['community', L('להיכלל (בלי שם) ב"אהובים בקהילה"')]];
 function PrivacySettings({ db, update }) {
   const sh = shareOf(db);
   const setShare = (k) => update(d => ({ ...d, settings: { ...d.settings, share: { ...shareOf(d), [k]: !shareOf(d)[k] } } }));
@@ -5212,8 +5258,8 @@ function FriendsTab({ db, update, onPick, notify, onGoSettings }) {
   const profiles = useProfilesList();
   const { me, rel, accepted, incoming, outgoing, inbox } = useFriends();
   const [view, setView] = useState(null);   // מזהה חבר שהמדף שלו פתוח
-  const nameOf = (pid) => (profiles.find(p => p.id === pid) || {}).name || 'משתמש';
-  const profOf = (pid) => profiles.find(p => p.id === pid) || { id: pid, name: 'משתמש', color: 0 };
+  const nameOf = (pid) => (profiles.find(p => p.id === pid) || {}).name || L('משתמש');
+  const profOf = (pid) => profiles.find(p => p.id === pid) || { id: pid, name: L('משתמש'), color: 0 };
   const now = () => Date.now();
   const request = (pid) => { socialChange(items => [...items, { id: uid(), type: 'friend', from: me, to: pid, status: 'pending', at: now(), editedAt: now() }]); notify(`נשלחה בקשת חברות ל${nameOf(pid)}`); };
   const setRel = (item, status) => socialChange(items => items.map(x => x.id === item.id ? { ...x, status, editedAt: now() } : x));
@@ -5287,7 +5333,7 @@ function FriendsTab({ db, update, onPick, notify, onGoSettings }) {
               const read = vis.filter(isRated).length, want = vis.filter(b => statusOf(b) === 'want').length;
               return (
                 <li key={pid}>
-                  <button type="button" onClick={() => setView(pid)} className="w-full text-right bg-surface border border-line rounded-2xl p-3 grid gap-1">
+                  <button type="button" onClick={() => setView(pid)} className="w-full text-start bg-surface border border-line rounded-2xl p-3 grid gap-1">
                     <span className="flex items-center gap-2"><Avatar profile={profOf(pid)} size={32} /><span className="font-semibold truncate">{nameOf(pid)}</span></span>
                     <span className="text-[13px] text-muted tabular">{read} קראו · {want} רוצים לקרוא</span>
                   </button>
@@ -5324,7 +5370,7 @@ function FriendsTab({ db, update, onPick, notify, onGoSettings }) {
         </section>
       )}
 
-      {onGoSettings && <button type="button" onClick={onGoSettings} className="mb-5 w-full text-right bg-surface border border-line rounded-2xl p-3 flex items-center gap-2 min-h-[52px]">
+      {onGoSettings && <button type="button" onClick={onGoSettings} className="mb-5 w-full text-start bg-surface border border-line rounded-2xl p-3 flex items-center gap-2 min-h-[52px]">
         <Icon name="Shield" size={18} className="text-accent" /><span className="flex-1 text-[14px] font-semibold">מה החברים רואים עליי</span><span className="text-[13px] text-muted">בהגדרות</span><Icon name="ChevronLeft" size={18} className="text-muted" />
       </button>}
 
@@ -5413,7 +5459,7 @@ const FOLLOW_UP_AFTER = 21 * 86400000;
 function PickCard({ pick, onClose }) {
   const { book, status, why } = pick;
   const share = async () => {
-    const text = `בחרתי לקרוא את "${book.title}"${(book.authors || [])[0] ? ` של ${book.authors[0]}` : ''} 📚 (מה שנקרא)`;
+    const text = L('בחרתי לקרוא את "{0}"{1} 📚 (מה שנקרא)', [book.title, (book.authors || [])[0] ? ` של ${book.authors[0]}` : '']);
     try { if (navigator.share) await navigator.share({ text }); else await navigator.clipboard.writeText(text); } catch (e) { /* ביטול */ }
   };
   return ReactDOM.createPortal((
@@ -5497,7 +5543,7 @@ const digestBook = (b, d) => ({
   key: b.isbn ? 'isbn:' + b.isbn : 'digest:' + b.title + '|' + (b.author || ''), source: 'digest', sourceId: b.isbn || '', title: b.title, subtitle: b.original || '',
   authors: b.author ? [b.author] : [], year: '', description: b.synopsis || '', descSource: STORE_NAMES[b.synopsisSource] || b.synopsisSource || '',
   categories: [], cover: b.cover || '', pageCount: 0, language: hasHebrew(b.title) ? 'he' : '', isbns: b.isbn ? [b.isbn] : [],
-  link: (b.urls && b.urls[0] && b.urls[0].url) || '', publisher: '', verifiedVia: (b.urls && b.urls[0] && b.urls[0].site) || 'המאגרים', verifiedAt: d.at,
+  link: (b.urls && b.urls[0] && b.urls[0].url) || '', publisher: '', verifiedVia: (b.urls && b.urls[0] && b.urls[0].site) || L('המאגרים'), verifiedAt: d.at,
   offers: b.urls || [], availability: b.available || null, reasons: b.why ? [b.why] : []
 });
 /* ---------- סיכום הקריאה: מחושב במכשיר מהספרייה, בלי AI. תקופות: שבועיים, חודש, חודש קודם, שנה, כל הזמן ---------- */
@@ -5517,7 +5563,7 @@ function readerType(s) {
   if (s.avg && s.avg <= 2.5 && s.rated >= 2) return T3('קורא ביקורתי', 'קוראת ביקורתית', 'עין ביקורתית', 'רף גבוה: רוב הספרים לא עמדו בו.');
   return T3('קורא מתמיד', 'קוראת מתמידה', 'קריאה מתמידה', 'קצב יציב, ספר אחרי ספר.');
 }
-const SUMMARY_PERIODS = [['14', 'שבועיים'], ['month', 'החודש'], ['prev', 'החודש שעבר'], ['year', 'השנה'], ['all', 'כל הזמן']];
+const SUMMARY_PERIODS = [['14', L('שבועיים')], ['month', L('החודש')], ['prev', L('החודש שעבר')], ['year', L('השנה')], ['all', L('כל הזמן')]];
 function periodRange(k, now = Date.now()) {
   const d = new Date(now);
   if (k === 'month') return [new Date(d.getFullYear(), d.getMonth(), 1).getTime(), now];
@@ -5540,7 +5586,7 @@ function summaryStats(books, now = Date.now(), period = '14') {
   const wanted = books.filter(b => statusOf(b) === 'want' && inWin(b.addedAt));
   const done = finished.filter(b => statusOf(b) === 'read');
   const ratedL = finished.filter(b => b.rating > 0);
-  const genres = countBy(finished, b => classifyBook(b)[0]).map(([t, n]) => ({ tag: t, name: GENRE_OF_TAG[t] || t, n }));
+  const genres = countBy(finished, b => classifyBook(b)[0]).map(([t, n]) => ({ tag: t, name: L(GENRE_OF_TAG[t] || t), n }));
   const withYear = finished.filter(b => parseInt(b.year, 10) > 0).sort((a, b) => parseInt(a.year, 10) - parseInt(b.year, 10));
   const decades = countBy(withYear, b => Math.floor(parseInt(b.year, 10) / 10) * 10).sort((a, b) => a[0] - b[0]);
   const withPages = done.filter(b => b.pageCount > 0).sort((a, b) => a.pageCount - b.pageCount);
@@ -5553,7 +5599,7 @@ function summaryStats(books, now = Date.now(), period = '14') {
   const paceMap = new Map(countBy(finished, b => bucket(b.readAt)));
   const pace = [];
   if (byMonth) { const d0 = new Date(from); for (let d = new Date(d0.getFullYear(), d0.getMonth(), 1); d.getTime() <= to && pace.length < 60; d.setMonth(d.getMonth() + 1)) { const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; pace.push({ label: d.toLocaleDateString(DEFAULT_LOCALE, { month: 'short', ...(period === 'all' ? { year: '2-digit' } : {}) }), n: paceMap.get(k) || 0 }); } }
-  else for (let w = 0; w * 7 < days; w++) pace.push({ label: `שבוע ${w + 1}`, n: paceMap.get('w' + w) || 0 });
+  else for (let w = 0; w * 7 < days; w++) pace.push({ label: L('שבוע {0}', [w + 1]), n: paceMap.get('w' + w) || 0 });
   const prevRange = [from - (to - from), from - 1];
   const prev = period === 'all' ? null : dated.filter(b => b.readAt >= prevRange[0] && b.readAt <= prevRange[1]);
   const s = { from, to, period, finished, started, wanted, partial: finished.length - done.length,
@@ -5570,7 +5616,7 @@ function summaryStats(books, now = Date.now(), period = '14') {
   return s;
 }
 const fmtShort = (ts) => { try { return new Date(ts).toLocaleDateString(DEFAULT_LOCALE, { day: 'numeric', month: 'short' }); } catch (e) { return ''; } };
-const PERIOD_TITLE = { '14': 'השבועיים האחרונים', month: 'החודש', prev: 'החודש שעבר', year: 'השנה', all: 'כל הזמן' };
+const PERIOD_TITLE = { '14': L('השבועיים האחרונים'), month: L('החודש'), prev: L('החודש שעבר'), year: L('השנה'), all: L('כל הזמן') };
 // תמונה לשיתוף (1080×1920) בצבעי ערכת העיצוב; בלי כריכות (תמונות מאתרים אחרים לא ניתנות לשמירה)
 async function summaryImage(s) {
   const css = getComputedStyle(document.documentElement), v = (k, d) => (css.getPropertyValue(k) || '').trim() || d;
@@ -5581,27 +5627,27 @@ async function summaryImage(s) {
   try { await Promise.all([`700 64px "${family}"`, `400 44px "${family}"`].map(f => document.fonts.load(f))); } catch (e) { /* גופן ברירת מחדל */ }
   x.fillStyle = bg; x.fillRect(0, 0, 1080, 1920);
   x.fillStyle = accent; x.fillRect(0, 0, 1080, 14);
-  x.direction = 'rtl'; x.textAlign = 'right';
+  x.direction = IS_EN ? 'ltr' : 'rtl'; x.textAlign = IS_EN ? 'left' : 'right';
   const font = (px, w = 700) => `${w} ${px}px "${family}", serif`;
-  const text = (t, y, px, w = 700, color = ink, xx = 980) => { x.font = font(px, w); x.fillStyle = color; x.fillText(t, xx, y, 880); };
-  text('סיכום הקריאה שלי', 170, 70); text(`${PERIOD_TITLE[s.period]} · ${fmtShort(s.from)} – ${fmtShort(s.to)}`, 240, 38, 400, muted);
-  const tiles = [[s.finished.length, 'ספרים'], [s.pages ? s.pages.toLocaleString(DEFAULT_LOCALE) : '—', 'עמודים'], [s.avg ? s.avg.toFixed(1) + '★' : '—', 'דירוג ממוצע']];
-  tiles.forEach(([n, l], i) => { const cx = 980 - i * 300; x.strokeStyle = line; x.lineWidth = 3; x.strokeRect(cx - 270, 300, 270, 200); text(String(n), 400, 84, 700, accent, cx - 30); text(l, 465, 34, 400, muted, cx - 30); });
+  const text = (t, y, px, w = 700, color = ink, xx = 980) => { x.font = font(px, w); x.fillStyle = color; x.fillText(t, IS_EN ? 1080 - xx : xx, y, 880); };
+  text(L('סיכום הקריאה שלי'), 170, 70); text(`${PERIOD_TITLE[s.period]} · ${fmtShort(s.from)} – ${fmtShort(s.to)}`, 240, 38, 400, muted);
+  const tiles = [[s.finished.length, L('ספרים')], [s.pages ? s.pages.toLocaleString(DEFAULT_LOCALE) : '—', L('עמודים')], [s.avg ? s.avg.toFixed(1) + '★' : '—', L('דירוג ממוצע')]];
+  tiles.forEach(([n, l], i) => { const cx = 980 - i * 300; x.strokeStyle = line; x.lineWidth = 3; x.strokeRect(IS_EN ? 1080 - cx : cx - 270, 300, 270, 200); text(String(n), 400, 84, 700, accent, cx - 30); text(l, 465, 34, 400, muted, cx - 30); });
   let y = 600;
   const section = (title, rows) => { if (!rows.length) return; text(title, y, 40, 700, accent); y += 60; rows.forEach(r => { text(r, y, 38, 400); y += 58; }); y += 30; };
-  if (s.top) section('הספר של התקופה', [`${s.top.title}${(s.top.authors || [])[0] ? ` / ${s.top.authors[0]}` : ''}${s.top.rating ? ' · ' + '★'.repeat(s.top.rating) : ''}`]);
-  section('סוגות', s.genres.slice(0, 3).map(g => `${g.name} · ${g.n}`));
-  section('מתי נכתבו', s.decades.slice(-3).map(([d, n]) => `שנות ה-${d} · ${n}`));
-  if (s.countries.length) section('מדינות', [s.countries.slice(0, 4).map(([c, n]) => `${c} ${n}`).join(' · ')]);
-  if (s.authors[0]) section('סופרים', [`${s.authors.length} סופרים, ${s.newAuthors} חדשים לספרייה`]);
-  text(s.type.name, 1760, 64, 700, accent); text('מה שנקרא', 1850, 34, 400, muted);
+  if (s.top) section(L('הספר של התקופה'), [`${s.top.title}${(s.top.authors || [])[0] ? ` / ${s.top.authors[0]}` : ''}${s.top.rating ? ' · ' + '★'.repeat(s.top.rating) : ''}`]);
+  section(L('סוגות'), s.genres.slice(0, 3).map(g => `${L(g.name)} · ${g.n}`));
+  section(L('מתי נכתבו'), s.decades.slice(-3).map(([d, n]) => L('שנות ה-{0} · {1}', [d, n])));
+  if (s.countries.length) section(L('מדינות'), [s.countries.slice(0, 4).map(([c, n]) => `${L(c)} ${n}`).join(' · ')]);
+  if (s.authors[0]) section(L('סופרים'), [L('{0} סופרים, {1} חדשים לספרייה', [s.authors.length, s.newAuthors])]);
+  text(s.type.name, 1760, 64, 700, accent); text(L('מה שנקרא'), 1850, 34, 400, muted);
   return new Promise(r => c.toBlob(r, 'image/png'));
 }
 async function shareSummary(s, notify) {
   try {
     const blob = await summaryImage(s);
     const file = new File([blob], 'my-reading-summary.png', { type: 'image/png' });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], text: 'סיכום הקריאה שלי 📚' }); return; }
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], text: L('סיכום הקריאה שלי 📚') }); return; }
     downloadFile('my-reading-summary.png', blob, 'image/png');
     notify && notify('התמונה נשמרה');
   } catch (e) { /* ביטול שיתוף */ }
@@ -5611,7 +5657,7 @@ function MySummaryCard({ books, onOpen, fresh }) {
   const s = useMemo(() => summaryStats(books), [books]);
   const y = useMemo(() => summaryStats(books, Date.now(), 'year'), [books]);
   return (
-    <button type="button" onClick={onOpen} className="summary-card w-full text-right rounded-xl p-3.5 mb-3 flex items-center gap-3 bg-surface border border-line">
+    <button type="button" onClick={onOpen} className="summary-card w-full text-start rounded-xl p-3.5 mb-3 flex items-center gap-3 bg-surface border border-line">
       <span className="w-11 h-11 rounded-xl grid place-items-center shrink-0 bg-accentSoft text-accent"><Icon name="ChartColumn" size={22} /></span>
       <span className="flex-1 min-w-0">
         <span className="block text-[13px] font-semibold text-accent">סיכום הקריאה שלי{fresh && s.active ? <span className="ms-2 px-1.5 py-0.5 rounded-full bg-accent text-accentInk text-[11px]">חדש</span> : null}</span>
@@ -5628,7 +5674,7 @@ function SummaryBanner({ db, update, onOpen }) {
   if (!s.active || db.settings.summarySeen === p || !db.books.length) return null;
   return (
     <button type="button" onClick={() => { update(d => ({ ...d, settings: { ...d.settings, summarySeen: p } })); onOpen(); }}
-      className="fade-in mt-3 w-full text-right rounded-xl p-3 flex items-center gap-3 bg-surface border border-line">
+      className="fade-in mt-3 w-full text-start rounded-xl p-3 flex items-center gap-3 bg-surface border border-line">
       <span className="w-10 h-10 rounded-xl grid place-items-center shrink-0 bg-accentSoft text-accent"><Icon name="ChartColumn" size={20} /></span>
       <span className="flex-1 min-w-0">
         <span className="block font-semibold text-[15px]">סיכום הקריאה הדו-שבועי מוכן</span>
@@ -5644,10 +5690,10 @@ function BarList({ rows, label }) {
   return (
     <ul className="grid gap-1.5" aria-label={label}>
       {rows.map(([name, n]) => (
-        <li key={name} className="grid grid-cols-[6.5rem_1fr_2rem] items-center gap-2 text-[14px]" title={`${name}: ${n}`}>
-          <span className="truncate">{name}</span>
+        <li key={name} className="grid grid-cols-[6.5rem_1fr_2rem] items-center gap-2 text-[14px]" title={`${L(name)}: ${n}`}>
+          <span className="truncate">{L(name)}</span>
           <span className="h-3 rounded-sm bg-surface2 overflow-hidden flex justify-start"><span className="h-full rounded-sm bg-accent" style={{ width: `${(n / max) * 100}%`, minWidth: n ? 4 : 0 }} /></span>
-          <span className="tabular text-muted text-left">{n}</span>
+          <span className="tabular text-muted text-end">{n}</span>
         </li>
       ))}
     </ul>
@@ -5661,13 +5707,13 @@ function ReportCard({ title, icon, children }) {
     </section>
   );
 }
-const delta = (cur, prev) => prev == null ? '' : cur === prev ? 'כמו בתקופה הקודמת' : `${cur > prev ? '+' : ''}${cur - prev} לעומת התקופה הקודמת`;
+const delta = (cur, prev) => prev == null ? '' : cur === prev ? L('כמו בתקופה הקודמת') : L('{0}{1} לעומת התקופה הקודמת', [cur > prev ? '+' : '', cur - prev]);
 function SummaryStory({ db, onClose, onOpenDigest, notify }) {
   const [period, setPeriod] = useState('14');
   const s = useMemo(() => summaryStats(db.books, Date.now(), period), [db.books, period]);
   const { digests } = useDigest();
   useEffect(() => { const k = (e) => { if (e.key === 'Escape') onClose(); }; document.addEventListener('keydown', k); return () => document.removeEventListener('keydown', k); }, []);
-  const LANG = { hebrew: 'מקור עברי', translated: 'תרגום לעברית', foreign: 'בשפת המקור' };
+  const LANG = { hebrew: L('מקור עברי'), translated: L('תרגום לעברית'), foreign: L('בשפת המקור') };
   const bookLine = (b, extra) => b ? <span><b className="font-semibold">{b.title}</b>{(b.authors || [])[0] ? ` / ${b.authors[0]}` : ''}{extra ? <span className="text-muted"> · {extra}</span> : null}</span> : null;
   return ReactDOM.createPortal((
     <div className="fixed inset-0 z-50 overflow-y-auto fade-in" style={{ background: 'var(--bg)' }} role="dialog" aria-modal="true" aria-label="סיכום הקריאה">
@@ -5706,11 +5752,11 @@ function SummaryStory({ db, onClose, onOpenDigest, notify }) {
                 {s.top.rating > 0 && <Stars value={s.top.rating} size={16} />}</div>
             </div>
             {s.finished.length > 1 && <details><summary className="text-[14px] text-accent font-semibold cursor-pointer min-h-[32px]">כל {s.finished.length} הספרים</summary>
-              <ol className="grid gap-1 mt-1 text-[14px] list-decimal pr-5">{s.finished.map(b => <li key={b.id}>{bookLine(b, [b.rating ? b.rating + '★' : '', statusOf(b) === 'partial' ? 'חלקית' : '', fmtShort(b.readAt)].filter(Boolean).join(' · '))}</li>)}</ol></details>}
+              <ol className="grid gap-1 mt-1 text-[14px] list-decimal ps-5">{s.finished.map(b => <li key={b.id}>{bookLine(b, [b.rating ? b.rating + '★' : '', statusOf(b) === 'partial' ? L('חלקית') : '', fmtShort(b.readAt)].filter(Boolean).join(' · '))}</li>)}</ol></details>}
           </ReportCard>}
           {s.genres.length > 0 && <ReportCard title="סוגות" icon="Shapes"><BarList label="ספרים לפי סוגה" rows={s.genres.slice(0, 8).map(g => [g.name, g.n])} /></ReportCard>}
           {s.decades.length > 0 && <ReportCard title="מתי נכתבו" icon="Hourglass">
-            <BarList label="ספרים לפי עשור" rows={s.decades.map(([d, n]) => [`שנות ה-${d}`, n])} />
+            <BarList label="ספרים לפי עשור" rows={s.decades.map(([d, n]) => [L('שנות ה-{0}', [d]), n])} />
             <div className="text-[14px] grid gap-0.5">
               {s.oldest && <div><span className="text-muted">הוותיק ביותר: </span>{bookLine(s.oldest, s.oldest.year)}</div>}
               {s.newest && s.newest !== s.oldest && <div><span className="text-muted">החדש ביותר: </span>{bookLine(s.newest, s.newest.year)}</div>}
@@ -5724,12 +5770,12 @@ function SummaryStory({ db, onClose, onOpenDigest, notify }) {
           {s.avgPages > 0 && <ReportCard title="אורך" icon="BookOpenText">
             <p className="text-[14px]">בממוצע {s.avgPages} עמודים לספר.</p>
             <div className="text-[14px] grid gap-0.5">
-              {s.longest && <div><span className="text-muted">הארוך ביותר: </span>{bookLine(s.longest, s.longest.pageCount + ' עמ\'')}</div>}
-              {s.shortest && s.shortest !== s.longest && <div><span className="text-muted">הקצר ביותר: </span>{bookLine(s.shortest, s.shortest.pageCount + ' עמ\'')}</div>}
+              {s.longest && <div><span className="text-muted">הארוך ביותר: </span>{bookLine(s.longest, s.longest.pageCount + L(' עמ\''))}</div>}
+              {s.shortest && s.shortest !== s.longest && <div><span className="text-muted">הקצר ביותר: </span>{bookLine(s.shortest, s.shortest.pageCount + L(' עמ\''))}</div>}
             </div>
           </ReportCard>}
           {s.countries.length > 0 && <ReportCard title="מדינות" icon="Globe">
-            <p className="text-[14px]">{s.countries.length === 1 ? `כל הספרים מ${s.countries[0][0]}.` : `ספרים מ-${s.countries.length} מדינות.`}</p>
+            <p className="text-[14px]">{s.countries.length === 1 ? `כל הספרים מ${L(s.countries[0][0])}.` : `ספרים מ-${s.countries.length} מדינות.`}</p>
             {s.countries.length > 1 && <BarList label="ספרים לפי מדינה" rows={s.countries.slice(0, 8)} />}
           </ReportCard>}
           {s.langs.length > 0 && <ReportCard title="שפה ומקור" icon="Languages"><BarList label="לפי שפה ומקור" rows={s.langs.map(([k, n]) => [LANG[k], n])} /></ReportCard>}
@@ -5753,59 +5799,60 @@ function SummaryStory({ db, onClose, onOpenDigest, notify }) {
 
 /* ---------- מדריך למשתמש: מרכז עזרה עם חיפוש, קפיצה בין נושאים, הסבר קצר לכל נושא ושאלות ותשובות שנפתחות בלחיצה ---------- */
 const GUIDE = [
-  { id: 'start', title: 'צעדים ראשונים', icon: 'Compass', intro: 'מה שנקרא שומרת את הספרים שקראת, לומדת את הטעם שלך וממליצה על הספר הבא. כל ספר נבדק מול מאגרים אמיתיים, כך שאין ספרים מומצאים.', qa: [
-    ['איך מתחילים?', 'בוחרים שם (בלי סיסמה). בכניסה הראשונה נפתחת רשימה של 400 ספרים מוכרים: החלקה ימינה = קראתי, שמאלה = לא קראתי, והסימנייה = רוצה לקרוא. אפשר לדלג ולחזור אליה מהכרטיס שבראש "הספרים שלי".'],
-    ['איך מתקינים את האפליקציה על מסך הבית?', 'באייפון: פותחים ב-Safari, לוחצים על כפתור השיתוף ובוחרים "הוספה למסך הבית". באנדרואיד: בכרום, בתפריט ⋮ בוחרים "התקנת האפליקציה", או לוחצים על ההודעה שמופיעה באפליקציה.'],
-    ['איך חוזרים לרשימת הספרים המוכרים?', 'בהגדרות ← "המלצות" ← "רשימת 400 הספרים המוכרים": "המשך מאיפה שעצרתי" או "מההתחלה". יש גם קישור בתחתית לשונית "הוספת ספר". ספרים שכבר בספרייה לא מוצגים שוב.'],
-    ['כמה משתמשים יכולים להשתמש בה?', 'כל אחד במשפחה מקבל ספרייה, דירוגים והמלצות משלו. מחליפים משתמש בלחיצה על השם שבראש המסך.'],
-    ['הנתונים שלי נשמרים?', 'הכול נשמר בטלפון ומסתנכרן אוטומטית, כך שהספרייה זמינה בכל מכשיר. הנקודה הירוקה ליד השם אומרת שהכול מסונכרן; כתומה = אין חיבור כרגע, והנתונים יסונכרנו כשיחזור.']] },
-  { id: 'library', title: 'הספרים שלי', icon: 'Library', intro: 'הספרייה האישית: ארבעה מדפים, חיפוש, מיון, תגיות וסטטיסטיקות.', qa: [
-    ['מה ההבדל בין המדפים?', '"קראתי" – ספרים שסיימת, עם דירוג. "קורא עכשיו" – ספרים שבאמצע. "רוצה לקרוא" – רשימת המשאלות. "קראתי חלקית" – ספרים שהפסקת באמצע (הדירוג רשות, ועוזר להמלצות).'],
-    ['איך מסמנים שסיימתי ספר?', 'בספר שנמצא ב"קורא עכשיו" יש כפתור "סיימתי". בוחרים מתי (היום, אתמול או חודש) ומדרגים.'],
-    ['איך עורכים או מוחקים ספר?', 'לוחצים על הספר, ובחלון שנפתח בוחרים "עריכה" או "מחיקה".'],
-    ['אפשר לראות את הספרים כקוביות?', 'כן. ליד החיפוש יש מתג בין רשימה לקוביות, ותפריט מיון (חדשים, מתי קראתי, שנת הוצאה, דירוג, א–ת).'],
-    ['איפה הסטטיסטיקות?', 'בראש "הספרים שלי": מספר הספרים, הדירוג הממוצע, האהובים והשנה, ו"סטטיסטיקות לפי ז\'אנר" עם פירוט לפי סוגה, מדינה, שנה וסופר.'],
-    ['מאיפה יודעים מאיזו מדינה כל ספר?', 'המדינה נקבעת לפי הסופר/ת, אוטומטית ברקע. המדינה מופיעה ליד הספר, בסטטיסטיקות ובסיכום, וההמלצות מתחשבות בה.']] },
-  { id: 'add', title: 'הוספת ספרים', icon: 'BookPlus', intro: 'שלוש דרכים להוסיף: ספר אחד, רשימה, או טקסט חופשי. רק ספרים שנמצאו במאגרים נכנסים לספרייה.', qa: [
-    ['איך מוסיפים ספר אחד?', 'בלשונית "הוספת ספר" כותבים שם בעברית או באנגלית, ISBN או קישור לדף הספר. בוחרים את הספר (ואם רוצים, את המהדורה המדויקת), ואז את המדף והדירוג.'],
-    ['יש לי רשימה של הרבה ספרים', 'בוחרים "רשימה" ומדביקים ספר בכל שורה (אפשר להוסיף מחבר אחרי מקף). עוברים על הספרים אחד אחרי השני, ואפשר לדייק או לחפש מחדש.'],
-    ['אפשר פשוט לכתוב מה קראתי?', 'כן. ב"טקסט חופשי" כותבים בחופשיות, ו-Claude מזהה את הספרים. אחר כך בוחרים ומדרגים כל אחד.'],
-    ['מאיפה מגיעים התקציר והקישורים לחנויות?', 'לכל ספר האפליקציה מחפשת את דף הספר אצל ההוצאה ובחנויות (עברית, סטימצקי, צומת ספרים ועוד), ומשם מביאה את התקציר המקורי וקישור ישיר. התקציר מועתק מהדף כמו שהוא, ונבדק שהוא באמת מופיע שם. הכול נשמר עם הספר ומתעדכן מעצמו; אם לא נמצא, יש כפתור "חיפוש מחדש".'],
-    ['למה ספר לא נמצא?', 'כל ספר נבדק מול Google Books, הספרייה הלאומית, Open Library והחנויות. אפשר לנסות את השם המלא, איות אחר, את השם בשפת המקור, ISBN מהכריכה האחורית, או "זיהוי חכם".'],
-    ['אפשר לייבא מ-Goodreads או StoryGraph?', 'כן: הגדרות ← "ייצוא וייבוא" ← "ייבוא מקובץ CSV". כל ספר נבדק, ומה שלא אומת מחכה ברשימה בלשונית ההוספה.']] },
-  { id: 'recs', title: 'המלצות', icon: 'Sparkles', intro: 'Claude קורא את הפרופיל הספרותי שלך וממליץ, וכל המלצה נבדקת מול המאגרים והחנויות לפני שהיא מוצגת.', qa: [
-    ['איך מקבלים המלצה?', 'בלשונית "גלה ספר חדש" כותבים מה בא לך, בוחרים מיקוד (מצב רוח, ז\'אנר, תקופה ועוד) ולוחצים "המלצה חכמה". Claude ישאל 2–4 שאלות קצרות לדיוק (אפשר לדלג או להחליף שאלה).'],
-    ['כמה זמן זה לוקח?', 'בדרך כלל דקה-שתיים. אפשר לצאת מהאפליקציה: ההמלצה ממשיכה בשרת, ואפשר לקבל התראה כשהיא מוכנה.'],
-    ['למה אפשר לסמוך על ההמלצות?', 'כל ספר שהמודל מציע נבדק מול הספרייה הלאומית, Google Books והחנויות; ספר שלא נמצא נפסל. בכל המלצה מופיעים זמינות (מודפס, דיגיטלי, קולי), קישורים לרכישה וביקורות מאתרים מוכרים.'],
-    ['ההמלצות לא מתאימות לי', 'כותבים בתיבה "לא בדיוק זה?" מה לא מתאים, ומקבלים הצעות מעודכנות. על ספר מסוים לוחצים "לא בשבילי" ובוחרים לחודש או לתמיד, עם הערה שמדייקת את הפרופיל.'],
-    ['איפה כל ההמלצות שקיבלתי?', 'בלשונית "גלה ספר חדש" ← "כל ההמלצות": כל ההמלצות מהשיחות ומההצעות הדו-שבועיות. מסמנים "טובה" או "לא טובה", ואפשר להוסיף למה (רשות). הטובות מופיעות למעלה, אלה שלא התאימו מוצנעות בסוף הרשימה, והסימונים מלמדים את ההמלצות הבאות ואת הפרופיל הספרותי.'],
-    ['באיזו שפה הספרים?', 'בשאלון מסמנים עברית, אנגלית ו/או שפות זרות. ברירת המחדל: עברית ואנגלית. משנים אותה בהגדרות ← "המלצות" ← "שפות ברירת המחדל להמלצות".'],
-    ['מה זה "ספר בשביל מישהו אחר"?', 'מצב מתנה: מתארים את מי שמקבל את הספר, וההמלצה לא נשענת על הטעם שלך ולא משנה אותו. ספר שנשמר נכנס ל"רוצה לקרוא" עם התגית "מתנה".'],
-    ['מה זה הפרופיל הספרותי?', 'תקציר של הטעם שלך, שנבנה מהספרים, מהדירוגים ומההערות, ומתעדכן לבד. הוא לוקח בחשבון מתי קראת כל ספר, כדי לזהות לאן הטעם מתפתח. בראש "גלה ספר חדש" הוא מקופל; לוחצים עליו כדי לקרוא, לעדכן או להוסיף הערה משלך.'],
-    ['מה ההצעות הדו-שבועיות?', 'כל שבועיים נבחרים 10 ספרים חדשים לפי מה שקראת, בלי ספרים שכבר הוצעו או שקראת. הם מופיעים בראש המסך, ואפשר לקבל התראה.']] },
-  { id: 'summary', title: 'סיכום הקריאה', icon: 'ChartColumn', intro: 'דוח על הקריאה שלך: כמה, מה, מתי ואיך, לשבועיים, לחודש, לשנה או לכל הזמן.', qa: [
-    ['איפה הסיכום?', 'כשיש סיכום חדש מופיע כרטיס בראש "הספרים שלי". אחרי שצפית בו, הוא עובר לקישור "סיכום הקריאה" ליד הסטטיסטיקות.'],
-    ['מה יש בו?', 'ספרים ועמודים (בהשוואה לתקופה הקודמת), דירוג ממוצע וקצב, סוג הקריאה, הספר של התקופה, סוגות, עשורי כתיבה, סופרים, התפלגות דירוגים, אורך, שפה ומקור, וקצב לאורך התקופה.'],
-    ['למה חלק מהספרים לא נספרים?', 'הסיכום סופר רק ספרים עם תאריך סיום. ספרים שסומנו מרשימת המוכרים אין להם תאריך; אפשר לערוך ספר ולבחור מתי קראת אותו.'],
-    ['אפשר לשתף?', 'כן: "שיתוף כתמונה" בסוף הסיכום יוצר תמונה לשיתוף או לשמירה.']] },
-  { id: 'friends', title: 'חברים', icon: 'Users', intro: 'רואים מה החברים קוראים ואוהבים, ממליצים אחד לשני ומגלים ספרים דרכם.', qa: [
-    ['איך מוסיפים חבר?', 'בלשונית "חברים" ← "להוסיף חברים" ← "בקשת חברות". אחרי שהחבר מאשר, רואים את המדפים שלו.'],
-    ['מה החברים רואים עליי?', 'בוחרים בהגדרות ← "פרטיות וחברים": ספרים שקראת ודירוגים, רשימת "רוצה לקרוא", הערות, והופעה בלי שם ב"אהובים בקהילה".'],
-    ['איך ממליצים לחבר?', 'במדף של חבר או בספר שלך לוחצים "להמליץ", בוחרים חבר (או כל החברים) ומוסיפים משפט.']] },
-  { id: 'notify', title: 'התראות', icon: 'Bell', intro: 'התראה כשההמלצה מוכנה, וכשמגיעים הסיכום וההצעות הדו-שבועיות.', qa: [
-    ['איך מפעילים התראות?', 'בהגדרות ← "התראות" ← "התראה כשיש הצעות חדשות", ומאשרים בחלון של הטלפון. אפשר גם מהשורה שמופיעה בזמן שההמלצה מתגבשת.'],
-    ['באייפון לא מגיעות התראות', 'באייפון התראות עובדות רק אחרי התקנה על מסך הבית (iOS 16.4 ומעלה), ורק כשפותחים את האפליקציה משם.']] },
-  { id: 'look', title: 'תצוגה ונגישות', icon: 'Palette', intro: 'אפשר להתאים את המראה, הגופן והגודל, ולהפעיל מצב נגישות.', qa: [
-    ['איך משנים צבעים?', 'בהגדרות ← "תצוגה ונגישות": שש ערכות (נייר וקלף, ספרייה ישנה, דיו כחול, אבן ירושלמית, שזיף ולבנדר, ים תיכון) או "מתחלף כל יום", ובחירה בין בהיר, כהה או לפי המכשיר.'],
-    ['איך מגדילים את הטקסט?', 'בהגדרות ← "תצוגה ונגישות" ← "גודל הטקסט": א+ להגדלה וא- להקטנה, מ-90% עד 150%. אפשר גם לבחור גופן: פרנק רוהל, דוד, אסיסטנט או אלף.'],
-    ['מה עושה מצב נגישות?', 'ניגודיות גבוהה, טקסט גדול יותר, קישורים עם קו תחתון, מסגרת מיקוד בולטת, בלי אנימציות ואזורי לחיצה גדולים, לפי ת"י 5568 ו-WCAG 2.0 AA. האפליקציה עובדת גם עם קורא מסך ומקלדת.'],
-    ['יש לי קורא ספרים אלקטרוני', '"מצב קורא אלקטרוני" בהגדרות ← "תצוגה ונגישות": שחור-לבן, טקסט גדול, בלי אנימציות ותמונות כבדות. נשמר רק במכשיר שבו הופעל.'],
-    ['איך מתמצאים בהגדרות?', 'ההגדרות מחולקות לקבוצות: החשבון שלי, המלצות, התראות, תצוגה ונגישות, משוב, פרטיות וחברים, הנתונים שלי. כל קבוצה מקופלת ונפתחת בלחיצה, והאפליקציה זוכרת אילו קבוצות פתחת.'],
-    ['איך האפליקציה פונה אליי?', 'בהגדרות ← "החשבון שלי" ← "איך לפנות אליך?": לשון נקבה, זכר או רבים. כל הטקסטים וההמלצות מתאימים את עצמם.']] },
-  { id: 'data', title: 'הנתונים והפרטיות', icon: 'Shield', intro: 'רואים מה האפליקציה יודעת, מוחקים, מייצאים ומייבאים.', qa: [
-    ['מה האפליקציה יודעת עליי?', 'בהגדרות ← "הנתונים שלי" ← "מה האפליקציה יודעת עליי": הפרופיל הספרותי, ההערה שלך, המשובים והספרים שנשללו. אפשר למחוק כל פריט.'],
-    ['איך מייצאים את הנתונים?', 'בהגדרות ← "הנתונים שלי": קובץ CSV שמתאים ל-Goodreads ול-StoryGraph. ב"גיבוי ידני" יש גם גיבוי מלא (JSON) ורשימה כטקסט.'],
-    ['משהו לא עובד', 'בהגדרות ← "משוב" כותבים מה קרה, וזה מגיע ישר ליובל.']] }
+  { id: 'start', title: L('צעדים ראשונים'), icon: 'Compass', intro: L('מה שנקרא שומרת את הספרים שקראת, לומדת את הטעם שלך וממליצה על הספר הבא. כל ספר נבדק מול מאגרים אמיתיים, כך שאין ספרים מומצאים.'), qa: [
+    [L('איך מתחילים?'), L('בוחרים שם (בלי סיסמה). בכניסה הראשונה נפתחת רשימה של 400 ספרים מוכרים: החלקה ימינה = קראתי, שמאלה = לא קראתי, והסימנייה = רוצה לקרוא. אפשר לדלג ולחזור אליה מהכרטיס שבראש "הספרים שלי".')],
+    [L('איך מתקינים את האפליקציה על מסך הבית?'), L('באייפון: פותחים ב-Safari, לוחצים על כפתור השיתוף ובוחרים "הוספה למסך הבית". באנדרואיד: בכרום, בתפריט ⋮ בוחרים "התקנת האפליקציה", או לוחצים על ההודעה שמופיעה באפליקציה.')],
+    [L('איך חוזרים לרשימת הספרים המוכרים?'), L('בהגדרות ← "המלצות" ← "רשימת 400 הספרים המוכרים": "המשך מאיפה שעצרתי" או "מההתחלה". יש גם קישור בתחתית לשונית "הוספת ספר". ספרים שכבר בספרייה לא מוצגים שוב.')],
+    [L('כמה משתמשים יכולים להשתמש בה?'), L('כל אחד במשפחה מקבל ספרייה, דירוגים והמלצות משלו. מחליפים משתמש בלחיצה על השם שבראש המסך.')],
+    [L('הנתונים שלי נשמרים?'), L('הכול נשמר בטלפון ומסתנכרן אוטומטית, כך שהספרייה זמינה בכל מכשיר. הנקודה הירוקה ליד השם אומרת שהכול מסונכרן; כתומה = אין חיבור כרגע, והנתונים יסונכרנו כשיחזור.')]] },
+  { id: 'library', title: L('הספרים שלי'), icon: 'Library', intro: L('הספרייה האישית: ארבעה מדפים, חיפוש, מיון, תגיות וסטטיסטיקות.'), qa: [
+    [L('מה ההבדל בין המדפים?'), L('"קראתי" – ספרים שסיימת, עם דירוג. "קורא עכשיו" – ספרים שבאמצע. "רוצה לקרוא" – רשימת המשאלות. "קראתי חלקית" – ספרים שהפסקת באמצע (הדירוג רשות, ועוזר להמלצות).')],
+    [L('איך מסמנים שסיימתי ספר?'), L('בספר שנמצא ב"קורא עכשיו" יש כפתור "סיימתי". בוחרים מתי (היום, אתמול או חודש) ומדרגים.')],
+    [L('איך עורכים או מוחקים ספר?'), L('לוחצים על הספר, ובחלון שנפתח בוחרים "עריכה" או "מחיקה".')],
+    [L('אפשר לראות את הספרים כקוביות?'), L('כן. ליד החיפוש יש מתג בין רשימה לקוביות, ותפריט מיון (חדשים, מתי קראתי, שנת הוצאה, דירוג, א–ת).')],
+    [L('איפה הסטטיסטיקות?'), L('בראש "הספרים שלי": מספר הספרים, הדירוג הממוצע, האהובים והשנה, ו"סטטיסטיקות לפי ז\'אנר" עם פירוט לפי סוגה, מדינה, שנה וסופר.')],
+    [L('מאיפה יודעים מאיזו מדינה כל ספר?'), L('המדינה נקבעת לפי הסופר/ת, אוטומטית ברקע. המדינה מופיעה ליד הספר, בסטטיסטיקות ובסיכום, וההמלצות מתחשבות בה.')]] },
+  { id: 'add', title: L('הוספת ספרים'), icon: 'BookPlus', intro: L('שלוש דרכים להוסיף: ספר אחד, רשימה, או טקסט חופשי. רק ספרים שנמצאו במאגרים נכנסים לספרייה.'), qa: [
+    [L('איך מוסיפים ספר אחד?'), L('בלשונית "הוספת ספר" כותבים שם בעברית או באנגלית, ISBN או קישור לדף הספר. בוחרים את הספר (ואם רוצים, את המהדורה המדויקת), ואז את המדף והדירוג.')],
+    [L('יש לי רשימה של הרבה ספרים'), L('בוחרים "רשימה" ומדביקים ספר בכל שורה (אפשר להוסיף מחבר אחרי מקף). עוברים על הספרים אחד אחרי השני, ואפשר לדייק או לחפש מחדש.')],
+    [L('אפשר פשוט לכתוב מה קראתי?'), L('כן. ב"טקסט חופשי" כותבים בחופשיות, ו-Claude מזהה את הספרים. אחר כך בוחרים ומדרגים כל אחד.')],
+    [L('מאיפה מגיעים התקציר והקישורים לחנויות?'), L('לכל ספר האפליקציה מחפשת את דף הספר אצל ההוצאה ובחנויות (עברית, סטימצקי, צומת ספרים ועוד), ומשם מביאה את התקציר המקורי וקישור ישיר. התקציר מועתק מהדף כמו שהוא, ונבדק שהוא באמת מופיע שם. הכול נשמר עם הספר ומתעדכן מעצמו; אם לא נמצא, יש כפתור "חיפוש מחדש".')],
+    [L('למה ספר לא נמצא?'), L('כל ספר נבדק מול Google Books, הספרייה הלאומית, Open Library והחנויות. אפשר לנסות את השם המלא, איות אחר, את השם בשפת המקור, ISBN מהכריכה האחורית, או "זיהוי חכם".')],
+    [L('אפשר לייבא מ-Goodreads או StoryGraph?'), L('כן: הגדרות ← "ייצוא וייבוא" ← "ייבוא מקובץ CSV". כל ספר נבדק, ומה שלא אומת מחכה ברשימה בלשונית ההוספה.')]] },
+  { id: 'recs', title: L('המלצות'), icon: 'Sparkles', intro: L('Claude קורא את הפרופיל הספרותי שלך וממליץ, וכל המלצה נבדקת מול המאגרים והחנויות לפני שהיא מוצגת.'), qa: [
+    [L('איך מקבלים המלצה?'), L('בלשונית "גלה ספר חדש" כותבים מה בא לך, בוחרים מיקוד (מצב רוח, ז\'אנר, תקופה ועוד) ולוחצים "המלצה חכמה". Claude ישאל 2–4 שאלות קצרות לדיוק (אפשר לדלג או להחליף שאלה).')],
+    [L('כמה זמן זה לוקח?'), L('בדרך כלל דקה-שתיים. אפשר לצאת מהאפליקציה: ההמלצה ממשיכה בשרת, ואפשר לקבל התראה כשהיא מוכנה.')],
+    [L('למה אפשר לסמוך על ההמלצות?'), L('כל ספר שהמודל מציע נבדק מול הספרייה הלאומית, Google Books והחנויות; ספר שלא נמצא נפסל. בכל המלצה מופיעים זמינות (מודפס, דיגיטלי, קולי), קישורים לרכישה וביקורות מאתרים מוכרים.')],
+    [L('ההמלצות לא מתאימות לי'), L('כותבים בתיבה "לא בדיוק זה?" מה לא מתאים, ומקבלים הצעות מעודכנות. על ספר מסוים לוחצים "לא בשבילי" ובוחרים לחודש או לתמיד, עם הערה שמדייקת את הפרופיל.')],
+    [L('איפה כל ההמלצות שקיבלתי?'), L('בלשונית "גלה ספר חדש" ← "כל ההמלצות": כל ההמלצות מהשיחות ומההצעות הדו-שבועיות. מסמנים "טובה" או "לא טובה", ואפשר להוסיף למה (רשות). הטובות מופיעות למעלה, אלה שלא התאימו מוצנעות בסוף הרשימה, והסימונים מלמדים את ההמלצות הבאות ואת הפרופיל הספרותי.')],
+    [L('באיזו שפה הספרים?'), L('בשאלון מסמנים עברית, אנגלית ו/או שפות זרות. ברירת המחדל: עברית ואנגלית. משנים אותה בהגדרות ← "המלצות" ← "שפות ברירת המחדל להמלצות".')],
+    [L('מה זה "ספר בשביל מישהו אחר"?'), L('מצב מתנה: מתארים את מי שמקבל את הספר, וההמלצה לא נשענת על הטעם שלך ולא משנה אותו. ספר שנשמר נכנס ל"רוצה לקרוא" עם התגית "מתנה".')],
+    [L('מה זה הפרופיל הספרותי?'), L('תקציר של הטעם שלך, שנבנה מהספרים, מהדירוגים ומההערות, ומתעדכן לבד. הוא לוקח בחשבון מתי קראת כל ספר, כדי לזהות לאן הטעם מתפתח. בראש "גלה ספר חדש" הוא מקופל; לוחצים עליו כדי לקרוא, לעדכן או להוסיף הערה משלך.')],
+    [L('מה ההצעות הדו-שבועיות?'), L('כל שבועיים נבחרים 10 ספרים חדשים לפי מה שקראת, בלי ספרים שכבר הוצעו או שקראת. הם מופיעים בראש המסך, ואפשר לקבל התראה.')]] },
+  { id: 'summary', title: L('סיכום הקריאה'), icon: 'ChartColumn', intro: L('דוח על הקריאה שלך: כמה, מה, מתי ואיך, לשבועיים, לחודש, לשנה או לכל הזמן.'), qa: [
+    [L('איפה הסיכום?'), L('כשיש סיכום חדש מופיע כרטיס בראש "הספרים שלי". אחרי שצפית בו, הוא עובר לקישור "סיכום הקריאה" ליד הסטטיסטיקות.')],
+    [L('מה יש בו?'), L('ספרים ועמודים (בהשוואה לתקופה הקודמת), דירוג ממוצע וקצב, סוג הקריאה, הספר של התקופה, סוגות, עשורי כתיבה, סופרים, התפלגות דירוגים, אורך, שפה ומקור, וקצב לאורך התקופה.')],
+    [L('למה חלק מהספרים לא נספרים?'), L('הסיכום סופר רק ספרים עם תאריך סיום. ספרים שסומנו מרשימת המוכרים אין להם תאריך; אפשר לערוך ספר ולבחור מתי קראת אותו.')],
+    [L('אפשר לשתף?'), L('כן: "שיתוף כתמונה" בסוף הסיכום יוצר תמונה לשיתוף או לשמירה.')]] },
+  { id: 'friends', title: L('חברים'), icon: 'Users', intro: L('רואים מה החברים קוראים ואוהבים, ממליצים אחד לשני ומגלים ספרים דרכם.'), qa: [
+    [L('איך מוסיפים חבר?'), L('בלשונית "חברים" ← "להוסיף חברים" ← "בקשת חברות". אחרי שהחבר מאשר, רואים את המדפים שלו.')],
+    [L('מה החברים רואים עליי?'), L('בוחרים בהגדרות ← "פרטיות וחברים": ספרים שקראת ודירוגים, רשימת "רוצה לקרוא", הערות, והופעה בלי שם ב"אהובים בקהילה".')],
+    [L('איך ממליצים לחבר?'), L('במדף של חבר או בספר שלך לוחצים "להמליץ", בוחרים חבר (או כל החברים) ומוסיפים משפט.')]] },
+  { id: 'notify', title: L('התראות'), icon: 'Bell', intro: L('התראה כשההמלצה מוכנה, וכשמגיעים הסיכום וההצעות הדו-שבועיות.'), qa: [
+    [L('איך מפעילים התראות?'), L('בהגדרות ← "התראות" ← "התראה כשיש הצעות חדשות", ומאשרים בחלון של הטלפון. אפשר גם מהשורה שמופיעה בזמן שההמלצה מתגבשת.')],
+    [L('באייפון לא מגיעות התראות'), L('באייפון התראות עובדות רק אחרי התקנה על מסך הבית (iOS 16.4 ומעלה), ורק כשפותחים את האפליקציה משם.')]] },
+  { id: 'look', title: L('תצוגה ונגישות'), icon: 'Palette', intro: L('אפשר להתאים את המראה, הגופן והגודל, ולהפעיל מצב נגישות.'), qa: [
+    [L('איך משנים צבעים?'), L('בהגדרות ← "תצוגה ונגישות": שש ערכות (נייר וקלף, ספרייה ישנה, דיו כחול, אבן ירושלמית, שזיף ולבנדר, ים תיכון) או "מתחלף כל יום", ובחירה בין בהיר, כהה או לפי המכשיר.')],
+    [L('איך מגדילים את הטקסט?'), L('בהגדרות ← "תצוגה ונגישות" ← "גודל הטקסט": א+ להגדלה וא- להקטנה, מ-90% עד 150%. אפשר גם לבחור גופן: פרנק רוהל, דוד, אסיסטנט או אלף.')],
+    [L('מה עושה מצב נגישות?'), L('ניגודיות גבוהה, טקסט גדול יותר, קישורים עם קו תחתון, מסגרת מיקוד בולטת, בלי אנימציות ואזורי לחיצה גדולים, לפי ת"י 5568 ו-WCAG 2.0 AA. האפליקציה עובדת גם עם קורא מסך ומקלדת.')],
+    [L('יש לי קורא ספרים אלקטרוני'), L('"מצב קורא אלקטרוני" בהגדרות ← "תצוגה ונגישות": שחור-לבן, טקסט גדול, בלי אנימציות ותמונות כבדות. נשמר רק במכשיר שבו הופעל.')],
+    [L('איך מתמצאים בהגדרות?'), L('ההגדרות מחולקות לקבוצות: החשבון שלי, המלצות, התראות, תצוגה ונגישות, משוב, פרטיות וחברים, הנתונים שלי. כל קבוצה מקופלת ונפתחת בלחיצה, והאפליקציה זוכרת אילו קבוצות פתחת.')],
+    [L('איך עוברים לאנגלית?'), L('בהגדרות ← "החשבון שלי" ← "שפה · Language" בוחרים English (או עברית). אפשר לבחור גם במסך הכניסה. האפליקציה נטענת מחדש בשפה שנבחרה, וההמלצות וההצעות הדו-שבועיות נכתבות בה.')],
+    ...(IS_EN ? [] : [[L('איך האפליקציה פונה אליי?'), L('בהגדרות ← "החשבון שלי" ← "איך לפנות אליך?": לשון נקבה, זכר או רבים. כל הטקסטים וההמלצות מתאימים את עצמם.')]])] },
+  { id: 'data', title: L('הנתונים והפרטיות'), icon: 'Shield', intro: L('רואים מה האפליקציה יודעת, מוחקים, מייצאים ומייבאים.'), qa: [
+    [L('מה האפליקציה יודעת עליי?'), L('בהגדרות ← "הנתונים שלי" ← "מה האפליקציה יודעת עליי": הפרופיל הספרותי, ההערה שלך, המשובים והספרים שנשללו. אפשר למחוק כל פריט.')],
+    [L('איך מייצאים את הנתונים?'), L('בהגדרות ← "הנתונים שלי": קובץ CSV שמתאים ל-Goodreads ול-StoryGraph. ב"גיבוי ידני" יש גם גיבוי מלא (JSON) ורשימה כטקסט.')],
+    [L('משהו לא עובד'), L('בהגדרות ← "משוב" כותבים מה קרה, וזה מגיע ישר ליובל.')]] }
 ];
 function UserGuide({ onClose }) {
   const [q, setQ] = useState('');
@@ -5825,7 +5872,7 @@ function UserGuide({ onClose }) {
           <div className="relative mt-2">
             <span className="absolute top-1/2 -translate-y-1/2 right-3 text-muted"><Icon name="Search" size={18} /></span>
             <label htmlFor="guide-search" className="sr-only">חיפוש במדריך</label>
-            <input id="guide-search" value={q} onChange={e => setQ(e.target.value)} placeholder="חיפוש: למשל התראות, ייבוא, גודל טקסט" className="w-full min-h-[46px] pr-10 pl-3 rounded-xl border border-line bg-surface text-[16px]" />
+            <input id="guide-search" value={q} onChange={e => setQ(e.target.value)} placeholder="חיפוש: למשל התראות, ייבוא, גודל טקסט" className="w-full min-h-[46px] ps-10 pe-3 rounded-xl border border-line bg-surface text-[16px]" />
           </div>
           <nav className="flex gap-1.5 overflow-x-auto mt-2 pb-1" aria-label="נושאים">
             {GUIDE.map(t => <Chip key={t.id} className="shrink-0" onClick={() => jump(t.id)}><span className="inline-flex items-center gap-1"><Icon name={t.icon} size={14} />{t.title}</span></Chip>)}
@@ -5841,7 +5888,7 @@ function UserGuide({ onClose }) {
                 {t.qa.map(([qq, a]) => (
                   <details key={qq} open={!!nq} className="border-t border-line py-1">
                     <summary className="cursor-pointer font-semibold text-[15px] min-h-[44px] flex items-center gap-2"><Icon name="ChevronLeft" size={16} className="text-muted shrink-0" />{T(qq)}</summary>
-                    <p className="text-[15px] font-reading pb-2 pr-6">{T(a)}</p>
+                    <p className="text-[15px] font-reading pb-2 ps-6">{T(a)}</p>
                   </details>
                 ))}
               </div>
@@ -5858,7 +5905,7 @@ function DigestBanner({ db, update, onOpen }) {
   const latest = digests[0];
   if (!latest || !latest.books.length || (db.settings.digestSeen === latest.id)) return null;
   return (
-    <button type="button" onClick={() => onOpen(latest)} className="fade-in mt-3 w-full text-right bg-surface border border-line rounded-2xl p-3 flex items-center gap-3 accent-top">
+    <button type="button" onClick={() => onOpen(latest)} className="fade-in mt-3 w-full text-start bg-surface border border-line rounded-2xl p-3 flex items-center gap-3 accent-top">
       <span className="w-11 h-11 rounded-full grid place-items-center shrink-0 bg-accentSoft text-accent"><Icon name="Sparkles" size={22} /></span>
       <span className="flex-1 min-w-0">
         <span className="block font-semibold text-[16px]">{latest.books.length} ספרים חדשים בשבילך</span>
@@ -5923,11 +5970,11 @@ function PageHero({ tab, title, sub, children }) {
   );
 }
 const TABS = [
-  { id: 'library', label: 'הספרים שלי', icon: 'Library' },
-  { id: 'add', label: 'הוספת ספר', icon: 'BookPlus' },
-  { id: 'discover', label: 'גלה ספר חדש', icon: 'Sparkles' },
-  { id: 'friends', label: 'חברים', icon: 'Users' },
-  { id: 'backup', label: 'הגדרות', icon: 'Settings' }
+  { id: 'library', label: L('הספרים שלי'), icon: 'Library' },
+  { id: 'add', label: L('הוספת ספר'), icon: 'BookPlus' },
+  { id: 'discover', label: L('גלה ספר חדש'), icon: 'Sparkles' },
+  { id: 'friends', label: L('חברים'), icon: 'Users' },
+  { id: 'backup', label: L('הגדרות'), icon: 'Settings' }
 ];
 
 function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
@@ -5965,6 +6012,8 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
   setAddr(db.settings.address);
   // מי שסיים את רשימת ההיכרות במכשיר הזה לפני שזה נשמר בחשבון
   useEffect(() => { if (!db.settings.starterDone && db.books.length && starterLocalDone(db.books)) update(d => ({ ...d, settings: { ...d.settings, starterDone: true } })); }, [db.books.length]);
+  // שפת הממשק של המכשיר נשמרת גם בחשבון, כדי שהשרת יכתוב בה (הצעות דו-שבועיות, התראות)
+  useEffect(() => { if (db.settings.uiLang !== UI_LANG) update(d => ({ ...d, settings: { ...d.settings, uiLang: UI_LANG } })); }, [db.settings.uiLang]);
 
   useEffect(() => { try { sessionStorage.setItem('vrt_tab', tab); } catch (e) { /* */ } window.scrollTo({ top: 0 }); }, [tab]);
   // ערכת עיצוב, מצב בהיר/כהה, גופן, גודל ונגישות
@@ -5979,7 +6028,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
   // ספרים שנשמרו בשם לועזי: מחפשים ברקע את שם המהדורה העברית (פעם אחת לכל ספר)
   const heBusy = useRef(false);
   useEffect(() => {
-    if (heBusy.current) return;
+    if (heBusy.current || IS_EN) return;   // בממשק אנגלית לא מחליפים שמות באנגלית בשם העברי
     let checked = {};
     try { checked = JSON.parse(localStorage.getItem('vrt-he-checked') || '{}') || {}; } catch (e) { /* */ }
     const todo = db.books.filter(b => !hasHebrew(b.title) && !checked[b.id]).slice(0, 20);
@@ -6044,7 +6093,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
     });
     // ספר שבחרת מתוך המלצה: כרטיס חגיגי, ובעוד 3 שבועות נשאל איך היה
     if (!existing && pending.fromRec && status !== 'read') setCelebrate({ book, status, why: (book.reasons || [])[0] || '' });
-    notify(existing ? 'השינויים נשמרו' : { want: `"${book.title}" נוסף לרשימת "רוצה לקרוא"`, reading: `"${book.title}" נוסף ל"${STATUSES[1][1]}". קריאה נעימה!` }[status] || `"${book.title}" נשמר בספרייה`);
+    notify(existing ? L('השינויים נשמרו') : { want: L('"{0}" נוסף לרשימת "רוצה לקרוא"', [book.title]), reading: L('"{0}" נוסף ל"{1}". קריאה נעימה!', [book.title, STATUSES[1][1]]) }[status] || L('"{0}" נשמר בספרייה', [book.title]));
     const onSaved = pending.onSaved;
     setPending(null);
     if (onSaved) onSaved(existing || book);
@@ -6086,7 +6135,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
           onUpdateBook={(id, patch) => update(d => ({ ...d, books: d.books.map(b => b.id === id ? sanitizeBook({ ...b, ...patch, editedAt: Date.now() }) : b) }))} goAdd={() => setTab('add')} notify={notify} />}
         {tab === 'add' && <AddTab db={db} update={update} onPick={pick} goSettings={() => setTab('backup')} onOpenStarter={() => openStarter(false)} />}
         {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} onOpenDigest={setDigestOpen} />}
-        {tab === 'friends' && <FriendsTab db={db} update={update} onPick={pick} notify={notify} onGoSettings={() => { openSettingsGroup('פרטיות וחברים'); setTab('backup'); setTimeout(() => { const el = document.querySelector('[data-group="פרטיות וחברים"]'); if (el) el.scrollIntoView({ block: 'start' }); }, 60); }} />}
+        {tab === 'friends' && <FriendsTab db={db} update={update} onPick={pick} notify={notify} onGoSettings={() => { openSettingsGroup(L('פרטיות וחברים')); setTab('backup'); setTimeout(() => { const el = document.querySelector(`[data-group="${L('פרטיות וחברים')}"]`); if (el) el.scrollIntoView({ block: 'start' }); }, 60); }} />}
         {tab === 'backup' && <BackupTab onOpenStarter={openStarter} db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
       </main>
 
@@ -6135,7 +6184,7 @@ function Logo({ size = 32 }) {
 // חיווי סנכרון ליד שם המשתמש: ירוק = מסונכרן, מהבהב = מסתנכרן, כתום = אין חיבור (הנתונים שמורים בטלפון)
 function SyncDot() {
   const s = useSyncStatus();
-  const st = s.status === 'ok' ? ['var(--ok)', 'מסונכרן'] : s.status === 'syncing' ? ['var(--accent)', 'מסתנכרן…'] : s.status === 'error' ? ['var(--warn)', 'אין חיבור, נשמר בטלפון'] : null;
+  const st = s.status === 'ok' ? ['var(--ok)', L('מסונכרן')] : s.status === 'syncing' ? ['var(--accent)', L('מסתנכרן…')] : s.status === 'error' ? ['var(--warn)', L('אין חיבור, נשמר בטלפון')] : null;
   if (!st) return null;
   return <span className={`sync-dot ${s.status === 'syncing' ? 'animate-pulse' : ''}`} style={{ background: st[0] }} role="img" aria-label={st[1]} title={st[1]} />;
 }
@@ -6159,6 +6208,21 @@ function countBooks(pid) {
   try { const d = JSON.parse(localStorage.getItem(dbKeyFor(pid)) || 'null'); return d && Array.isArray(d.books) ? d.books.length : 0; } catch (e) { return 0; }
 }
 
+// בחירת שפת הממשק: בכניסה הראשונה ובהגדרות. השמות כתובים כל אחד בשפתו, ולא מתורגמים
+const UI_LANGS = [['he', 'עברית'], ['en', 'English']];
+const UI_LANG_LABEL = 'שפה · Language';
+function switchUiLang(lang) {
+  if (lang === UI_LANG) return;
+  setUiLang(lang);
+  setTimeout(() => location.reload(), 150);
+}
+function UiLangPicker() {
+  return (
+    <div className="flex gap-2" role="group" aria-label={UI_LANG_LABEL}>
+      {UI_LANGS.map(([k, l]) => <Chip key={k} active={UI_LANG === k} onClick={() => switchUiLang(k)}><span lang={k}>{l}</span></Chip>)}
+    </div>
+  );
+}
 function WhoAreYou({ profiles, onPick, onCreate }) {
   const [name, setName] = useState('');
   const [adding, setAdding] = useState(profiles.length === 0);
@@ -6174,13 +6238,14 @@ function WhoAreYou({ profiles, onPick, onCreate }) {
             <div className="text-muted text-[14px] mt-1">{T('מה קראת, מה תקרא, ומה החברים אוהבים')}</div>
           </div>
         </div>
+        <div className="mb-6"><UiLangPicker /></div>
         <h1 className="font-display font-medium text-[26px] leading-snug mb-5">של מי הספרייה?</h1>
         {profiles.length > 0 && (
           <ul className="grid gap-2 mb-4">
             {profiles.map(p => (
               <li key={p.id}>
                 <button type="button" onClick={() => onPick(p.id)}
-                  className="w-full min-h-[64px] flex items-center gap-3 px-3 rounded-xl bg-surface border border-line text-right active:bg-surface2">
+                  className="w-full min-h-[64px] flex items-center gap-3 px-3 rounded-xl bg-surface border border-line text-start active:bg-surface2">
                   <Avatar profile={p} size={44} />
                   <span className="flex-1 min-w-0">
                     <span className="block font-semibold text-[17px] truncate">{p.name}</span>

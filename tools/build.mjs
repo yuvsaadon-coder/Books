@@ -4,13 +4,16 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { build } from 'esbuild';
+import { translateSource } from './i18n.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
 // מאגדים את src/app.jsx יחד עם הקבצים שהוא מייבא (למשל רשימת ספרי הפתיחה). React ו-ReactDOM גלובליים מה-CDN.
 const bundled = await build({
   entryPoints: [root + 'src/app.jsx'], bundle: true, write: false,
   loader: { '.jsx': 'jsx', '.js': 'js' }, jsx: 'transform', jsxFactory: 'React.createElement', jsxFragment: 'React.Fragment',
-  format: 'iife', target: 'es2019', minify: true, legalComments: 'none', charset: 'utf8'
+  format: 'iife', target: 'es2019', minify: true, legalComments: 'none', charset: 'utf8',
+  // כל טקסט עברי שמוצג עובר דרך L() (תרגום לממשק באנגלית) – ראו tools/i18n.mjs
+  plugins: [{ name: 'i18n', setup(b) { b.onLoad({ filter: /src[\\/]app\.jsx$/ }, (args) => ({ contents: translateSource(readFileSync(args.path, 'utf8')), loader: 'jsx' })); } }]
 });
 const code = bundled.outputFiles[0].text;
 // React, ReactDOM והאייקונים נארזים לתוך הדף (במקום CDN): האפליקציה נפתחת גם כשה-CDN איטי או חסום, ומהר יותר.

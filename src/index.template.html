@@ -162,10 +162,13 @@
     // מצב קורא אלקטרוני (הגדרה של המכשיר): מופעל לפני הציור הראשון, בלי הבהוב
     try { if (localStorage.getItem('vrt-eink') === '1') document.documentElement.setAttribute('data-eink', ''); } catch (e) {}
     // ערכת העיצוב, הגופן, הגודל והנגישות (נשמרים גם במכשיר): לפני הציור הראשון, בלי הבהוב
-    try { var L = JSON.parse(localStorage.getItem('vrt-look') || '{}'), R = document.documentElement;
-      if (L.palette) R.setAttribute('data-palette', L.palette); if (L.font) R.setAttribute('data-font', L.font); if (L.a11y) R.setAttribute('data-a11y', '');
-      if (L.zoom) R.style.setProperty('--zoom', L.zoom);
-      if (L.mode === 'dark' || (L.mode !== 'light' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches)) R.setAttribute('data-mode', 'dark'); } catch (e) {}
+    try { var LK = JSON.parse(localStorage.getItem('vrt-look') || '{}'), R = document.documentElement;
+      if (LK.palette) R.setAttribute('data-palette', LK.palette); if (LK.font) R.setAttribute('data-font', LK.font); if (LK.a11y) R.setAttribute('data-a11y', '');
+      if (LK.zoom) R.style.setProperty('--zoom', LK.zoom);
+      if (LK.mode === 'dark' || (LK.mode !== 'light' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches)) R.setAttribute('data-mode', 'dark'); } catch (e) {}
+    // שפת הממשק (נבחרת בכניסה הראשונה): אנגלית = שמאל-לימין
+    try { if (localStorage.getItem('vrt-lang') === 'en') { var H = document.documentElement; H.lang = 'en'; H.dir = 'ltr'; document.title = 'What We Read';
+      var B = document.querySelector('#root .boot'); if (B) B.textContent = 'Loading What We Read…'; } } catch (e) {}
     window.__installPrompt = null;
     window.addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); window.__installPrompt = e; window.dispatchEvent(new Event('vrt-install-ready')); });
     window.addEventListener('appinstalled', function () { window.__installPrompt = null; window.dispatchEvent(new Event('vrt-install-ready')); });

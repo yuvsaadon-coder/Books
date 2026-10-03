@@ -723,6 +723,61 @@ try {
     await C.click('button:has-text("דילוג")');
     await C.waitForSelector('text=חסמבה');
   });
+  await step('English interface: chosen on first entry, left-to-right, English everywhere, the model writes in English, back to Hebrew', async () => {
+    const E = await phone(browser, 'E');
+    // הטקסט העברי שנשאר במסך (חוץ מבחירת השפה עצמה)
+    const hebrewLeft = (sel) => E.evaluate((sel) => [...document.querySelectorAll(sel)].flatMap(el => el.innerText.split('\n')).filter(l => /[\u0590-\u05FF]/.test(l) && !/^(עברית|שפה · Language)$/.test(l.trim())), sel);
+    await E.click('[role=group][aria-label="שפה · Language"] button:has-text("English")');
+    await E.waitForSelector('text=Whose library is this?');
+    assert.deepEqual(await E.evaluate(() => [document.documentElement.dir, document.documentElement.lang, document.title]), ['ltr', 'en', 'What We Read']);
+    if (!(await E.locator('#new-profile').count())) await E.click('button:has-text("Add a user")');
+    await E.fill('#new-profile', 'Dana'); await E.click('button:has-text("Enter")');
+    // רשימת ההיכרות: אותם ספרים, בשמות באנגלית
+    const dlg = E.locator('[role=dialog]');
+    await dlg.locator('text=Which books have you read?').waitFor();
+    assert.match(await dlg.locator('[role=group][aria-label*=","]').last().getAttribute('aria-label'), /^[A-Za-z0-9 .,:'&!?-]+, [A-Za-z .'-]+$/);
+    await E.fill('#starter-q', 'Norwegian'); await E.waitForSelector('li:has-text("Norwegian Wood")'); await E.fill('#starter-q', '');
+    await shot(E, 'en-starter', false);
+    assert.deepEqual(await hebrewLeft('[role=dialog]'), [], 'starter dialog in English');
+    await E.click('button:has-text("Skip the introduction")');
+    assert.deepEqual(await texts(E.locator('nav li button')), ['My books', 'Add a book', 'Discover', 'Friends', 'Settings']);
+    // הוספת ספר: הספר באנגלית קודם, והחלון באנגלית
+    await E.click('nav >> text=Add a book'); await E.click('button[role=tab]:has-text("One book")');
+    await E.fill('#book-q', 'Norwegian Wood'); await E.click('form button[type=submit]');
+    await E.locator('main ul > li').first().locator('button:has-text("This is my book")').click();
+    assert.deepEqual(await hebrewLeft('[role=dialog]'), [], 'rating sheet in English');
+    await E.click('[aria-label="5 stars"]'); await E.click('button:has-text("Save to library")');
+    await E.waitForSelector('h1:has-text("My books")');
+    await E.waitForSelector('main li:has-text("Norwegian Wood")');
+    assert.deepEqual(await hebrewLeft('main'), [], 'library in English');
+    await shot(E, 'en-library');
+    // הגדרות: כל הקבוצות באנגלית; כתובת הפנייה העברית לא מוצגת
+    await E.click('nav >> text=Settings');
+    for (const g of ['My account', 'Recommendations', 'Notifications', 'Display and accessibility', 'Feedback', 'Privacy and friends', 'My data']) await group(E, g);
+    assert.equal(await E.locator('text=Feminine').count(), 0);
+    assert.deepEqual(await hebrewLeft('main'), [], 'settings in English');
+    await shot(E, 'en-settings');
+    // המלצה: ברירת המחדל היא ספרים באנגלית, והמודל מתבקש לכתוב באנגלית
+    await E.click('nav >> text=Discover');
+    await E.waitForSelector('text=Hi! Let\'s find your next book.');
+    await E.waitForSelector('text=Default: English');
+    assert.deepEqual(await hebrewLeft('main'), [], 'discover in English');
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 'eq', name: 'submit_questions', input: { questions: [] } }], stop: 'tool_use' });
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 'er', name: 'submit_recommendations', input: { interpretation: 'Something quietly British.', recommendations: [
+      { title_he: '', title_original: 'The Remains of the Day', author: 'Kazuo Ishiguro', isbn: '9780679731726', why: 'Restrained, like the books you loved.', genres: [], candidate: 0, country: 'United Kingdom' }] } }], stop: 'tool_use' });
+    await E.fill('#ai-request', 'something British'); await E.click('button:has-text("Smart recommendation")');
+    await E.waitForSelector('section li:has-text("The Remains of the Day")', { timeout: 30000 });
+    const sys = jobBodies.at(-1).system;
+    assert.ok(sys.includes('Language: English only') && sys.includes('Write every free-text field in English') && !sys.includes('Address the reader in Hebrew'), 'English recommendation prompt');
+    assert.equal(jobBodies.at(-1).lang, 'en');
+    await E.waitForFunction(() => !document.querySelector('[aria-label^="Step "]'), null, { timeout: 30000 });
+    await shot(E, 'en-recs');
+    // חזרה לעברית מההגדרות
+    await E.click('nav >> text=Settings'); await group(E, 'My account');
+    await E.click('[role=group][aria-label="שפה · Language"] button:has-text("עברית")');
+    await E.waitForSelector('nav >> text=הגדרות');
+    assert.equal(await E.evaluate(() => document.documentElement.dir), 'rtl');
+  });
   assert.deepEqual(errors, [], 'page errors');
   console.log('\nכל הבדיקות עברו');
 } finally {

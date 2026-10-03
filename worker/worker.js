@@ -390,15 +390,17 @@ const REVIEW_TOOL = {
   name: 'submit_reviews', description: 'Return the reviews found in the search results.',
   input_schema: { type: 'object', additionalProperties: false, required: ['reviews'], properties: {
     reviews: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['url', 'summary_he'], properties: {
-      url: { type: 'string', description: 'exact URL of a search result' }, summary_he: { type: 'string', description: 'one sentence in Hebrew: what this review says about the book, only from the result text' } } } },
+      url: { type: 'string', description: 'exact URL of a search result' }, summary_he: { type: 'string', description: 'one sentence in the requested language: what this review says about the book, only from the result text' } } } },
     rating: { type: 'number', description: 'average reader rating out of 5, only if a result states it' },
     rating_count: { type: 'integer' }, rating_url: { type: 'string' } } }
 };
-export async function findReviews(env, { title, author, original }) {
+// lang: שפת הממשק של המשתמש (he / en) – שפת הסיכום
+export async function findReviews(env, { title, author, original, lang = 'he' }) {
+  const outLang = lang === 'en' ? 'English' : 'Hebrew';
   if (!env.ANTHROPIC_API_KEY) return { reviews: [], rating: null };
   const blocked = (await env.LIBRARY.get('blocked-domains', 'json')) || [];
   const sites = REVIEW_SITES.filter(d => !blocked.includes(d));
-  const messages = [{ role: 'user', content: `Find critics' or readers' reviews of the book "${title}"${original && original !== title ? ` (original title "${original}")` : ''}${author ? ` by ${author}` : ''}. Search at most twice (try the original title too). Then call submit_reviews with up to 3 relevant reviews from the search results: the exact result URL and one Hebrew sentence on what the reviewer says (only what the result text says, never invent). If a result states an average reader rating (e.g. Goodreads), include it. If nothing relevant was found, submit an empty list.` }];
+  const messages = [{ role: 'user', content: `Find critics' or readers' reviews of the book "${title}"${original && original !== title ? ` (original title "${original}")` : ''}${author ? ` by ${author}` : ''}. Search at most twice (try the original title too). Then call submit_reviews with up to 3 relevant reviews from the search results: the exact result URL and one ${outLang} sentence on what the reviewer says (only what the result text says, never invent). If a result states an average reader rating (e.g. Goodreads), include it. If nothing relevant was found, submit an empty list.` }];
   let input = null; const urls = new Set();
   for (let turn = 0; turn < 3 && !input; turn++) {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -436,8 +438,9 @@ export async function handleFeedback(req, env, cors) {
 async function handleReviews(req, env, cors, ctx) {
   const p = new URL(req.url).searchParams;
   const title = (p.get('title') || '').slice(0, 150).trim(), author = (p.get('author') || '').slice(0, 80).trim(), original = (p.get('original') || '').slice(0, 150).trim();
+  const lang = p.get('lang') === 'en' ? 'en' : 'he';
   if (!title) return json({ error: 'missing' }, 400, cors);
-  const key = 'reviews2:' + `${title}|${author}`.toLowerCase();
+  const key = 'reviews2:' + (lang === 'en' ? 'en:' : '') + `${title}|${author}`.toLowerCase();
   const cached = await env.LIBRARY.get(key, 'json');
   if (cached) return json({ ...cached, cached: true }, 200, cors);
   const day = new Date().toISOString().slice(0, 10), counterKey = 'store-count:' + day;
@@ -445,7 +448,7 @@ async function handleReviews(req, env, cors, ctx) {
   if (used >= STORE_DAILY_LIMIT) return json({ reviews: [], rating: null, limited: true }, 200, cors);
   await env.LIBRARY.put(counterKey, String(used + 1), { expirationTtl: 60 * 60 * 48 });
   let out;
-  try { out = { ...(await findReviews(env, { title, author, original })), checked_at: Date.now() }; }
+  try { out = { ...(await findReviews(env, { title, author, original, lang })), checked_at: Date.now() }; }
   catch (e) { return json({ reviews: [], rating: null, error: String(e.message || e) }, 200, cors); }
   const found = out.reviews.length || out.rating;
   ctx.waitUntil(env.LIBRARY.put(key, JSON.stringify(out), { expirationTtl: (found ? 30 : 2) * 86400 }));
@@ -475,7 +478,7 @@ async function anthropicOnce(body, env) {
   throw new Error('blocked domains');
 }
 export async function runJob(job, env, onTurn) {
-  const { submit, pid, ...body } = job;   // שדות פנימיים לא נשלחים ל-Anthropic
+  const { submit, pid, lang, ...body } = job;   // שדות פנימיים לא נשלחים ל-Anthropic
   let messages = body.messages;
   const usage = [], hits = [];
   for (let turn = 0; turn < JOB_TURNS; turn++) {
@@ -516,7 +519,9 @@ export class AiJob {
       const out = await runJob(job, this.env, (turns) => this.state.storage.put('status', { ...s, turns }));
       await this.state.storage.put('status', { status: 'done', at: Date.now(), ...out });
       // ההמלצה מוכנה: התראה לטלפון (ה-Service Worker לא מציג אותה אם האפליקציה פתוחה מול העיניים)
-      if (job.pid) await pushTo(this.env, job.pid, { title: 'ההמלצות שלך מוכנות', body: 'Claude סיים לחפש. לחצו כדי לראות את הספרים.', url: './?view=recs' }).catch(() => {});
+      if (job.pid) await pushTo(this.env, job.pid, job.lang === 'en'
+        ? { title: 'Your recommendations are ready', body: 'Claude has finished. Tap to see the books.', url: './?view=recs' }
+        : { title: 'ההמלצות שלך מוכנות', body: 'Claude סיים לחפש. לחצו כדי לראות את הספרים.', url: './?view=recs' }).catch(() => {});
     } catch (e) {
       await this.state.storage.put('status', { status: 'error', at: Date.now(), error: String((e && e.message) || e), code: (e && e.status) || 0 });
     }
@@ -539,7 +544,7 @@ async function handleJobs(req, env, cors, path) {
       model: ALLOWED_MODELS.includes(body.model) ? body.model : ALLOWED_MODELS[0],
       max_tokens: Math.min(Number(body.max_tokens) || 16000, 16000),
       system: body.system, messages: Array.isArray(body.messages) ? body.messages.slice(0, 4) : [], tools: body.tools,
-      submit: String(body.submit || '').slice(0, 64), pid: String(body.pid || '').slice(0, 64)
+      submit: String(body.submit || '').slice(0, 64), pid: String(body.pid || '').slice(0, 64), lang: body.lang === 'en' ? 'en' : 'he'
     };
     if (body.thinking) job.thinking = { type: 'adaptive' };
     if (body.output_config && ['low', 'medium', 'high'].includes(body.output_config.effort)) job.output_config = { effort: body.output_config.effort };
@@ -827,12 +832,12 @@ async function pushTo(env, pid, notice = { title: 'מה שנקרא', body: '10 �
 const DIGEST_TOOL = {
   name: 'submit_digest', description: 'Return the suggested books.', strict: true,
   input_schema: { type: 'object', additionalProperties: false, required: ['intro', 'books'], properties: {
-    intro: { type: 'string', description: 'one warm sentence in Hebrew introducing this batch' },
+    intro: { type: 'string', description: 'one warm sentence in the reader\'s language (see the system prompt) introducing this batch' },
     books: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['title_he', 'title_original', 'author', 'isbn', 'why'], properties: {
       title_he: { type: 'string' }, title_original: { type: 'string' }, author: { type: 'string' }, isbn: { type: 'string' }, why: { type: 'string' } } } } } }
 };
 const ADDRESS_RULE = { f: ' Address the reader in the Hebrew feminine singular.', m: ' Address the reader in the Hebrew masculine singular.', n: ' Address the reader in gender-neutral Hebrew.' };
-function digestPrompt(db, prior) {
+function digestPrompt(db, prior, en = false) {
   const read = (db.books || []).filter(b => !['want', 'reading'].includes(b.status)).sort((a, b) => (b.readAt || 0) - (a.readAt || 0) || b.rating - a.rating).slice(0, 60);
   // מתי נקרא ביחס להיום: הקריאה האחרונה מראה את הטעם העכשווי
   const when = (b) => { if (!b.readAt) return 'date unknown'; const d = (Date.now() - b.readAt) / 86400000; return d < 45 ? `${Math.round(d)} days ago` : d < 540 ? `${Math.round(d / 30)} months ago` : `${Math.round(d / 365)} years ago`; };
@@ -844,21 +849,22 @@ function digestPrompt(db, prior) {
 WISHLIST / READING NOW (current interests; do not suggest these): ${(db.books || []).filter(b => ['want', 'reading'].includes(b.status)).slice(0, 40).map(b => b.title).join('; ') || 'none'}
 DO NOT SUGGEST (already read, owned, suggested before, or rejected): ${exclude.join('; ') || 'none'}
 
-Recent reading (by when read) shows current interests and where the taste is heading; weigh it more than old favourites.\nSuggest 14 books this reader has not read that would interest them now — a varied mix (not all by the same author), including some recent books. Prefer books with a Hebrew edition.`;
+Recent reading (by when read) shows current interests and where the taste is heading; weigh it more than old favourites.\nSuggest 14 books this reader has not read that would interest them now — a varied mix (not all by the same author), including some recent books.${en ? '' : ' Prefer books with a Hebrew edition.'}`;
 }
 export async function generateDigest(env, ctx, pid, db) {
   const prior = (await env.LIBRARY.get('digest:' + pid, 'json')) || [];
   // שפות ברירת המחדל של המשתמש (עברית / אנגלית / שפות זרות); עברית בלבד רק כשזה מה שנבחר
   const st = db.settings || {};
-  const langs = Array.isArray(st.recLangs) && st.recLangs.length ? st.recLangs : ({ he: ['he'], en: ['en'], any: ['he', 'en', 'other'] }[st.recLang] || ['he', 'en']);
+  const en = st.uiLang === 'en';   // ממשק באנגלית: הכול נכתב באנגלית, וברירת המחדל היא ספרים באנגלית
+  const langs = Array.isArray(st.recLangs) && st.recLangs.length ? st.recLangs : ({ he: ['he'], en: ['en'], any: ['he', 'en', 'other'] }[st.recLang] || (en ? ['en'] : ['he', 'en']));
   const heOnly = langs.length === 1 && langs[0] === 'he';
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
       model: ALLOWED_MODELS[0], max_tokens: 8000, thinking: { type: 'adaptive' }, output_config: { effort: 'low' },
-      system: 'You are a literary advisor with deep knowledge of world and Israeli literature. Every book you name is checked against real catalogues; name only real, published books. title_he must be the exact title of a Hebrew edition you know exists (otherwise empty; never translate a title yourself). `why` is one or two sentences in Hebrew that connect the book to this reader.' +
-        (heOnly ? ' Only books that have a published Hebrew edition; title_he is required for every book.' : langs.includes('other') ? ' Books may be in any language.' : langs.includes('he') ? ' Only books with a Hebrew or an English edition.' : ' Only books with an English edition.') + (ADDRESS_RULE[(db.settings && db.settings.address) || 'n'] || ''),
-      tools: [DIGEST_TOOL], messages: [{ role: 'user', content: digestPrompt(db, prior) }]
+      system: 'You are a literary advisor with deep knowledge of world and Israeli literature. Every book you name is checked against real catalogues; name only real, published books. title_he must be the exact title of a Hebrew edition you know exists (otherwise empty; never translate a title yourself). `why` is one or two sentences in ' + (en ? 'English' : 'Hebrew') + ' that connect the book to this reader, and `intro` is in ' + (en ? 'English' : 'Hebrew') + '.' +
+        (heOnly ? ' Only books that have a published Hebrew edition; title_he is required for every book.' : langs.includes('other') ? ' Books may be in any language.' : langs.includes('he') ? ' Only books with a Hebrew or an English edition.' : ' Only books with an English edition.') + (en ? '' : ADDRESS_RULE[(db.settings && db.settings.address) || 'n'] || ''),
+      tools: [DIGEST_TOOL], messages: [{ role: 'user', content: digestPrompt(db, prior, en) }]
     })
   });
   if (!r.ok) throw new Error('anthropic ' + r.status);
@@ -908,7 +914,9 @@ export async function runDigests(env, ctx, now = Date.now()) {
       await env.LIBRARY.put('digest-meta:' + p.id, JSON.stringify({ next: now + DIGEST_EVERY, last: d.id }));
       // ההתראה מזמינה לסיכום הדו-שבועי (מחושב באפליקציה), ומשם להצעות החדשות
       const done = (db.books || []).filter(b => ['read', 'partial'].includes(b.status || 'read') && b.readAt && b.readAt >= now - DIGEST_EVERY).length;
-      if (d.books.length) await pushTo(env, p.id, { title: 'הסיכום הדו-שבועי שלך מוכן 📚', body: `${done ? `${done} ספרים הסתיימו בשבועיים האחרונים. ` : ''}ומחכים לך ${d.books.length} ספרים חדשים`, url: './?view=summary' });
+      if (d.books.length) await pushTo(env, p.id, ((db.settings || {}).uiLang === 'en')
+        ? { title: 'Your two-week reading summary is ready 📚', body: `${done ? `${done} books finished in the last two weeks. ` : ''}And ${d.books.length} new books are waiting for you`, url: './?view=summary' }
+        : { title: 'הסיכום הדו-שבועי שלך מוכן 📚', body: `${done ? `${done} ספרים הסתיימו בשבועיים האחרונים. ` : ''}ומחכים לך ${d.books.length} ספרים חדשים`, url: './?view=summary' });
     } catch (e) {
       await env.LIBRARY.put('digest-meta:' + p.id, JSON.stringify({ next: now + 6 * 3600000, error: String(e.message || e) }));   // ננסה שוב בעוד כמה שעות
     }

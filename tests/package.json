@@ -2,7 +2,7 @@
   "name": "books-tests",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node starter.mjs && node worker.mjs && node e2e.mjs" },
+  "scripts": { "test": "node starter.mjs && node i18n.mjs && node worker.mjs && node e2e.mjs" },
   "devDependencies": {
     "@anthropic-ai/sdk": "0.129.0",
     "esbuild": "0.25.10",
