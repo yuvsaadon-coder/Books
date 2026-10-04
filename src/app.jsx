@@ -31,7 +31,7 @@ function setUiLang(lang) {
 const DEFAULT_LOCALE = IS_EN ? 'en-GB' : 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '43';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '44';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -755,7 +755,34 @@ async function resolveLink(url) {
 /* ---------- שמות בעברית: אם יש מהדורה עברית מציגים את שמה, ושם המקור עובר לשורת המשנה ---------- */
 function withHebrewTitle(c, he) {
   if (!c || !he || !hasHebrew(he) || hasHebrew(c.title)) return c;
-  return { ...c, title: he.trim(), subtitle: c.title };
+  return { ...c, title: he.trim(), subtitle: c.title, original: c.original || c.title };
+}
+/* ---------- השם בשפת המקור (ספרות מתורגמת) ----------
+   מוצג בקטן מתחת לשם, רק כשהוא שונה. מקורות: book.original (מההמלצה/מהחיפוש), או כותרת המשנה כשהיא בכתב אחר
+   (מהדורה עברית של ספר לועזי שומרת שם את השם המקורי; כותרת משנה בעברית לספר עברי היא כותרת משנה ולא מקור),
+   או רשימת ההיכרות (השם במקור, ולספרות ישראלית בממשק אנגלית – השם העברי). */
+const STARTER_ORIG = (() => {
+  const m = new Map();
+  STARTER.forEach(g => g.books.forEach(b => {
+    if (b[2]) m.set(normTitle(b[0]), b[2]);
+    const en = STARTER_EN[b[0] + '|' + b[1]];
+    if (en) m.set(normTitle(en[0]), b[2] || b[0]);
+  }));
+  return m;
+})();
+function originalTitle(b) {
+  if (!b || !b.title) return '';
+  const nt = normTitle(b.title);
+  const differs = (o) => o && normTitle(o) !== nt;
+  const otherScript = (o) => hasHebrew(o) !== hasHebrew(b.title);
+  if (differs(b.original) && (otherScript(b.original) || !hasHebrew(b.original))) return b.original.trim();
+  if (differs(b.subtitle) && otherScript(b.subtitle)) return b.subtitle.trim();
+  const st = STARTER_ORIG.get(nt);
+  return differs(st) ? st : '';
+}
+function OrigTitle({ book, className = '' }) {
+  const o = originalTitle(book);
+  return o ? <div className={`text-[12.5px] text-muted leading-snug ${className}`}>{L('במקור:')} <bdi dir="auto" className="italic">{o}</bdi></div> : null;
 }
 const STARTER_BY_ORIGINAL = (() => {
   const m = new Map();
@@ -810,6 +837,7 @@ function sanitizeBook(b) {
     offers: Array.isArray(b.offers) ? b.offers.filter(o => o && o.url && /^https:\/\//.test(o.url)).slice(0, 6).map(o => ({ site: str(o.site), url: str(o.url), kinds: arr(o.kinds) })) : [],
     detailsAt: Number(b.detailsAt) || 0,
     private: !!b.private,
+    original: str(b.original).slice(0, 200),   // השם בשפת המקור (ספרות מתורגמת)
     ignore: !!b.ignore,     // "לא להתחשב בספר בהמלצות": לא נכנס לטעם ולפרופיל (אבל לא יומלץ שוב)   // מוסתר מחברים (לא מופיע במדף שלי אצלם, בהמלצות שלהם וב"אהובים בקהילה")
     ebook: !!b.ebook, ebookLink: str(b.ebookLink), olEbook: !!b.olEbook,
     note: str(b.note).slice(0, 4000), descriptionHe: str(b.descriptionHe), editedAt: Number(b.editedAt) || Number(b.addedAt) || 0,
@@ -1539,6 +1567,26 @@ function focusSummary(focus) {
   }).filter(Boolean);
 }
 
+// המלצה מתוך הספרים שלי בלבד: Claude בוחר מהמדף "רוצה לקרוא" (וספרים שהופסקו באמצע), בלי חיפוש במאגרים
+const myShelf = (books) => books.filter(b => statusOf(b) === 'want' || (statusOf(b) === 'partial' && !b.rating));
+async function aiPickFromShelf({ books, request, focus, profile }) {
+  const shelf = myShelf(books).slice(0, 120);
+  const { input, cost } = await aiRun({
+    fast: true, web: false,
+    system: 'You are a literary advisor. The reader wants their next book ONLY from books already on their shelf (THEIR SHELF: books they saved to read, or started and stopped). Choose up to 5 books from THEIR SHELF, by number, that best fit the request, their preferences and their current taste, best first. Never name a book that is not on the shelf. `why` is 1–2 sentences connecting the book to the request and to books they loved. ' + TASTE_WEIGHT_RULE + ' ' + HEBREW_OUT + addressRule(addressOf()),
+    prompt: `${profile && profile.text ? `READER PROFILE:\n${profile.brief || profile.text}\n\n` : ''}READER'S LIBRARY (title (published) — author | rating 1-5 | when read | tags | notes | w):\n${libraryForPrompt(books, 30) || '(empty)'}\n\nTHEIR SHELF (number. title — author | status | genre | note):\n${shelf.map((b, i) => `${i + 1}. ${b.title} — ${(b.authors || [])[0] || '?'} | ${statusOf(b) === 'partial' ? 'started, stopped' : 'want to read'}${classifyBook(b)[0] ? ' | ' + (GENRE_OF_TAG[classifyBook(b)[0]] || classifyBook(b)[0]) : ''}${b.pageCount ? ` | ${b.pageCount} pages` : ''}${b.note ? ' | ' + b.note.replace(/\s+/g, ' ').slice(0, 120) : ''}`).join('\n')}\n\nREQUEST: ${request || '(none)'}\nPREFERENCES: ${focusSummary(focus).join('; ') || '(none)'}`,
+    submitTool: {
+      name: 'submit_shelf_picks', description: 'Return the chosen books from the shelf.',
+      input_schema: { type: 'object', additionalProperties: false, required: ['interpretation', 'picks'], properties: {
+        interpretation: { type: 'string', description: `one sentence in ${OUT_LANG}: how you understood the request` },
+        picks: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['n', 'why'], properties: { n: { type: 'integer' }, why: { type: 'string' } } } } } }
+    }
+  });
+  const seen = new Set();
+  const recs = (input.picks || []).map(p => ({ b: shelf[(p.n || 0) - 1], why: p.why })).filter(x => x.b && !seen.has(x.b.id) && seen.add(x.b.id)).slice(0, 5)
+    .map(x => ({ ...x.b, reasons: [x.why] }));
+  return { recs, interpretation: input.interpretation || '', cost };
+}
 // שאלות המשך קצרות לדיוק הבקשה (2–4), לפני ההמלצה
 async function aiClarify({ books, request, focus, profile, avoid = [], count = 0, gift = false }) {
   const { input } = await aiRun({
@@ -3221,6 +3269,7 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
               <Cover book={b} className="w-14 h-20" />
               <div className="min-w-0 flex-1">
                 <div className="font-display font-medium text-[17px] leading-snug clamp-2">{b.title}{b.private && <span className="inline-block align-middle ms-1.5 text-muted" title="מוסתר מחברים" aria-label="מוסתר מחברים"><Icon name="EyeOff" size={14} /></span>}{b.ignore && <span className="inline-block align-middle ms-1.5 text-muted" title="לא נלקח בחשבון בהמלצות" aria-label="לא נלקח בחשבון בהמלצות"><Icon name="Ban" size={14} /></span>}</div>
+                <OrigTitle book={b} />
                 <div className="text-muted text-[14px] truncate">{[b.authors.join(', '), L(b.country), b.year].filter(Boolean).join(' · ')}</div>
                 {statusOf(b) === 'read' || b.rating > 0 ? <div className="mt-1"><Stars value={b.rating} size={15} /></div>
                   : <div className={`mt-1 text-[12px] font-semibold inline-flex items-center gap-1 px-2 py-0.5 rounded-full ${STATUS_TONE[statusOf(b)] || ''}`}><Icon name={(STATUSES.find(x => x[0] === statusOf(b)) || [])[2]} size={13} />{(STATUSES.find(x => x[0] === statusOf(b)) || [])[1]}</div>}
@@ -3241,7 +3290,8 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
             <Cover book={current} className="w-24 h-36" />
             <div className="min-w-0 flex-1">
               <div className="font-display font-medium text-[20px] leading-tight">{current.title}</div>
-              {current.subtitle && <div className="text-[14px] text-muted">{current.subtitle}</div>}
+              {current.subtitle && current.subtitle !== originalTitle(current) && <div className="text-[14px] text-muted">{current.subtitle}</div>}
+              <OrigTitle book={current} className="mt-0.5" />
               <div className="text-[15px] mt-1">{current.authors.join(', ')}</div>
               <div className="text-muted text-[13px] tabular mt-0.5">{metaLine(current)}</div>
               <div className="mt-2">{statusOf(current) === 'read' ? <Stars value={current.rating} size={18} /> : <span className="text-accent font-semibold inline-flex items-center gap-1"><Icon name={(STATUSES.find(x => x[0] === statusOf(current)) || [])[2]} size={15} />{(STATUSES.find(x => x[0] === statusOf(current)) || [])[1]}{current.rating > 0 ? ` · ${current.rating}★` : ''}</span>}</div>
@@ -3408,7 +3458,8 @@ function CandidateGroup({ group, inLib, onPick, autoDetails = false, seriesSlot 
         <Cover book={c} className="w-20 h-28" />
         <div className="min-w-0 flex-1">
           <div className="font-display font-medium text-[18px] leading-snug">{c.title}</div>
-          {c.subtitle && <div className="text-muted text-[13px] clamp-2">{c.subtitle}</div>}
+          {c.subtitle && c.subtitle !== originalTitle(c) && <div className="text-muted text-[13px] clamp-2">{c.subtitle}</div>}
+          <OrigTitle book={c} />
           <div className="text-[15px] mt-0.5">{c.authors.length ? c.authors.join(', ') : <span className="text-warn">מחבר לא צוין במקור</span>}</div>
           <div className="text-muted text-[13px] tabular">{metaLine(c)}</div>
           {c.isbns && c.isbns[0] && <div className="text-muted text-[12px] tabular">ISBN <span dir="ltr">{c.isbns[0]}</span></div>}
@@ -4271,6 +4322,7 @@ function RecCard({ r, onRead, onWant, onDismiss, inLib, onEnrich, voteSlot = nul
         <Cover book={r} className="w-20 h-28" />
         <div className="min-w-0 flex-1">
           <div className="font-display font-medium text-[18px] leading-snug">{r.title}</div>
+          <OrigTitle book={r} />
           <div className="text-[15px]">{r.authors.join(', ')}</div>
           <div className="text-muted text-[13px] tabular">{[r.year, L(r.country), r.pageCount ? r.pageCount + ' עמ\'' : '', langLabel(r.language)].filter(Boolean).join(' · ')}</div>
           <div className="mt-1.5 flex flex-wrap gap-1 items-center"><SourceBadge book={r} /><span className="text-[12px] text-muted">{fmtDateTime(r.verifiedAt)}</span></div>
@@ -4477,6 +4529,7 @@ function AllRecsView({ db, update, onPick, digests }) {
           <Cover book={b} className="w-12 h-[4.5rem]" />
           <div className="min-w-0 flex-1">
             <div className="font-display font-bold text-[16px] leading-snug">{b.title}</div>
+            <OrigTitle book={b} />
             <div className="text-[14px] text-muted truncate">{[(b.authors || [])[0], L(b.country), b.year].filter(Boolean).join(' · ')}</div>
             <div className="text-[12px] text-muted">{fmtDate(it.at)} · {it.src}</div>
           </div>
@@ -4598,7 +4651,23 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
     } catch (e) { progress(e.message); }
     recSet(st, { running: false });
   };
+  const goMine = async () => {
+    const request = aiText.trim();
+    const ans = { mode: 'ai', request, focus: st.focus, mine: true };
+    recSet(st, { answers: ans, step: QUESTIONS.length, running: true, qa: [] });
+    pushLog({ from: 'me', text: [L('📚 מתוך הספרים שלי'), request, ...focusSummary(st.focus)].filter(Boolean).join(' · ') });
+    try {
+      if (!myShelf(db.books).length) progress(T('אין ספרים ברשימת "רוצה לקרוא". הוסיפו ספרים לרשימה, או בחרו "מכל הספרים".'));
+      else {
+        progress(L('Claude בוחר מתוך {0} ספרים שברשימה שלך…', [myShelf(db.books).length]));
+        const { recs: r, interpretation } = await aiPickFromShelf({ books: db.books, request, focus: st.focus, profile: db.litProfile });
+        applyRecs(ans, r, interpretation);
+      }
+    } catch (e) { progress(e.message); }
+    recSet(st, { running: false });
+  };
   const goAi = async () => {
+    if (st.mine && !st.gift) return goMine();
     const request = aiText.trim();
     const gift = !!st.gift;
     const ans = { mode: 'ai', request, focus: st.focus, gift };
@@ -4706,14 +4775,18 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
 
       {hasAi && step === 0 && !log.length && (
         <div className="bg-surface border border-accent rounded-xl p-3 mb-4 grid gap-2">
-          <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface2" role="tablist" aria-label="בשביל מי הספר">
-            {[[false, 'בשבילי', 'Sparkles'], [true, '🎁 בשביל מישהו אחר', 'Gift']].map(([g, l, ic]) => (
-              <button key={l} type="button" role="tab" aria-selected={!!st.gift === g} onClick={() => recSet(st, { gift: g })}
-                className={`min-h-[40px] rounded-xl font-semibold text-[14px] inline-flex items-center justify-center gap-1.5 ${!!st.gift === g ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}>{g ? l : <><Icon name={ic} size={16} />{l}</>}</button>
-            ))}
+          <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-surface2" role="tablist" aria-label="בשביל מי הספר">
+            {[['all', 'מכל הספרים', 'Sparkles'], ['mine', 'מהספרים שלי', 'Library'], ['gift', '🎁 מתנה', '']].map(([k, l, ic]) => {
+              const on = (st.gift ? 'gift' : st.mine ? 'mine' : 'all') === k;
+              return (
+                <button key={k} type="button" role="tab" aria-selected={on} onClick={() => recSet(st, { gift: k === 'gift', mine: k === 'mine' })}
+                  className={`min-h-[40px] px-1 rounded-xl font-semibold text-[13.5px] leading-tight inline-flex items-center justify-center gap-1 ${on ? 'bg-surface text-accent shadow-sm' : 'text-muted'}`}>{ic && <Icon name={ic} size={15} />}{l}</button>
+              );
+            })}
           </div>
           <label htmlFor="ai-request" className="font-semibold text-[16px] flex items-center gap-1.5"><Icon name={st.gift ? 'Gift' : 'Sparkles'} size={18} />{st.gift ? T('למי הספר? ספרו עליו או עליה') : 'מה בא לך לקרוא?'}</label>
           {st.gift && <p className="text-[13px] text-muted -mt-1">ההמלצה לא תשפיע על הפרופיל שלך.</p>}
+          {st.mine && !st.gift && <p className="text-[13px] text-muted -mt-1">{L('הבחירה רק מתוך {0} הספרים שברשימת "רוצה לקרוא" שלך.', [myShelf(db.books).length])}</p>}
           <textarea id="ai-request" value={aiText} onChange={e => setAiText(e.target.value)} rows={3}
             placeholder={st.gift ? "למשל: לאבא שלי, בן 70, אוהב היסטוריה וביוגרפיות, קרא את 'סאפיינס'" : "למשל: משהו כמו 'יער נורווגי' אבל פחות עצוב; רומן שמתרחש בארץ; ספר שאפשר גם לשמוע"}
             className="w-full rounded-xl border border-line bg-bg p-2.5 text-[16px] leading-relaxed" />
@@ -6130,6 +6203,7 @@ const GUIDE = [
     [L('ההמלצות לא מתאימות לי'), L('כותבים בתיבה "לא בדיוק זה?" מה לא מתאים, ומקבלים הצעות מעודכנות. על ספר מסוים לוחצים "לא בשבילי" ובוחרים לחודש או לתמיד, עם הערה שמדייקת את הפרופיל.')],
     [L('איפה כל ההמלצות שקיבלתי?'), L('בלשונית "גלה ספר חדש" ← "כל ההמלצות": כל ההמלצות מהשיחות ומההצעות הדו-שבועיות. מסמנים "טובה" או "לא טובה", ואפשר להוסיף למה (רשות). הטובות מופיעות למעלה, אלה שלא התאימו מוצנעות בסוף הרשימה, והסימונים מלמדים את ההמלצות הבאות ואת הפרופיל הספרותי.')],
     [L('באיזו שפה הספרים?'), L('בשאלון מסמנים עברית, אנגלית ו/או שפות זרות. ברירת המחדל: עברית ואנגלית. משנים אותה בהגדרות ← "המלצות" ← "שפות ברירת המחדל להמלצות".')],
+    [L('אפשר לקבל המלצה רק מתוך הספרים שלי?'), L('כן. ב"גלה ספר חדש" בוחרים "מהספרים שלי": Claude בוחר את הספר הבא מתוך רשימת "רוצה לקרוא" (וספרים שהתחלת והפסקת), לפי הבקשה והטעם שלך, בלי לחפש ספרים חדשים.')],
     [L('מה זה "ספר בשביל מישהו אחר"?'), L('מצב מתנה: מתארים את מי שמקבל את הספר, וההמלצה לא נשענת על הטעם שלך ולא משנה אותו. ספר שנשמר נכנס ל"רוצה לקרוא" עם התגית "מתנה".')],
     [L('איך ההמלצות מתחשבות במתי קראתי?'), L('לכל ספר יש משקל: כמה אהבת אותו, כפול כמה הוא עדכני. ספר מאתמול שווה פי שניים מספר מלפני 3 שנים, ופי 8 בערך מספר מלפני 10 שנים. למודל נשלחים רק הספרים שהכי מעידים על הטעם שלך היום, וכך ההמלצה מדויקת וזולה יותר.')],
     [L('אפשר שההמלצות לא יתחשבו בספר מסוים?'), L('כן. לוחצים על הספר ומכבים "להתחשב בספר בהמלצות". הספר נשאר בספרייה ולא יומלץ שוב, אבל לא משפיע על הטעם. כשמסמנים ספר שנקרא לפני 5 שנים ויותר, האפליקציה שואלת על כך בעצמה.')],

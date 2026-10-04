@@ -1193,5 +1193,15 @@ export const EN = {
   "סוגות ({0})": "Genres ({0})",
   "דרגו כדי להמשיך": "Rate it to continue",
   "ספרים בלי דירוג": "Books without a rating",
-  "לפני ההוספה, דרגו את הספרים שסימנתם \"קראתי\":": "Before adding, rate the books you marked \"Read\":"
+  "לפני ההוספה, דרגו את הספרים שסימנתם \"קראתי\":": "Before adding, rate the books you marked \"Read\":",
+  "במקור:": "Original:",
+  "📚 מתוך הספרים שלי": "📚 From my books",
+  "אין ספרים ברשימת \"רוצה לקרוא\". הוסיפו ספרים לרשימה, או בחרו \"מכל הספרים\".": "There are no books on your \"Want to read\" list. Add some, or choose \"From all books\".",
+  "Claude בוחר מתוך {0} ספרים שברשימה שלך…": "Claude is choosing from the {0} books on your list…",
+  "מכל הספרים": "From all books",
+  "מהספרים שלי": "From my books",
+  "🎁 מתנה": "🎁 Gift",
+  "הבחירה רק מתוך {0} הספרים שברשימת \"רוצה לקרוא\" שלך.": "Chosen only from the {0} books on your \"Want to read\" list.",
+  "אפשר לקבל המלצה רק מתוך הספרים שלי?": "Can I get a recommendation only from my own books?",
+  "כן. ב\"גלה ספר חדש\" בוחרים \"מהספרים שלי\": Claude בוחר את הספר הבא מתוך רשימת \"רוצה לקרוא\" (וספרים שהתחלת והפסקת), לפי הבקשה והטעם שלך, בלי לחפש ספרים חדשים.": "Yes. In \"Discover\", choose \"From my books\": Claude picks your next book from your \"Want to read\" list (and books you started and stopped), based on your request and taste, without looking for new books."
 };

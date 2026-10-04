@@ -526,7 +526,7 @@ try {
     aiScript.push({ blocks: [{ type: 'tool_use', id: 'g1', name: 'submit_questions', input: { questions: [] } }], stop: 'tool_use' });
     aiScript.push({ blocks: [{ type: 'tool_use', id: 'g2', name: 'submit_recommendations', input: { interpretation: 'מתנה לאבא.', recommendations: [] } }], stop: 'tool_use' });
     if (await A.locator('button:has-text("שאלון חדש")').count()) await A.click('button:has-text("שאלון חדש")');
-    try { await A.click('button[role=tab]:has-text("בשביל מישהו אחר")', { timeout: 5000 }); } catch (e) { await A.screenshot({ path: '/tmp/claude-0/-home-user-Books/edc6a1f8-fcb8-5818-9816-3054e7d2cd52/scratchpad/gift.png', fullPage: true }); throw e; }
+    await A.click('button[role=tab]:has-text("🎁 מתנה")');
     await A.fill('#ai-request', 'לאבא שלי, אוהב היסטוריה'); await A.click('button:has-text("המלצה חכמה")');
     await A.waitForSelector('text=מתנה לאבא.', { timeout: 30000 });
     const jp = jobBodies.at(-1).messages[0].content;
@@ -631,7 +631,7 @@ try {
         { title_he: '', title_original: 'The Remains of the Day', author: 'Kazuo Ishiguro', isbn: '9780679731726', why: 'x', synopsis_he: '', genres: [], formats: fmt, sources: [] }] } }], stop: 'tool_use' });
       await A.click('nav >> text=גלה ספר חדש');
       if (await A.locator('button:has-text("שאלון חדש")').count()) await A.click('button:has-text("שאלון חדש")');
-      await A.click('button[role=tab]:has-text("בשבילי")');
+      await A.click('button[role=tab]:has-text("מכל הספרים")');
       // עברית ואנגלית מסומנות מראש; משנים רק לשיחה הזו
       assert.equal(await langs.locator('button[aria-pressed="true"], button.bg-accent, button[data-on="1"]').count() >= 0, true);
       await pick();
@@ -822,6 +822,19 @@ try {
     await A.waitForSelector('[role=dialog] [aria-label="סדרה"] >> text=ספר 2 מתוך 2');
     assert.equal(await A.locator('[role=dialog] button:has-text("סימון כל הסדרה")').count(), 0);
     await A.click('[role=dialog] [aria-label="סגירה"]');
+  });
+  await step('recommendation from my own shelf only, and the original-language title shown small', async () => {
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 'm1', name: 'submit_shelf_picks', input: { interpretation: 'משהו קסום מהרשימה שלך.', picks: [{ n: 2, why: 'הספר השני בסדרה שכבר התחלת.' }, { n: 99, why: 'לא קיים' }] } }], stop: 'tool_use' });
+    await A.click('nav >> text=גלה ספר חדש');
+    if (await A.locator('button:has-text("שאלון חדש")').count()) await A.click('button:has-text("שאלון חדש")');
+    await A.click('button[role=tab]:has-text("מהספרים שלי")');
+    await A.fill('#ai-request', 'משהו קסום'); await A.click('button:has-text("המלצה חכמה")');
+    await A.waitForSelector('text=משהו קסום מהרשימה שלך.', { timeout: 20000 });
+    await A.waitForSelector('section li:has-text("הספר השני בסדרה שכבר התחלת.")');
+    assert.equal(await A.locator('section li:has-text("לא קיים")').count(), 0, 'a number outside the shelf is ignored');
+    // השם בשפת המקור: ספר עברי של ספר מתורגם (מהדורה עברית עם השם המקורי)
+    await A.click('nav >> text=ספרים שלי'); await A.click('button[role=tab]:has-text("קראתי")');
+    await A.waitForSelector('main li:has-text("יער נורווגי") >> text=במקור: Norwegian Wood');
   });
   await step('old books: asked whether to count a book read 5+ years ago; ignored books leave the taste; weights reach the model', async () => {
     await A.click('nav >> text=הוספת ספר'); await A.click('button[role=tab]:has-text("ספר אחד")');
