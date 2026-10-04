@@ -31,7 +31,7 @@ function setUiLang(lang) {
 const DEFAULT_LOCALE = IS_EN ? 'en-GB' : 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '39';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '40';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -731,6 +731,7 @@ function sanitizeBook(b) {
     // קישורים לדפי הספר בחנויות ובהוצאות (נשמרים עם הספר), ומתי נבדקו
     offers: Array.isArray(b.offers) ? b.offers.filter(o => o && o.url && /^https:\/\//.test(o.url)).slice(0, 6).map(o => ({ site: str(o.site), url: str(o.url), kinds: arr(o.kinds) })) : [],
     detailsAt: Number(b.detailsAt) || 0,
+    private: !!b.private,   // מוסתר מחברים (לא מופיע במדף שלי אצלם, בהמלצות שלהם וב"אהובים בקהילה")
     ebook: !!b.ebook, ebookLink: str(b.ebookLink), olEbook: !!b.olEbook,
     note: str(b.note).slice(0, 4000), descriptionHe: str(b.descriptionHe), editedAt: Number(b.editedAt) || Number(b.addedAt) || 0,
     genres: arr(b.genres), sources: Array.isArray(b.sources) ? b.sources.filter(x => x && x.url).map(x => ({ title: str(x.title), url: str(x.url) })).slice(0, 8) : [],
@@ -2995,7 +2996,7 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
               <span aria-hidden="true" className="absolute start-0 inset-y-0 w-1 opacity-60" style={{ background: spineColor(b) }} />
               <Cover book={b} className="w-14 h-20" />
               <div className="min-w-0 flex-1">
-                <div className="font-display font-medium text-[17px] leading-snug clamp-2">{b.title}</div>
+                <div className="font-display font-medium text-[17px] leading-snug clamp-2">{b.title}{b.private && <span className="inline-block align-middle ms-1.5 text-muted" title="מוסתר מחברים" aria-label="מוסתר מחברים"><Icon name="EyeOff" size={14} /></span>}</div>
                 <div className="text-muted text-[14px] truncate">{[b.authors.join(', '), L(b.country), b.year].filter(Boolean).join(' · ')}</div>
                 {statusOf(b) === 'read' || b.rating > 0 ? <div className="mt-1"><Stars value={b.rating} size={15} /></div>
                   : <div className={`mt-1 text-[12px] font-semibold inline-flex items-center gap-1 px-2 py-0.5 rounded-full ${STATUS_TONE[statusOf(b)] || ''}`}><Icon name={(STATUSES.find(x => x[0] === statusOf(b)) || [])[2]} size={13} />{(STATUSES.find(x => x[0] === statusOf(b)) || [])[1]}</div>}
@@ -3033,7 +3034,13 @@ function LibraryTab({ db, update, onEdit, onDelete, onUpdateBook, goAdd, notify,
           {current.genres && current.genres.length > 0 && <div className="flex flex-wrap gap-1 mb-3">{current.genres.map(g => <span key={g} className="text-[12px] px-2 py-0.5 rounded-full border border-line">{g}</span>)}</div>}
           <AiDetailsButton book={current} onUpdate={(patch) => onUpdateBook(current.id, patch)} />
           <p className="text-muted text-[13px] mb-3">{current.year ? `יצא לאור ב-${current.year} · ` : ''}{statusOf(current) === 'want' ? `נוסף לרשימה ב-${fmtDate(current.addedAt)}` : statusOf(current) === 'reading' ? `התחלתי ב-${fmtDate(current.startedAt || current.addedAt)}` : `${statusOf(current) === 'partial' ? 'הפסקתי ב-' : 'נקרא ב-'}${fmtMonth(current.readAt || current.addedAt)}`}{current.isbns[0] ? ` · ISBN ${current.isbns[0]}` : ''}</p>
-          <RecommendToFriend book={current} notify={notify} />
+          <button type="button" role="switch" aria-checked={!!current.private} onClick={() => { onUpdateBook(current.id, { private: !current.private }); notify(current.private ? 'הספר גלוי שוב לחברים' : 'הספר מוסתר מחברים'); }}
+            className="w-full mb-3 min-h-[48px] px-3 rounded-xl border border-line bg-surface flex items-center gap-2.5 text-start">
+            <Icon name={current.private ? 'EyeOff' : 'Eye'} size={18} className={current.private ? 'text-accent' : 'text-muted'} />
+            <span className="flex-1 text-[15px] font-semibold">הסתרה מחברים</span>
+            <span className={`w-11 h-6 rounded-full p-0.5 transition-colors ${current.private ? 'bg-accent' : 'bg-surface2 border border-line'}`}><span className={`block w-5 h-5 rounded-full bg-surface shadow transition-transform ${current.private ? (IS_EN ? 'translate-x-5' : '-translate-x-5') : ''}`} /></span>
+          </button>
+          {!current.private && <RecommendToFriend book={current} notify={notify} />}
           {current.link && <a href={current.link} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent font-semibold mb-4 min-h-[44px]"><Icon name="ExternalLink" size={16} />לרשומה במקור</a>}
           <div className="grid grid-cols-2 gap-2">
             <Btn variant="soft" onClick={() => { onEdit(current); setOpen(null); }}><Icon name={['want', 'reading'].includes(statusOf(current)) ? 'BookCheck' : 'Pencil'} size={18} />{['want', 'reading'].includes(statusOf(current)) ? 'סיימתי אותו' : 'עריכה'}</Btn>
@@ -5262,7 +5269,7 @@ const shareOf = (d) => ({ read: true, want: true, notes: true, community: true, 
 function visibleBooks(d) {
   if (!d) return [];
   const sh = shareOf(d);
-  return d.books.filter(b => ['want', 'reading'].includes(statusOf(b)) ? sh.want : sh.read).map(b => sh.notes ? b : { ...b, note: '' });
+  return d.books.filter(b => !b.private && (['want', 'reading'].includes(statusOf(b)) ? sh.want : sh.read)).map(b => sh.notes ? b : { ...b, note: '' });
 }
 function useFriends() {
   const social = useSocial();
@@ -5883,6 +5890,7 @@ const GUIDE = [
     [L('אפשר לשתף?'), L('כן: "שיתוף כתמונה" בסוף הסיכום יוצר תמונה לשיתוף או לשמירה.')]] },
   { id: 'friends', title: L('חברים'), icon: 'Users', intro: L('רואים מה החברים קוראים ואוהבים, ממליצים אחד לשני ומגלים ספרים דרכם.'), qa: [
     [L('איך מוסיפים חבר?'), L('בלשונית "חברים" ← "להוסיף חברים" ← "בקשת חברות". אחרי שהחבר מאשר, רואים את המדפים שלו.')],
+    [L('איך מסתירים ספר מסוים מחברים?'), L('לוחצים על הספר ב"הספרים שלי" ומפעילים "הסתרה מחברים". הספר נשאר אצלך, אבל לא מופיע במדף שלך אצל החברים, בהמלצות שלהם וב"אהובים בקהילה". ליד ספר מוסתר מופיע סימן של עין מחוקה.')],
     [L('מה החברים רואים עליי?'), L('בוחרים בהגדרות ← "פרטיות וחברים": ספרים שקראת ודירוגים, רשימת "רוצה לקרוא", הערות, והופעה בלי שם ב"אהובים בקהילה".')],
     [L('איך ממליצים לחבר?'), L('במדף של חבר או בספר שלך לוחצים "להמליץ", בוחרים חבר (או כל החברים) ומוסיפים משפט.')]] },
   { id: 'notify', title: L('התראות'), icon: 'Bell', intro: L('התראה כשההמלצה מוכנה, וכשמגיעים הסיכום וההצעות הדו-שבועיות.'), qa: [

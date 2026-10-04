@@ -1138,5 +1138,11 @@ export const EN = {
   "מוודאים שזה הספר הנכון": "Making sure it's the right book",
   "הספר נכנס לספרייה": "The book goes into your library",
   "נא להמתין כמה שניות עד שהבדיקה תסתיים.": "Please wait a few seconds until the check finishes.",
-  "כדאי להשאיר את המסך פתוח. ספרים שכבר נבדקו נשמרים מיד, ואם יוצאים באמצע, הבדיקה ממשיכה בפתיחה הבאה.": "Keep the screen open. Books already checked are saved right away, and if you leave midway, the check continues next time you open the app."
+  "כדאי להשאיר את המסך פתוח. ספרים שכבר נבדקו נשמרים מיד, ואם יוצאים באמצע, הבדיקה ממשיכה בפתיחה הבאה.": "Keep the screen open. Books already checked are saved right away, and if you leave midway, the check continues next time you open the app.",
+  "הסתרה מחברים": "Hide from friends",
+  "הספר מוסתר מחברים": "The book is hidden from friends",
+  "הספר גלוי שוב לחברים": "Friends can see the book again",
+  "מוסתר מחברים": "Hidden from friends",
+  "איך מסתירים ספר מסוים מחברים?": "How do I hide a specific book from friends?",
+  "לוחצים על הספר ב\"הספרים שלי\" ומפעילים \"הסתרה מחברים\". הספר נשאר אצלך, אבל לא מופיע במדף שלך אצל החברים, בהמלצות שלהם וב\"אהובים בקהילה\". ליד ספר מוסתר מופיע סימן של עין מחוקה.": "Tap the book in \"My books\" and turn on \"Hide from friends\". The book stays in your library, but it doesn't appear on your shelf for friends, in their recommendations or in \"Community favourites\". A hidden book shows a crossed-out eye."
 };

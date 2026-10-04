@@ -366,6 +366,22 @@ try {
     const jp = jobBodies.at(-1).messages[0].content;
     assert.ok(jobBodies.length > before && jp.includes('Feedback on the previous suggestions (קפקא על החוף') && jp.includes('פחות עצוב בבקשה'));
   });
+  await step('privacy: one book hidden from friends', async () => {
+    await A.click('nav >> text=חברים'); await A.click('main button:has-text("יעל")');
+    await A.waitForSelector('main li:has-text("קפקא על החוף")');
+    await A.click('[aria-label="חזרה"]');
+    const toggle = async () => {
+      await B.click('nav >> text=ספרים שלי'); await B.click('main li:has-text("קפקא על החוף") button');
+      await B.click('[role=dialog] [role=switch]:has-text("הסתרה מחברים")'); await B.click('[role=dialog] [aria-label="סגירה"]');
+    };
+    await toggle();
+    await B.waitForSelector('main li:has-text("קפקא על החוף") [aria-label="מוסתר מחברים"]');
+    await syncBoth();
+    await A.click('nav >> text=חברים'); await A.click('main button:has-text("יעל")'); await A.waitForTimeout(300);
+    assert.equal(await A.locator('main li:has-text("קפקא על החוף")').count(), 0, 'hidden book not on the friend\'s shelf');
+    await A.click('[aria-label="חזרה"]');
+    await toggle(); await syncBoth();
+  });
   await step('privacy: a friend who hides their read books', async () => {
     // ההגדרה נמצאת בלשונית ההגדרות; בלשונית החברים יש קישור אליה
     await B.click('nav >> text=חברים'); await B.click('button:has-text("מה החברים רואים עליי")');
