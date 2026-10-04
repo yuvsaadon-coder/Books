@@ -31,7 +31,7 @@ function setUiLang(lang) {
 const DEFAULT_LOCALE = IS_EN ? 'en-GB' : 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '38';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '39';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -2449,7 +2449,32 @@ function SwipeCard({ b, gi, onSwipe, top }) {
     </div>
   );
 }
-function Starter({ db, update, onClose, goQueue, onBegin }) {
+// חלון המתנה בזמן אימות הספרים מהרשימה: שלושה שלבים מצוירים, ובקשה להשאיר את המסך פתוח
+function VerifyWait() {
+  const steps = [['Search', 'בודקים כל ספר במאגרים'], ['ShieldCheck', 'מוודאים שזה הספר הנכון'], ['Library', 'הספר נכנס לספרייה']];
+  return (
+    <div className="verify-wait bg-surface border border-line rounded-2xl p-4 grid gap-4" role="status">
+      <ol className="flex items-start gap-1 m-0 p-0 list-none">
+        {steps.map(([ic, l], i) => (
+          <React.Fragment key={ic}>
+            {i > 0 && <li aria-hidden="true" className="flex-1 min-w-[12px] h-1 mt-[22px] rounded-full verify-line" style={{ animationDelay: `${i * 0.6}s` }} />}
+            <li className="w-[5.5rem] shrink-0 grid justify-items-center gap-1.5 text-center">
+              <span className="w-12 h-12 rounded-full grid place-items-center bg-accentSoft text-accent verify-dot" style={{ animationDelay: `${i * 0.6}s` }}><Icon name={ic} size={22} /></span>
+              <span className="text-[12.5px] leading-tight">{l}</span>
+            </li>
+          </React.Fragment>
+        ))}
+      </ol>
+      <div className="flex gap-2.5 items-start rounded-xl p-3 bg-surface2">
+        <Icon name="Hourglass" size={20} className="text-accent shrink-0 mt-0.5" />
+        <p className="text-[14px] leading-relaxed m-0"><b>נא להמתין כמה שניות עד שהבדיקה תסתיים.</b> כדאי להשאיר את המסך פתוח. ספרים שכבר נבדקו נשמרים מיד, ואם יוצאים באמצע, הבדיקה ממשיכה בפתיחה הבאה.</p>
+      </div>
+    </div>
+  );
+}
+// אימות שנקטע באמצע (סגירת האפליקציה, נעילת מסך): הספרים שנותרו נשמרים ב-picks, והאימות ממשיך בפתיחה הבאה
+const starterPendingVerify = () => { const s = loadStarterState(); return !!(s.verifying && Object.keys(s.picks || {}).length); };
+function Starter({ db, update, onClose, goQueue, onBegin, onBusy }) {
   const [state, setState] = useState(loadStarterState);
   const { pos, picks, trail } = state;
   const [q, setQ] = useState('');
@@ -2522,9 +2547,15 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
   const finish = async () => {
     const entries = Object.values(picks).filter(p => !owned(p.b));
     onBegin && onBegin();   // משאיר את המסך פתוח גם אחרי שהספרייה כבר לא ריקה
+    onBusy && onBusy(true);
     setPhase('working');
     setProg({ done: 0, total: entries.length, added: 0, queued: 0 });
+    save({ verifying: true });
+    // המסך לא נכבה באמצע האימות (כשהדפדפן תומך)
+    let lock = null;
+    try { if (navigator.wakeLock) lock = await navigator.wakeLock.request('screen'); } catch (e) { /* */ }
     const added = [], queued = [];
+    let left = { ...picks };
     const one = async ({ b, gi, rating, want }) => {
       const [title, author, original] = b;
       const en = stEn(b);   // ממשק אנגלית: קודם המהדורה האנגלית, ואם אין – העברית או המקור
@@ -2538,27 +2569,43 @@ function Starter({ db, update, onClose, goQueue, onBegin }) {
         if (!IS_EN) best = withHebrewTitle(best, title);
         if (!best.cover) best.cover = coverCacheGet()[STARTER_KEY(b)] || '';
       }
+      const out = { book: null, queue: null };
       if (best && !findInLibrary(best, db.books) && !findInLibrary(best, added)) {
         const now = Date.now();
-        added.push(sanitizeBook({ ...best, id: uid(), status: want ? 'want' : 'read', rating: want ? 0 : rating, tags: [STARTER[gi].tag], addedAt: now, editedAt: now, verifiedAt: now }));
-      } else if (!best) queued.push({ id: uid(), raw: en ? en[0] : title, title: en ? en[0] : title, author: (en ? en[1] : author) || '', rating: want ? 0 : rating, want: !!want, note: '', status: 'pending', savedTitle: '' });
+        out.book = sanitizeBook({ ...best, id: uid(), status: want ? 'want' : 'read', rating: want ? 0 : rating, tags: [STARTER[gi].tag], addedAt: now, editedAt: now, verifiedAt: now });
+        added.push(out.book);
+      } else if (!best) {
+        out.queue = { id: uid(), raw: en ? en[0] : title, title: en ? en[0] : title, author: (en ? en[1] : author) || '', rating: want ? 0 : rating, want: !!want, note: '', status: 'pending', savedTitle: '' };
+        queued.push(out.queue);
+      }
       setProg(p => ({ ...p, done: p.done + 1, added: added.length, queued: queued.length }));
+      return out;
     };
-    for (let i = 0; i < entries.length; i += 3) await Promise.all(entries.slice(i, i + 3).map(one));
-    update(d => ({ ...d, books: [...added, ...d.books], tagLibrary: uniq([...d.tagLibrary, ...added.flatMap(x => x.tags)]), settings: { ...d.settings, onboarded: true } }));
-    if (queued.length) {
-      const cur0 = loadQueue();
-      saveQueue(cur0 ? { ...cur0, items: [...cur0.items, ...queued] } : { items: queued, current: queued[0].id, createdAt: Date.now() });
+    // נשמר אחרי כל קבוצה: ספרים שכבר אומתו נכנסים לספרייה מיד, גם אם יוצאים מהמסך באמצע
+    for (let i = 0; i < entries.length; i += 4) {
+      const batch = entries.slice(i, i + 4);
+      const res = await Promise.all(batch.map(one));
+      const books = res.map(r => r.book).filter(Boolean), q = res.map(r => r.queue).filter(Boolean);
+      if (books.length) update(d => ({ ...d, books: [...books.filter(x => !findInLibrary(x, d.books)), ...d.books], tagLibrary: uniq([...d.tagLibrary, ...books.flatMap(x => x.tags)]), settings: { ...d.settings, onboarded: true } }));
+      if (q.length) { const cur0 = loadQueue(); saveQueue(cur0 ? { ...cur0, items: [...cur0.items, ...q] } : { items: q, current: q[0].id, createdAt: Date.now() }); }
+      left = { ...left }; batch.forEach(p => { delete left[STARTER_KEY(p.b)]; });
+      save({ picks: left });
     }
-    save({ picks: {} });
+    update(d => ({ ...d, settings: { ...d.settings, onboarded: true } }));
+    save({ picks: {}, verifying: false });
+    try { lock && lock.release(); } catch (e) { /* */ }
+    onBusy && onBusy(false);
     setPhase('done');
   };
+  // אימות שנקטע: ממשיכים אוטומטית
+  useEffect(() => { if (state.verifying && Object.keys(picks).length) finish(); else if (state.verifying) save({ verifying: false }); }, []);
   const skip = () => { update(d => ({ ...d, settings: { ...d.settings, onboarded: true } })); onClose(); };
 
   if (phase !== 'pick') {
     return (
       <div className="fade-in pt-6 grid gap-4">
         <h1 className="font-display font-medium text-[26px] leading-snug">{phase === 'working' ? 'מאמת את הספרים שסימנת' : 'הספרייה מוכנה'}</h1>
+        {phase === 'working' && <VerifyWait />}
         <div className="h-2 rounded-full bg-surface2 overflow-hidden" aria-hidden="true">
           <div className="h-full bg-accent transition-all" style={{ width: `${prog.total ? (prog.done / prog.total) * 100 : 0}%` }} />
         </div>
@@ -5993,7 +6040,8 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
     try { history.replaceState(null, '', location.pathname); } catch (e) { /* */ }
   }, []);
   const [tab, setTab] = useState(() => { try { return sessionStorage.getItem('vrt_tab') || 'library'; } catch (e) { return 'library'; } });
-  const [starterOpen, setStarterOpen] = useState(false);
+  const [starterOpen, setStarterOpen] = useState(() => starterPendingVerify());
+  const [starterBusy, setStarterBusy] = useState(false);
   // פתיחת רשימת הספרים המוכרים: להמשיך מאיפה שעצרו, או מההתחלה (ספרים שכבר בספרייה לא מוצגים שוב)
   const openStarter = (restart) => {
     if (restart) {
@@ -6124,9 +6172,9 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
         {showStarter && ReactDOM.createPortal((
           <div className="fixed inset-0 z-40 overflow-y-auto" style={{ background: 'var(--bg)' }} role="dialog" aria-modal="true" aria-label="היכרות עם הטעם שלך">
             <div className="mx-auto max-w-xl px-4 pb-10 safe-top relative">
-              <button type="button" aria-label="סגירה" onClick={() => { update(d => ({ ...d, settings: { ...d.settings, onboarded: true } })); setStarterOpen(false); }}
-                className="absolute left-3 top-[calc(env(safe-area-inset-top,0px)+12px)] z-10 w-10 h-10 rounded-full bg-surface border border-line grid place-items-center text-muted"><Icon name="X" size={20} /></button>
-              <Starter db={db} update={update} onBegin={() => setStarterOpen(true)} onClose={() => { setStarterOpen(false); setTab('library'); }}
+              {!starterBusy && <button type="button" aria-label="סגירה" onClick={() => { update(d => ({ ...d, settings: { ...d.settings, onboarded: true } })); setStarterOpen(false); }}
+                className="absolute end-3 top-[calc(env(safe-area-inset-top,0px)+12px)] z-10 w-10 h-10 rounded-full bg-surface border border-line grid place-items-center text-muted"><Icon name="X" size={20} /></button>}
+              <Starter db={db} update={update} onBegin={() => setStarterOpen(true)} onBusy={setStarterBusy} onClose={() => { setStarterOpen(false); setTab('library'); }}
                 goQueue={() => { setStarterOpen(false); try { sessionStorage.setItem('vrt_add_mode', 'bulk'); } catch (e) { /* */ } setTab('add'); }} />
             </div>
           </div>

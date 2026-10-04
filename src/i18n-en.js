@@ -1133,5 +1133,10 @@ export const EN = {
   "ונצואלה": "Venezuela",
   "גואטמלה": "Guatemala",
   "מקור חיצוני": "External source",
-  "לתקציר הקצר": "Shorter description"
+  "לתקציר הקצר": "Shorter description",
+  "בודקים כל ספר במאגרים": "Checking each book in the catalogues",
+  "מוודאים שזה הספר הנכון": "Making sure it's the right book",
+  "הספר נכנס לספרייה": "The book goes into your library",
+  "נא להמתין כמה שניות עד שהבדיקה תסתיים.": "Please wait a few seconds until the check finishes.",
+  "כדאי להשאיר את המסך פתוח. ספרים שכבר נבדקו נשמרים מיד, ואם יוצאים באמצע, הבדיקה ממשיכה בפתיחה הבאה.": "Keep the screen open. Books already checked are saved right away, and if you leave midway, the check continues next time you open the app."
 };

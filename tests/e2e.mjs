@@ -722,6 +722,24 @@ try {
     await C.waitForSelector(`text=${first}`);
     await C.click('button:has-text("דילוג")');
     await C.waitForSelector('text=חסמבה');
+    // אימות שנקטע (האפליקציה נסגרה באמצע): נפתח שוב לבד, עם חלון ההמתנה ובלי כפתור סגירה, וממשיך עד הסוף
+    await C.evaluate(() => {
+      const pid = JSON.parse(localStorage.getItem('verified_reading_tracker_profiles_v1')).active;
+      const b = ['סיפור פשוט', 'ש"י עגנון'];
+      localStorage.setItem('vrt-starter2-' + pid, JSON.stringify({ pos: 0, trail: [], verifying: true, picks: { [b.join('|')]: { b, gi: 0, rating: 4, rated: true, want: false } } }));
+    });
+    const slow = async r => { await new Promise(res => setTimeout(res, 1500)); await r.fallback(); };
+    await C.route('**/*googleapis.com/**', slow); await C.route('**/gbooks**', slow);
+    await C.reload();
+    await C.waitForSelector('[role=dialog] .verify-wait');
+    assert.equal(await C.locator('[role=dialog] button[aria-label="סגירה"]').count(), 0, 'no close button while verifying');
+    await shot(C, 'verify-wait', false);
+    await C.waitForSelector('[role=dialog] >> text=הספרייה מוכנה', { timeout: 30000 });
+    await C.unroute('**/*googleapis.com/**', slow); await C.unroute('**/gbooks**', slow);
+    await C.click('button:has-text("לספרייה שלי")');
+    await C.click('nav >> text=ספרים שלי');
+    await C.waitForSelector('main li:has-text("סיפור פשוט")');
+    assert.equal(await C.evaluate(() => JSON.parse(localStorage.getItem('vrt-starter2-' + JSON.parse(localStorage.getItem('verified_reading_tracker_profiles_v1')).active)).verifying), false);
   });
   await step('English interface: chosen on first entry, left-to-right, English everywhere, the model writes in English, back to Hebrew', async () => {
     const E = await phone(browser, 'E');
