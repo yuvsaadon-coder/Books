@@ -31,7 +31,7 @@ function setUiLang(lang) {
 const DEFAULT_LOCALE = IS_EN ? 'en-GB' : 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '42';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '43';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -1266,7 +1266,7 @@ const PLURAL_FORMS = {
   'רוצים': ['רוצה', 'רוצה'], 'אתם': ['אתה', 'את'], 'גללו': ['גלול', 'גללי'], 'העלו': ['העלה', 'העלי'],
   'מוזמנים': ['מוזמן', 'מוזמנת'], 'ודאו': ['ודא', 'ודאי'], 'העתיקו': ['העתק', 'העתיקי'], 'תרצו': ['תרצה', 'תרצי'], 'שמרו': ['שמור', 'שמרי'], 'ייבאו': ['ייבא', 'ייבאי'], 'בחרתם': ['בחרת', 'בחרת'],
   'סיימתם': ['סיימת', 'סיימת'], 'דירגתם': ['דירגת', 'דירגת'], 'הייתם': ['היית', 'היית'], 'תגלו': ['תגלה', 'תגלי'], 'קראו': ['קרא', 'קראי'],
-  'מחקו': ['מחק', 'מחקי'], 'הפעילו': ['הפעל', 'הפעילי'], 'אפשרו': ['אפשר', 'אפשרי']
+  'מחקו': ['מחק', 'מחקי'], 'הפעילו': ['הפעל', 'הפעילי'], 'אפשרו': ['אפשר', 'אפשרי'], 'בטלו': ['בטל', 'בטלי'], 'אתכם': ['אותך', 'אותך'], 'סימנתם': ['סימנת', 'סימנת']
 };
 // מילים שכתובות בזכר יחיד (למשל דוגמאות בשדות טקסט): בלשון נקבה מחליפים
 const MASC_FORMS = { 'אוהב': 'אוהבת', 'מתחבר': 'מתחברת', 'מחפש': 'מחפשת', 'תקרא': 'תקראי', 'שאתה': 'שאת', 'אתה': 'את', 'קורא': 'קוראת', 'מוכן': 'מוכנה', 'תאהב': 'תאהבי', 'קורא/ת': 'קוראת', 'ממליץ': 'ממליצה', 'ממליץ…': 'ממליצה…' };
@@ -2601,7 +2601,9 @@ function Starter({ db, update, onClose, goQueue, onBegin, onBusy }) {
     db.books.forEach(x => { [x.title, x.subtitle].forEach(t => { const v = t && k(t); if (v) set.add(v); }); });
     return (b) => [b[0], b[2]].some(t => t && set.has(k(t)));
   }, [db.books]);
-  const visible = ([b]) => !owned(b);
+  // סוגות שהמשתמש בחר לא להציג (למשל ילדים ונוער)
+  const skipG = new Set(state.skipGenres || []);
+  const visible = ([b, gi]) => !owned(b) && !skipG.has(gi);
   let idx = pos;
   while (idx < STARTER_DECK.length && !visible(STARTER_DECK[idx])) idx++;
   let idx2 = idx + 1;
@@ -2612,11 +2614,14 @@ function Starter({ db, update, onClose, goQueue, onBegin, onBusy }) {
   const count = Object.values(picks).filter(p => !owned(p.b)).length;
   const wantCount = Object.values(picks).filter(p => p.want && !owned(p.b)).length;
   const nq = norm(q);
-  const found = nq ? STARTER_DECK.filter(([b]) => norm([...b, ...(stEn(b) || [])].join(' ')).includes(nq)) : [];
+  const found = nq ? STARTER_DECK.filter(([b, gi]) => !skipG.has(gi) && norm([...b, ...(stEn(b) || [])].join(' ')).includes(nq)) : [];
+  // דירוג חובה: ספר שסומן "קראתי" בלי דירוג עוצר את הסוויפ עד שמדרגים
+  const unrated = Object.values(picks).filter(p => !p.want && !p.rated && !owned(p.b));
+  const mustRate = !!(rateKey && picks[rateKey] && !picks[rateKey].rated);
 
   // true = קראתי, false = לא קראתי, 'want' = רוצה לקרוא
   const swipe = (read) => {
-    if (!cur) return;
+    if (!cur || mustRate) return;
     const [b, gi] = cur, k = STARTER_KEY(b);
     const n = { ...picks };
     if (read === 'want') n[k] = { rating: 0, gi, b, want: true };
@@ -2640,7 +2645,7 @@ function Starter({ db, update, onClose, goQueue, onBegin, onBusy }) {
     if (n[k] && n[k].rating === r) delete n[k]; else n[k] = { rating: r, gi, b, rated: true };
     save({ picks: n });
   };
-  const nextGenre = () => { if (cur) { save({ pos: cur[1] + 1 < STARTER.length ? GENRE_START[cur[1] + 1] : STARTER_DECK.length, trail: [...trail, idx].slice(-50) }); setRateKey(''); } };
+  const nextGenre = () => { if (cur && !mustRate) { save({ pos: cur[1] + 1 < STARTER.length ? GENRE_START[cur[1] + 1] : STARTER_DECK.length, trail: [...trail, idx].slice(-50) }); setRateKey(''); } };
   const inGenre = cur ? [idx - GENRE_START[cur[1]] + 1, STARTER[cur[1]].books.length] : [0, 0];
   useEffect(() => {
     if (phase !== 'pick' || nq) return undefined;
@@ -2727,13 +2732,39 @@ function Starter({ db, update, onClose, goQueue, onBegin, onBusy }) {
     );
   }
   const rated = rateKey && picks[rateKey];
+  if (!state.genresChosen) {
+    const toggleG = (gi) => save({ skipGenres: skipG.has(gi) ? [...skipG].filter(x => x !== gi) : [...skipG, gi] });
+    const shown = STARTER.filter((_, gi) => !skipG.has(gi)).length;
+    return (
+      <div className="fade-in pt-4 pb-6 grid gap-4">
+        <header>
+          <h1 className="font-display font-medium text-[26px] leading-snug">אילו סוגות להציג?</h1>
+          <p className="text-muted text-[15px] m-0">{T('בטלו סוגות שלא מעניינות אתכם, והספרים מהן לא יוצגו.')}</p>
+        </header>
+        <div className="flex flex-wrap gap-2" role="group" aria-label="סוגות להצגה">
+          {STARTER.map((g, gi) => (
+            <Chip key={g.tag} active={!skipG.has(gi)} onClick={() => toggleG(gi)}>
+              <span className="inline-flex items-center gap-1">{!skipG.has(gi) && <Icon name="Check" size={14} />}{L(g.genre)} <span className="tabular opacity-70">{g.books.length}</span></span>
+            </Chip>
+          ))}
+        </div>
+        <div className="flex gap-3 text-[14px]">
+          <button type="button" className="text-accent font-semibold min-h-[36px]" onClick={() => save({ skipGenres: [] })}>הכול</button>
+          <button type="button" className="text-accent font-semibold min-h-[36px]" onClick={() => save({ skipGenres: STARTER.map((_, gi) => gi) })}>כלום</button>
+        </div>
+        <Btn disabled={!shown} onClick={() => save({ genresChosen: true })}><Icon name="Play" size={18} />{L('התחלה ({0} סוגות)', [shown])}</Btn>
+        <button type="button" onClick={skip} className="text-[13px] text-muted underline underline-offset-2 min-h-[32px] justify-self-center">דילוג על ההיכרות</button>
+      </div>
+    );
+  }
   return (
     <div className="fade-in pb-6">
       <header className="pt-4 pb-2">
         <h1 className="font-display font-medium text-[26px] leading-snug">אילו ספרים כבר קראת?</h1>
-        <p className="text-muted text-[15px]">ימינה: קראתי. שמאלה: לא קראתי. הדירוג אחרי "קראתי" לא חובה.</p>
+        <p className="text-muted text-[15px]">ימינה: קראתי. שמאלה: לא קראתי. אחרי "קראתי" בוחרים דירוג.</p>
         <div className="flex items-center gap-4 flex-wrap">
           <button type="button" onClick={skip} className="text-[13px] text-muted underline underline-offset-2 min-h-[32px]">{count ? 'אמשיך אחר כך' : 'דילוג על ההיכרות'}</button>
+          <button type="button" onClick={() => save({ genresChosen: false })} className="text-[13px] text-accent font-semibold underline underline-offset-2 min-h-[32px]">{L('סוגות ({0})', [STARTER.length - skipG.size])}</button>
           {pos > 0 && <button type="button" onClick={() => { save({ pos: 0, trail: [], no: [] }); setRateKey(''); setLast(null); }} className="text-[13px] text-accent font-semibold underline underline-offset-2 min-h-[32px]">לעבור על הרשימה מההתחלה</button>}
         </div>
       </header>
@@ -2768,18 +2799,18 @@ function Starter({ db, update, onClose, goQueue, onBegin, onBusy }) {
         </ul>
       ) : cur ? (
         <div className="grid gap-3">
-          <div className="relative mx-auto w-full max-w-[340px] h-[min(40vh,340px)]">
+          <div className={`relative mx-auto w-full max-w-[340px] h-[min(40vh,340px)] transition-opacity ${mustRate ? 'opacity-40 pointer-events-none' : ''}`} aria-disabled={mustRate || undefined}>
             {next && <SwipeCard key={'n' + idx2} b={next[0]} gi={next[1]} top={false} onSwipe={() => {}} />}
             <SwipeCard key={'c' + idx} b={cur[0]} gi={cur[1]} top onSwipe={swipe} />
           </div>
           <div className="flex justify-center gap-3">
-            <button type="button" onClick={() => swipe(true)} className="min-h-[52px] px-5 whitespace-nowrap rounded-full border-2 border-ok text-ok font-semibold bg-surface flex items-center gap-1.5">
+            <button type="button" disabled={mustRate} onClick={() => swipe(true)} className="disabled:opacity-40 min-h-[52px] px-5 whitespace-nowrap rounded-full border-2 border-ok text-ok font-semibold bg-surface flex items-center gap-1.5">
               <Icon name="Check" size={20} />קראתי
             </button>
-            <button type="button" onClick={() => swipe('want')} aria-label="רוצה לקרוא" className="min-h-[52px] w-[52px] rounded-full border-2 border-brass text-brass bg-surface grid place-items-center">
+            <button type="button" disabled={mustRate} onClick={() => swipe('want')} aria-label="רוצה לקרוא" className="disabled:opacity-40 min-h-[52px] w-[52px] rounded-full border-2 border-brass text-brass bg-surface grid place-items-center">
               <Icon name="Bookmark" size={20} />
             </button>
-            <button type="button" onClick={() => swipe(false)} className="min-h-[52px] px-5 whitespace-nowrap rounded-full border-2 border-line text-muted font-semibold bg-surface flex items-center gap-1.5">
+            <button type="button" disabled={mustRate} onClick={() => swipe(false)} className="disabled:opacity-40 min-h-[52px] px-5 whitespace-nowrap rounded-full border-2 border-line text-muted font-semibold bg-surface flex items-center gap-1.5">
               <Icon name="X" size={20} />לא קראתי
             </button>
           </div>
@@ -2793,8 +2824,8 @@ function Starter({ db, update, onClose, goQueue, onBegin, onBusy }) {
             </div>
           )}
           {rated ? (
-            <div className="fade-in bg-surface border border-line rounded-xl p-2.5 grid gap-2" role="group" aria-label={`דירוג ${stTitle(rated.b)}`}>
-              <div className="text-[14px] text-center">איך היה <span className="font-semibold">{stTitle(rated.b)}</span>? <span className="text-muted">(לא חובה)</span></div>
+            <div className={`fade-in bg-surface border-2 rounded-xl p-2.5 grid gap-2 ${mustRate ? 'border-accent' : 'border-line'}`} role="group" aria-label={`דירוג ${stTitle(rated.b)}`}>
+              <div className="text-[14px] text-center">איך היה <span className="font-semibold">{stTitle(rated.b)}</span>? {mustRate && <span className="text-accent font-semibold">{T('דרגו כדי להמשיך')}</span>}</div>
               <div className="flex gap-1.5 justify-center">
                 {STARTER_RATINGS.map(([r, l]) => (
                   <button key={r} type="button" onClick={() => rate(rateKey, r)}
@@ -2813,9 +2844,22 @@ function Starter({ db, update, onClose, goQueue, onBegin, onBusy }) {
         <p className="text-center text-muted py-10">עברתם על כל הרשימה. {count ? 'אפשר להוסיף את מה שסימנתם.' : ''}</p>
       )}
       <p className="text-center text-[12.5px] text-muted mt-5 px-2 font-reading">הסווייפ לבחירת הספרים בכניסה הראשונה מתוך רשימה הוא רעיון של יעל שטסמן סעדון האגדית</p>
+      {!mustRate && unrated.length > 0 && (
+        <div className="mt-4 bg-surface border-2 border-accent rounded-xl p-3 grid gap-2" role="group" aria-label="ספרים בלי דירוג">
+          <div className="text-[14px] font-semibold">{T('לפני ההוספה, דרגו את הספרים שסימנתם "קראתי":')}</div>
+          <ul className="grid gap-1.5 m-0 p-0 list-none">{unrated.map(p => (
+            <li key={STARTER_KEY(p.b)} className="flex items-center gap-2 flex-wrap">
+              <span className="flex-1 min-w-[8rem] text-[14px]">{stTitle(p.b)}</span>
+              <div className="flex gap-1" role="group" aria-label={`דירוג ${stTitle(p.b)}`}>{STARTER_RATINGS.map(([r, l]) => (
+                <button key={r} type="button" onClick={() => togglePick(p.b, p.gi, r)} className="min-h-[36px] px-2.5 rounded-lg border border-line text-[13px]">{l}</button>
+              ))}</div>
+            </li>
+          ))}</ul>
+        </div>
+      )}
       <div className="mt-3">
         <div className="flex gap-2">
-          <Btn className="flex-1" disabled={!count} onClick={finish}><Icon name="Check" size={18} />{count ? `הוספת ${count} ספרים` : 'עוד לא סומנו ספרים'}</Btn>
+          <Btn className="flex-1" disabled={!count || mustRate || unrated.length > 0} onClick={finish}><Icon name="Check" size={18} />{count ? `הוספת ${count} ספרים` : 'עוד לא סומנו ספרים'}</Btn>
           {cur && !nq ? <Btn variant="ghost" onClick={nextGenre}>ז'אנר הבא<Icon name="ChevronLeft" size={18} /></Btn> : <Btn variant="ghost" onClick={skip}>{count ? 'אחר כך' : 'יציאה'}</Btn>}
         </div>
       </div>
@@ -6058,7 +6102,7 @@ function SummaryStory({ db, onClose, onOpenDigest, notify }) {
 /* ---------- מדריך למשתמש: מרכז עזרה עם חיפוש, קפיצה בין נושאים, הסבר קצר לכל נושא ושאלות ותשובות שנפתחות בלחיצה ---------- */
 const GUIDE = [
   { id: 'start', title: L('צעדים ראשונים'), icon: 'Compass', intro: L('מה שנקרא שומרת את הספרים שקראת, לומדת את הטעם שלך וממליצה על הספר הבא. כל ספר נבדק מול מאגרים אמיתיים, כך שאין ספרים מומצאים.'), qa: [
-    [L('איך מתחילים?'), L('בוחרים שם (בלי סיסמה). בכניסה הראשונה נפתחת רשימה של 400 ספרים מוכרים: החלקה ימינה = קראתי, שמאלה = לא קראתי, והסימנייה = רוצה לקרוא. אפשר לדלג ולחזור אליה מהכרטיס שבראש "הספרים שלי".')],
+    [L('איך מתחילים?'), L('בוחרים שם וסיסמה. בכניסה הראשונה בוחרים אילו סוגות להציג (למשל בלי ספרי ילדים), ואז נפתחת רשימה של ספרים מוכרים: החלקה ימינה = קראתי (ואז בוחרים דירוג), שמאלה = לא קראתי, והסימנייה = רוצה לקרוא. אפשר לדלג ולחזור אליה מהכרטיס שבראש "הספרים שלי".')],
     [L('איך מתקינים את האפליקציה על מסך הבית?'), L('באייפון: פותחים ב-Safari, לוחצים על כפתור השיתוף ובוחרים "הוספה למסך הבית". באנדרואיד: בכרום, בתפריט ⋮ בוחרים "התקנת האפליקציה", או לוחצים על ההודעה שמופיעה באפליקציה.')],
     [L('איך חוזרים לרשימת הספרים המוכרים?'), L('בהגדרות ← "המלצות" ← "רשימת 400 הספרים המוכרים": "המשך מאיפה שעצרתי" או "מההתחלה". יש גם קישור בתחתית לשונית "הוספת ספר". ספרים שכבר בספרייה לא מוצגים שוב.')],
     [L('איך עובדת הסיסמה?'), L('כל משתמש בוחר סיסמה כשהוא נכנס בפעם הראשונה. המכשיר זוכר מי נכנס ממנו ופותח ישר את הספרייה שלו; אחרי "החלפת משתמש" צריך את הסיסמה שוב. משנים סיסמה בהגדרות ← "החשבון שלי". שכחתם? "שכחתי סיסמה" במסך הכניסה, עם סיסמת המנהל.')],

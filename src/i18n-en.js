@@ -879,7 +879,7 @@ export const EN = {
   "צעדים ראשונים": "Getting started",
   "מה שנקרא שומרת את הספרים שקראת, לומדת את הטעם שלך וממליצה על הספר הבא. כל ספר נבדק מול מאגרים אמיתיים, כך שאין ספרים מומצאים.": "What We Read keeps the books you've read, learns your taste and recommends your next book. Every book is checked against real catalogues, so there are no made-up books.",
   "איך מתחילים?": "How do I start?",
-  "בוחרים שם (בלי סיסמה). בכניסה הראשונה נפתחת רשימה של 400 ספרים מוכרים: החלקה ימינה = קראתי, שמאלה = לא קראתי, והסימנייה = רוצה לקרוא. אפשר לדלג ולחזור אליה מהכרטיס שבראש \"הספרים שלי\".": "Choose a name (no password). On first entry a list of 400 well-known books opens: swipe right = read, left = not read, and the bookmark = want to read. You can skip it and come back from the card at the top of \"My books\".",
+  "בוחרים שם וסיסמה. בכניסה הראשונה בוחרים אילו סוגות להציג (למשל בלי ספרי ילדים), ואז נפתחת רשימה של ספרים מוכרים: החלקה ימינה = קראתי (ואז בוחרים דירוג), שמאלה = לא קראתי, והסימנייה = רוצה לקרוא. אפשר לדלג ולחזור אליה מהכרטיס שבראש \"הספרים שלי\".": "Choose a name and a password. On first entry you pick which genres to show (for example, no children's books), and then a list of well-known books opens: swipe right = read (then choose a rating), left = not read, and the bookmark = want to read. You can skip it and come back from the card at the top of \"My books\".",
   "איך מתקינים את האפליקציה על מסך הבית?": "How do I install the app on my home screen?",
   "באייפון: פותחים ב-Safari, לוחצים על כפתור השיתוף ובוחרים \"הוספה למסך הבית\". באנדרואיד: בכרום, בתפריט ⋮ בוחרים \"התקנת האפליקציה\", או לוחצים על ההודעה שמופיעה באפליקציה.": "On iPhone: open it in Safari, tap the share button and choose \"Add to Home Screen\". On Android: in Chrome, choose \"Install app\" from the ⋮ menu, or tap the prompt that appears in the app.",
   "איך חוזרים לרשימת הספרים המוכרים?": "How do I get back to the well-known books list?",
@@ -1182,5 +1182,16 @@ export const EN = {
   "{0} מתוך {1} · נוספו {2}": "{0} of {1} · {2} added",
   "מקור: Wikidata": "Source: Wikidata",
   "אפשר לסמן סדרה שלמה?": "Can I mark a whole series?",
-  "כן. כשספר הוא חלק מסדרה, מופיע בחלון שלו (וגם בתוצאות החיפוש) \"ספר X מתוך Y בסדרה\". לוחצים \"סימון כל הסדרה\", בוחרים אילו ספרים, מדף ודירוג, וכל ספר נבדק במאגרים לפני שהוא נכנס. המידע על הסדרות מגיע מ-Wikidata, ומוצג רק כשהוא חד-משמעי: אותו מחבר, ומספר לכל ספר בסדרה.": "Yes. When a book is part of a series, its window (and the search results) show \"Book X of Y in the series\". Tap \"Mark the whole series\", choose which books, a shelf and a rating, and each book is checked in the catalogues before it goes in. Series information comes from Wikidata and is shown only when it's unambiguous: the same author, and a number for every book in the series."
+  "כן. כשספר הוא חלק מסדרה, מופיע בחלון שלו (וגם בתוצאות החיפוש) \"ספר X מתוך Y בסדרה\". לוחצים \"סימון כל הסדרה\", בוחרים אילו ספרים, מדף ודירוג, וכל ספר נבדק במאגרים לפני שהוא נכנס. המידע על הסדרות מגיע מ-Wikidata, ומוצג רק כשהוא חד-משמעי: אותו מחבר, ומספר לכל ספר בסדרה.": "Yes. When a book is part of a series, its window (and the search results) show \"Book X of Y in the series\". Tap \"Mark the whole series\", choose which books, a shelf and a rating, and each book is checked in the catalogues before it goes in. Series information comes from Wikidata and is shown only when it's unambiguous: the same author, and a number for every book in the series.",
+  "אילו סוגות להציג?": "Which genres should we show?",
+  "בטלו סוגות שלא מעניינות אתכם, והספרים מהן לא יוצגו.": "Turn off genres you're not interested in, and their books won't be shown.",
+  "סוגות להצגה": "Genres to show",
+  "הכול": "All",
+  "כלום": "None",
+  "התחלה ({0} סוגות)": "Start ({0} genres)",
+  "ימינה: קראתי. שמאלה: לא קראתי. אחרי \"קראתי\" בוחרים דירוג.": "Right: read. Left: not read. After \"Read\", choose a rating.",
+  "סוגות ({0})": "Genres ({0})",
+  "דרגו כדי להמשיך": "Rate it to continue",
+  "ספרים בלי דירוג": "Books without a rating",
+  "לפני ההוספה, דרגו את הספרים שסימנתם \"קראתי\":": "Before adding, rate the books you marked \"Read\":"
 };

@@ -667,6 +667,7 @@ try {
     await A.click('nav >> text=הוספת ספר'); await A.click('button.starter-link');
     await dlg.waitFor(); await dlg.locator('button[aria-label="סגירה"]').click();
     await A.click('nav >> text=הגדרות'); await group(A, 'המלצות'); await A.click('button:has-text("מההתחלה")');
+    await dlg.locator('button:has-text("התחלה (")').click();
     await dlg.locator('text=אילו ספרים כבר קראת?').waitFor();
     assert.ok((await dlg.locator('text=/· 1 מתוך \\d+/').count()) > 0, 'starts from the first book');
     await dlg.locator('button[aria-label="סגירה"]').click();
@@ -738,7 +739,12 @@ try {
     const C = await phone(browser, 'C');
     if (!(await C.locator('#new-profile').count())) await C.click('button:has-text("הוספת משתמש")');
     await C.fill('#new-profile', 'דנה'); await C.fill('#new-pass', '1234'); await C.click('button:has-text("כניסה")');
+    // קודם בוחרים סוגות: בלי הומור
+    await C.waitForSelector('text=אילו סוגות להציג?'); await shot(C, 'genres', false);
+    await C.click('[role=group][aria-label="סוגות להצגה"] button:has-text("הומור")');
+    await C.click('button:has-text("התחלה (14 סוגות)")');
     await C.waitForSelector('text=אילו ספרים כבר קראת?');
+    await C.fill('#starter-q', 'אתגר קרת'); await C.waitForSelector('text=אין ברשימה ספר כזה'); await C.fill('#starter-q', '');
     // סוויפ ימינה = קראתי, ואז דירוג; "לא קראתי"; וחזרה אחורה
     await C.waitForSelector('text=רעיון של יעל שטסמן סעדון האגדית');
     const card = C.locator('[role=group][aria-label*=","]').last();
@@ -750,6 +756,9 @@ try {
     await C.mouse.move(box.x + box.width / 2 + 200, box.y + box.height / 2, { steps: 4 }); await C.mouse.up();
     await C.waitForSelector(`text=איך היה`);
     await C.waitForSelector(`text=✓ קראתי: ${first}`);
+    // דירוג חובה: עד שמדרגים אי אפשר להמשיך
+    assert.equal(await C.locator('button:has-text("לא קראתי")').isDisabled(), true, 'swipe blocked until rated');
+    await C.waitForSelector('text=דרגו כדי להמשיך');
     await C.locator(`[aria-label="דירוג ${first}"] button:has-text("פחות")`).click();
     const second = (await C.locator('[role=group][aria-label*=","]').last().getAttribute('aria-label')).split(',')[0];
     assert.notEqual(second, first);
@@ -845,6 +854,8 @@ try {
     await E.fill('#new-profile', 'Dana'); await E.fill('#new-pass', '1234'); await E.click('button:has-text("Enter")');
     // רשימת ההיכרות: אותם ספרים, בשמות באנגלית
     const dlg = E.locator('[role=dialog]');
+    await dlg.locator('text=Which genres should we show?').waitFor();
+    await dlg.locator('button:has-text("Start (15 genres)")').click();
     await dlg.locator('text=Which books have you read?').waitFor();
     assert.match(await dlg.locator('[role=group][aria-label*=","]').last().getAttribute('aria-label'), /^[A-Za-z0-9 .,:'&!?-]+, [A-Za-z .'-]+$/);
     await E.fill('#starter-q', 'Norwegian'); await E.waitForSelector('li:has-text("Norwegian Wood")'); await E.fill('#starter-q', '');
