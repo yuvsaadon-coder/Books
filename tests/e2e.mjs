@@ -25,8 +25,27 @@ const BOOKS = [
   vol('k1', 'קפקא על החוף', ['הרוקי מורקמי'], '9789650000035'), vol('s1', 'סיפור פשוט', ['עגנון'], '9789650000042'),
   vol('he1', 'יער נורווגי', ['הרוקי מורקמי'], '9789650712345', { description: 'טורו ואטאנבה נזכר בימי הסטודנט שלו בטוקיו.' }),
   vol('en1', 'Norwegian Wood', ['Haruki Murakami'], '9780375704024', { language: 'en', description: LONGEN + '...' }),
-  vol('en2', 'The Remains of the Day', ['Kazuo Ishiguro'], '9780679731726', { language: 'en', description: 'A butler looks back.' })
+  vol('en2', 'The Remains of the Day', ['Kazuo Ishiguro'], '9780679731726', { language: 'en', description: 'A butler looks back.' }),
+  vol('hp1', 'הארי פוטר ואבן החכמים', ["ג'.ק. רולינג"], '9789650000101'), vol('hp2', 'הארי פוטר וחדר הסודות', ["ג'.ק. רולינג"], '9789650000102'),
+  vol('old1', 'מגדלור בערפל', ['נעמה ברקאי'], '9789650000103')
 ];
+// Wikidata מדומה: סדרה של שני ספרים, וסרט באותה סדרה (שלא אמור להיכנס)
+const wdItem = (id, he, en, claims) => ({ id, labels: { he: { value: he }, en: { value: en } }, claims });
+const wdRef = (id, quals) => ({ mainsnak: { datavalue: { value: { id } } }, ...(quals ? { qualifiers: quals } : {}) });
+const inSeries = (n) => ({ P179: [wdRef('Q5', { P1545: [{ datavalue: { value: String(n) } }] })], P50: [wdRef('Q9')] });
+const WD = {
+  Q1: wdItem('Q1', 'הארי פוטר ואבן החכמים', "Harry Potter and the Philosopher's Stone", { ...inSeries(1), P31: [wdRef('Q7725634')] }),
+  Q2: wdItem('Q2', 'הארי פוטר וחדר הסודות', 'Harry Potter and the Chamber of Secrets', { ...inSeries(2), P31: [wdRef('Q7725634')] }),
+  Q3: wdItem('Q3', 'הארי פוטר ואבן החכמים (סרט)', "Harry Potter and the Philosopher's Stone (film)", { ...inSeries(1), P31: [wdRef('Q11424')] }),
+  Q5: wdItem('Q5', 'הארי פוטר', 'Harry Potter', {}), Q9: wdItem('Q9', "ג'.ק. רולינג", 'J. K. Rowling', {})
+};
+function wikidataMock(route, u) {
+  const p = u.searchParams;
+  if (p.get('action') === 'wbsearchentities') return route.fulfill({ json: { search: Object.values(WD).filter(x => x.labels.he.value === p.get('search')).map(x => ({ id: x.id })) }, headers: cors });
+  if (p.get('action') === 'wbgetentities') return route.fulfill({ json: { entities: Object.fromEntries(p.get('ids').split('|').filter(id => WD[id]).map(id => [id, WD[id]])) }, headers: cors });
+  if (p.get('action') === 'query' && p.get('srsearch') === 'haswbstatement:P179=Q5') return route.fulfill({ json: { query: { search: [{ title: 'Q1' }, { title: 'Q2' }, { title: 'Q3' }] } }, headers: cors });
+  return route.fulfill({ json: { search: [] }, headers: cors });
+}
 let store = { rev: 0, data: null };
 const aiCalls = [], aiScript = [], errors = [], feedbacks = [], bookinfoCalls = [];
 const digestFor = new Map();
@@ -146,7 +165,7 @@ async function phone(browser, name) {
     }
     if (u.host === 'www.googleapis.com') { direct++; return googleMock(route, u); }
     if (u.host === 'books.google.com') return route.fulfill({ body: PNG, contentType: 'image/png', headers: cors });
-    if (u.host.includes('wikidata')) return route.fulfill({ json: { search: [] }, headers: cors });
+    if (u.host.includes('wikidata')) return wikidataMock(route, u);
     if (u.host === 'openlibrary.org') return route.fulfill({ json: { docs: [] }, headers: cors });
     return route.fulfill({ status: 404, body: '' });
   });
@@ -775,6 +794,45 @@ try {
     await C.click('nav >> text=ספרים שלי');
     await C.waitForSelector('main li:has-text("סיפור פשוט")');
     assert.equal(await C.evaluate(() => JSON.parse(localStorage.getItem('vrt-starter2-' + JSON.parse(localStorage.getItem('verified_reading_tracker_profiles_v1')).active)).verifying), false);
+  });
+  await step('series: shown for a book in a series (from Wikidata), the whole series marked at once', async () => {
+    await A.click('nav >> text=הוספת ספר'); await A.click('button[role=tab]:has-text("ספר אחד")');
+    await A.fill('#book-q', 'הארי פוטר ואבן החכמים'); await A.click('form button[type=submit]');
+    const box = A.locator('main [aria-label="סדרה"]').first();
+    await box.waitFor({ timeout: 20000 });
+    assert.match(await box.textContent(), /ספר 1 מתוך 2 בסדרה\s*הארי פוטר/);   // הסרט לא נספר
+    await box.locator('button:has-text("סימון כל הסדרה")').click();
+    assert.equal(await box.locator('li').count(), 2);
+    await box.locator('[role=group][aria-label="לאיזה מדף"] button:has-text("רוצה לקרוא")').click();
+    await box.locator('button:has-text("הוספת 2 ספרים")').click();
+    await box.locator('text=/2 מתוך 2 · נוספו 2/').waitFor({ timeout: 20000 });
+    await A.click('nav >> text=ספרים שלי'); await A.click('button[role=tab]:has-text("רוצה לקרוא")');
+    await A.waitForSelector('main li:has-text("הארי פוטר ואבן החכמים")'); await A.waitForSelector('main li:has-text("הארי פוטר וחדר הסודות")');
+    // בחלון הספר: הסדרה מסומנת, ואין מה להוסיף
+    await A.click('main li:has-text("הארי פוטר וחדר הסודות") button');
+    await A.waitForSelector('[role=dialog] [aria-label="סדרה"] >> text=ספר 2 מתוך 2');
+    assert.equal(await A.locator('[role=dialog] button:has-text("סימון כל הסדרה")').count(), 0);
+    await A.click('[role=dialog] [aria-label="סגירה"]');
+  });
+  await step('old books: asked whether to count a book read 5+ years ago; ignored books leave the taste; weights reach the model', async () => {
+    await A.click('nav >> text=הוספת ספר'); await A.click('button[role=tab]:has-text("ספר אחד")');
+    await A.fill('#book-q', 'מגדלור בערפל'); await A.click('form button[type=submit]');
+    await A.locator('main ul > li').first().locator('button:has-text("זה הספר שלי")').click();
+    await A.click('[role=dialog] button:has-text("בחירת חודש")');
+    const old = new Date(); old.setFullYear(old.getFullYear() - 7);
+    await A.fill('#read-month', `${old.getFullYear()}-${String(old.getMonth() + 1).padStart(2, '0')}`);
+    await A.waitForSelector('[role=dialog] >> text=/עברו 7 שנים מאז שקראת את הספר/');
+    await A.click('[role=dialog] [aria-label="להתחשב בספר בהמלצות?"] button:has-text("לא")');
+    await A.click('[role=dialog] [aria-label="5 כוכבים"]'); await A.click('[role=dialog] button:has-text("שמירה לספרייה")');
+    await A.click('nav >> text=ספרים שלי'); await A.click('button[role=tab]:has-text("קראתי")');
+    await A.waitForSelector('main li:has-text("מגדלור בערפל") [aria-label="לא נלקח בחשבון בהמלצות"]');
+    // המתג בחלון הספר מחזיר אותו
+    await A.click('main li:has-text("מגדלור בערפל") button');
+    await A.click('[role=dialog] [role=switch]:has-text("להתחשב בספר בהמלצות")');
+    await A.click('[role=dialog] [aria-label="סגירה"]');
+    assert.equal(await A.locator('main li:has-text("מגדלור בערפל") [aria-label="לא נלקח בחשבון בהמלצות"]').count(), 0);
+    // המשקלים נשלחים למודל
+    assert.ok(jobBodies.some(j => /\| w=[+-]\d\.\d/.test(j.messages[0].content) && j.system.includes('half-life 3 years')), 'weights in the recommendation prompt');
   });
   await step('English interface: chosen on first entry, left-to-right, English everywhere, the model writes in English, back to Hebrew', async () => {
     const E = await phone(browser, 'E');
