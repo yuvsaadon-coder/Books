@@ -169,6 +169,8 @@ function googleMock(route, u) {
 }
 // ההגדרות מחולקות לקבוצות מקופלות; פותחים את הקבוצה לפני שעובדים בתוכה
 const group = async (p, title) => { const b = p.locator(`[data-group="${title}"] > h2 > button[aria-expanded="false"]`); if (await b.count()) await b.click(); };
+// כניסה למשתמש קיים ממסך "של מי הספרייה?" (כל משתמש עם סיסמה)
+const login = async (p, name, pw = '1234') => { await p.click(`main li:has-text("${name}")`); await p.fill('#profile-pass', pw); await p.click('form button[type=submit]'); };
 const step = async (name, fn) => { process.stdout.write(`• ${name} … `); await fn(); console.log('ok'); };
 const texts = (loc) => loc.allTextContents();
 // SHOTS=<תיקייה>: צילומי מסך של המסכים העיקריים (לבדיקת עיצוב)
@@ -188,21 +190,37 @@ try {
 
   await step('two phones create users and books, auto-connected, no setup', async () => {
     // משתמש חדש: רשימת הספרים המוכרים נפתחת בחלון מלא; מדלגים עליה
-    await A.fill('#new-profile', 'יובל'); await A.click('button:has-text("כניסה")');
+    await A.fill('#new-profile', 'יובל'); await A.fill('#new-pass', '1234'); await A.click('button:has-text("כניסה")');
     await A.locator('[role=dialog][aria-label="היכרות עם הטעם שלך"]').waitFor(); await A.waitForTimeout(600); await shot(A, 'first-entry', false);
     await A.click('button:has-text("דילוג על ההיכרות")'); await addBook(A, 'מיכאל שלי');
-    await B.fill('#new-profile', 'יעל'); await B.click('button:has-text("כניסה")'); await B.click('button:has-text("דילוג על ההיכרות")'); await addBook(B, 'קפקא על החוף');
+    await B.fill('#new-profile', 'יעל'); await B.fill('#new-pass', '1234'); await B.click('button:has-text("כניסה")'); await B.click('button:has-text("דילוג על ההיכרות")'); await addBook(B, 'קפקא על החוף');
     await syncBoth();
     await A.click('[aria-label="החלפת משתמש"]'); assert.equal((await A.locator('main li').count()), 2);
     await B.click('[aria-label="החלפת משתמש"]'); assert.equal((await B.locator('main li').count()), 2);
   });
   await step('a deletion on one phone reaches the other', async () => {
-    await B.click('main li:has-text("יובל")');
+    await login(B, 'יובל');
     await B.click('main ul li button >> nth=0'); await B.waitForTimeout(400);
     const del = B.locator('[role=dialog] button:has-text("מחיקה")'); await del.scrollIntoViewIfNeeded(); await del.click();
     await B.locator('[role=dialog] button:has-text("לחצו שוב למחיקה")').click();
-    await A.click('main li:has-text("יובל")'); await syncBoth(); await B.click('nav >> text=ספרים שלי'); await A.click('nav >> text=ספרים שלי');
+    await login(A, 'יובל'); await syncBoth(); await B.click('nav >> text=ספרים שלי'); await A.click('nav >> text=ספרים שלי');
     await A.waitForSelector('text=הספרייה שלך מחכה לספר הראשון');
+  });
+  await step('passwords: the device remembers its user; switching needs the password; admin resets a forgotten one', async () => {
+    await A.reload(); await A.waitForSelector('nav >> text=ספרים שלי');   // נכנס ישר, בלי מסך המשתמשים
+    await A.click('[aria-label="החלפת משתמש"]'); await A.reload();
+    await A.waitForSelector('text=של מי הספרייה?');   // אחרי החלפה: לא נכנס לבד
+    await login(A, 'יובל', 'wrong'); await A.waitForSelector('text=הסיסמה לא נכונה');
+    await A.click('button:has-text("שכחתי סיסמה")');
+    await A.fill('#admin-pass', 'nope'); await A.fill('#profile-pass', 'abcd'); await A.click('form button[type=submit]');
+    await A.waitForSelector('text=סיסמת המנהל לא נכונה');
+    await A.fill('#admin-pass', 'Admin123'); await A.click('form button[type=submit]');
+    await A.waitForSelector('nav >> text=ספרים שלי');
+    await A.click('[aria-label="החלפת משתמש"]'); await login(A, 'יובל', 'abcd'); await A.waitForSelector('nav >> text=ספרים שלי');
+    // מחזירים את הסיסמה מההגדרות
+    await A.click('nav >> text=הגדרות'); await group(A, 'החשבון שלי');
+    await A.fill('#change-pass', '1234'); await A.click('button:has-text("שמירת הסיסמה")'); await A.waitForSelector('text=הסיסמה נשמרה');
+    await A.click('nav >> text=ספרים שלי');
   });
   await step('Hebrew edition first; full synopsis on expand; translation kept', async () => {
     await A.click('nav >> text=הוספת ספר'); await A.fill('#book-q', 'Norwegian Wood'); await A.click('form button[type=submit]');
@@ -334,7 +352,7 @@ try {
   });
   await step('friends: request, accept, see the shelf, wishlist from a friend, recommend to a friend', async () => {
     await A.click('nav >> text=חברים'); await A.locator('li:has-text("יעל")').locator('button:has-text("בקשת חברות")').click();
-    await B.click('[aria-label="החלפת משתמש"]'); await B.click('main li:has-text("יעל")');
+    await B.click('[aria-label="החלפת משתמש"]'); await login(B, 'יעל');
     await syncBoth();
     await B.click('nav >> text=חברים'); await B.click('button:has-text("אישור")');
     await syncBoth();
@@ -699,7 +717,8 @@ try {
   });
   await step('first entry: pick known books → verified ones added, the rest queued', async () => {
     const C = await phone(browser, 'C');
-    await C.fill('#new-profile', 'דנה'); await C.click('button:has-text("כניסה")');
+    if (!(await C.locator('#new-profile').count())) await C.click('button:has-text("הוספת משתמש")');
+    await C.fill('#new-profile', 'דנה'); await C.fill('#new-pass', '1234'); await C.click('button:has-text("כניסה")');
     await C.waitForSelector('text=אילו ספרים כבר קראת?');
     // סוויפ ימינה = קראתי, ואז דירוג; "לא קראתי"; וחזרה אחורה
     await C.waitForSelector('text=רעיון של יעל שטסמן סעדון האגדית');
@@ -765,7 +784,7 @@ try {
     await E.waitForSelector('text=Whose library is this?');
     assert.deepEqual(await E.evaluate(() => [document.documentElement.dir, document.documentElement.lang, document.title]), ['ltr', 'en', 'What We Read']);
     if (!(await E.locator('#new-profile').count())) await E.click('button:has-text("Add a user")');
-    await E.fill('#new-profile', 'Dana'); await E.click('button:has-text("Enter")');
+    await E.fill('#new-profile', 'Dana'); await E.fill('#new-pass', '1234'); await E.click('button:has-text("Enter")');
     // רשימת ההיכרות: אותם ספרים, בשמות באנגלית
     const dlg = E.locator('[role=dialog]');
     await dlg.locator('text=Which books have you read?').waitFor();

@@ -31,7 +31,7 @@ function setUiLang(lang) {
 const DEFAULT_LOCALE = IS_EN ? 'en-GB' : 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '40';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '41';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -984,7 +984,9 @@ function applyLocal(state) {
     if (cur !== next) { try { localStorage.setItem(SOCIAL_KEY, next); } catch (e) { /* */ } window.dispatchEvent(new Event('vrt-social-changed')); }
   }
   const cur = loadProfiles();
-  const active = state.profiles.some(p => p.id === cur.active) ? cur.active : null;
+  let remembered = null; try { remembered = localStorage.getItem(REMEMBER_KEY); } catch (e) { /* */ }
+  const active = state.profiles.some(p => p.id === cur.active) ? cur.active
+    : cur.active === undefined || cur.active === null ? null : state.profiles.some(p => p.id === remembered) ? remembered : null;
   saveProfiles({ profiles: state.profiles, deleted: state.deleted, active });
   Object.keys(state.deleted || {}).forEach(pid => { try { localStorage.removeItem(dbKeyFor(pid)); } catch (e) { /* */ } });
   Object.entries(state.dbs).forEach(([pid, d]) => {
@@ -4954,7 +4956,21 @@ function SettingsGroup({ icon, title, summary, children }) {
     </section>
   );
 }
-function BackupTab({ db, update, replace, status, notify, profile, onRenameProfile, onDeleteProfile, onOpenStarter }) {
+function PasswordChange({ onSetPassword, notify, hasPass }) {
+  const [pw, setPw] = useState('');
+  const save = async (e) => {
+    e.preventDefault();
+    if (pw.length < PASS_MIN) { notify(L('סיסמה של {0} תווים לפחות.', [PASS_MIN])); return; }
+    onSetPassword(await makePass(pw)); setPw(''); notify('הסיסמה נשמרה');
+  };
+  return (
+    <form className="grid gap-2" onSubmit={save}>
+      <PassField id="change-pass" label={hasPass ? 'שינוי סיסמה' : 'קביעת סיסמה'} value={pw} onChange={setPw} />
+      <Btn variant="soft" type="submit" disabled={!pw}><Icon name="KeyRound" size={18} />שמירת הסיסמה</Btn>
+    </form>
+  );
+}
+function BackupTab({ db, update, replace, status, notify, profile, onRenameProfile, onDeleteProfile, onOpenStarter, onSetPassword }) {
   // רשימת ההיכרות הושלמה (עברו על כל 400 הספרים, או שכולם כבר בספרייה): לא מציגים אותה בהגדרות
   const [nameDraft, setNameDraft] = useState(profile.name);
   const [confirmProfileDel, setConfirmProfileDel] = useState(false);
@@ -5045,6 +5061,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
             className="flex-1 min-w-0 min-h-[48px] px-3 rounded-xl border border-line bg-bg text-[16px]" />
           <Btn variant="soft" type="submit" disabled={!nameDraft.trim() || nameDraft.trim() === profile.name}>שינוי שם</Btn>
         </form>
+        {onSetPassword && <PasswordChange onSetPassword={onSetPassword} notify={notify} hasPass={!!profile.passHash} />}
         <Btn variant="danger" onClick={() => { if (!confirmProfileDel) { setConfirmProfileDel(true); return; } onDeleteProfile(); }}>
           {confirmProfileDel ? T(`לחצו שוב: מחיקת "${profile.name}" וכל הספרים שלו`) : 'מחיקת המשתמש מהמכשיר'}
         </Btn>
@@ -5857,6 +5874,7 @@ const GUIDE = [
     [L('איך מתחילים?'), L('בוחרים שם (בלי סיסמה). בכניסה הראשונה נפתחת רשימה של 400 ספרים מוכרים: החלקה ימינה = קראתי, שמאלה = לא קראתי, והסימנייה = רוצה לקרוא. אפשר לדלג ולחזור אליה מהכרטיס שבראש "הספרים שלי".')],
     [L('איך מתקינים את האפליקציה על מסך הבית?'), L('באייפון: פותחים ב-Safari, לוחצים על כפתור השיתוף ובוחרים "הוספה למסך הבית". באנדרואיד: בכרום, בתפריט ⋮ בוחרים "התקנת האפליקציה", או לוחצים על ההודעה שמופיעה באפליקציה.')],
     [L('איך חוזרים לרשימת הספרים המוכרים?'), L('בהגדרות ← "המלצות" ← "רשימת 400 הספרים המוכרים": "המשך מאיפה שעצרתי" או "מההתחלה". יש גם קישור בתחתית לשונית "הוספת ספר". ספרים שכבר בספרייה לא מוצגים שוב.')],
+    [L('איך עובדת הסיסמה?'), L('כל משתמש בוחר סיסמה כשהוא נכנס בפעם הראשונה. המכשיר זוכר מי נכנס ממנו ופותח ישר את הספרייה שלו; אחרי "החלפת משתמש" צריך את הסיסמה שוב. משנים סיסמה בהגדרות ← "החשבון שלי". שכחתם? "שכחתי סיסמה" במסך הכניסה, עם סיסמת המנהל.')],
     [L('כמה משתמשים יכולים להשתמש בה?'), L('כל אחד במשפחה מקבל ספרייה, דירוגים והמלצות משלו. מחליפים משתמש בלחיצה על השם שבראש המסך.')],
     [L('הנתונים שלי נשמרים?'), L('הכול נשמר בטלפון ומסתנכרן אוטומטית, כך שהספרייה זמינה בכל מכשיר. הנקודה הירוקה ליד השם אומרת שהכול מסונכרן; כתומה = אין חיבור כרגע, והנתונים יסונכרנו כשיחזור.')]] },
   { id: 'library', title: L('הספרים שלי'), icon: 'Library', intro: L('הספרייה האישית: ארבעה מדפים, חיפוש, מיון, תגיות וסטטיסטיקות.'), qa: [
@@ -6032,7 +6050,7 @@ const TABS = [
   { id: 'backup', label: L('הגדרות'), icon: 'Settings' }
 ];
 
-function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
+function App({ profile, onSwitch, onRenameProfile, onDeleteProfile, onSetPassword }) {
   const { db, update, replace, status } = usePersistentDB();
   const friendsBadge = useFriends().badge;
   const [digestOpen, setDigestOpen] = useState(null);
@@ -6192,7 +6210,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
         {tab === 'add' && <AddTab db={db} update={update} onPick={pick} goSettings={() => setTab('backup')} onOpenStarter={() => openStarter(false)} />}
         {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} onOpenDigest={setDigestOpen} />}
         {tab === 'friends' && <FriendsTab db={db} update={update} onPick={pick} notify={notify} onGoSettings={() => { openSettingsGroup(L('פרטיות וחברים')); setTab('backup'); setTimeout(() => { const el = document.querySelector(`[data-group="${L('פרטיות וחברים')}"]`); if (el) el.scrollIntoView({ block: 'start' }); }, 60); }} />}
-        {tab === 'backup' && <BackupTab onOpenStarter={openStarter} db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
+        {tab === 'backup' && <BackupTab onOpenStarter={openStarter} db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onSetPassword={onSetPassword} onDeleteProfile={onDeleteProfile} />}
       </main>
 
       <nav className="fixed bottom-0 inset-x-0 z-30 bg-surface border-t border-line safe-bottom" aria-label="ניווט ראשי">
@@ -6255,11 +6273,32 @@ function Avatar({ profile, size = 40 }) {
 function loadProfiles() {
   try {
     const p = JSON.parse(localStorage.getItem(PROFILES_KEY) || 'null');
-    if (p && Array.isArray(p.profiles)) return { deleted: {}, ...p };
+    if (p && Array.isArray(p.profiles)) {
+      const out = { deleted: {}, ...p };
+      if (!out.active) { const r = localStorage.getItem(REMEMBER_KEY); if (r && out.profiles.some(x => x.id === r)) out.active = r; }
+      return out;
+    }
   } catch (e) { /* */ }
   return { profiles: [], active: null, deleted: {} };
 }
-function saveProfiles(p) { try { localStorage.setItem(PROFILES_KEY, JSON.stringify(p)); } catch (e) { /* */ } }
+function saveProfiles(p) {
+  try { localStorage.setItem(PROFILES_KEY, JSON.stringify(p)); if (p.active) localStorage.setItem(REMEMBER_KEY, p.active); } catch (e) { /* */ }
+}
+/* ---------- סיסמה לכל משתמש: לתחושת פרטיות בין בני המשפחה, לא אבטחה (הנתונים עצמם מסתנכרנים לכל המכשירים) ----------
+   נשמר רק גיבוב (SHA-256 עם מלח אקראי) בפרופיל, שמסתנכרן. סיסמת המנהל פותחת כל משתמש ומאפשרת לקבוע לו סיסמה חדשה. */
+const REMEMBER_KEY = 'vrt-active';   // המשתמש שנכנס מהמכשיר הזה: נכנס ישר בפעם הבאה
+const ADMIN_HASH = '1c0713d67db5f8cbcf3bc20f8ff39c62ccb85ce909ad674f697efff0410b615d';   // sha256('vrt-admin|' + סיסמת המנהל)
+async function sha256hex(str) {
+  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+async function makePass(pw) { const passSalt = uid(); return { passSalt, passHash: await sha256hex(`vrt|${passSalt}|${pw}`) }; }
+const isAdminPass = async (pw) => (await sha256hex('vrt-admin|' + pw)) === ADMIN_HASH;
+async function checkPass(profile, pw) {
+  if (await isAdminPass(pw)) return true;
+  return !!profile.passHash && (await sha256hex(`vrt|${profile.passSalt || ''}|${pw}`)) === profile.passHash;
+}
+const PASS_MIN = 4;
 function countBooks(pid) {
   try { const d = JSON.parse(localStorage.getItem(dbKeyFor(pid)) || 'null'); return d && Array.isArray(d.books) ? d.books.length : 0; } catch (e) { return 0; }
 }
@@ -6279,11 +6318,67 @@ function UiLangPicker() {
     </div>
   );
 }
-function WhoAreYou({ profiles, onPick, onCreate }) {
+function PassField({ id, value, onChange, label, autoFocus }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div className="grid gap-1">
+      <label htmlFor={id} className="font-semibold text-[15px]">{label}</label>
+      <div className="relative">
+        <input id={id} type={show ? 'text' : 'password'} value={value} onChange={e => onChange(e.target.value)} autoFocus={autoFocus} autoComplete="current-password" dir="ltr"
+          className="w-full min-h-[52px] ps-3 pe-12 rounded-xl border border-line bg-bg text-[17px]" />
+        <button type="button" onClick={() => setShow(!show)} aria-label={show ? 'הסתרת הסיסמה' : 'הצגת הסיסמה'} className="absolute end-1 top-1 w-11 h-11 grid place-items-center text-muted"><Icon name={show ? 'EyeOff' : 'Eye'} size={18} /></button>
+      </div>
+    </div>
+  );
+}
+// כניסה למשתמש קיים: סיסמה (או קביעת סיסמה למשתמש ותיק שאין לו), ו"שכחתי" עם סיסמת המנהל
+function ProfileLogin({ profile, onEnter, onSetPass, onCancel }) {
+  const [mode, setMode] = useState(profile.passHash ? 'login' : 'set');
+  const [pw, setPw] = useState(''), [adminPw, setAdminPw] = useState(''), [err, setErr] = useState(''), [busy, setBusy] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault(); setErr(''); setBusy(true);
+    try {
+      if (mode === 'login') {
+        if (await checkPass(profile, pw)) onEnter(); else setErr(T('הסיסמה לא נכונה. נסו שוב.'));
+      } else if (mode === 'set') {
+        if (pw.length < PASS_MIN) setErr(L('סיסמה של {0} תווים לפחות.', [PASS_MIN])); else { onSetPass(await makePass(pw)); onEnter(); }
+      } else {
+        if (!(await isAdminPass(adminPw))) setErr('סיסמת המנהל לא נכונה.');
+        else if (pw.length < PASS_MIN) setErr(L('סיסמה של {0} תווים לפחות.', [PASS_MIN]));
+        else { onSetPass(await makePass(pw)); onEnter(); }
+      }
+    } finally { setBusy(false); }
+  };
+  return (
+    <form className="grid gap-2.5 bg-surface border border-line rounded-xl p-3" onSubmit={submit}>
+      <div className="flex items-center gap-2.5"><Avatar profile={profile} size={36} /><span className="font-semibold text-[17px] flex-1 truncate">{profile.name}</span></div>
+      {mode === 'set' && <p className="text-[14px] m-0">{T('למשתמש הזה עוד אין סיסמה. בחרו סיסמה, והיא תידרש בכניסה הבאה.')}</p>}
+      {mode === 'reset' && <PassField id="admin-pass" label="סיסמת מנהל" value={adminPw} onChange={setAdminPw} autoFocus />}
+      <PassField id="profile-pass" label={mode === 'login' ? 'סיסמה' : 'סיסמה חדשה'} value={pw} onChange={setPw} autoFocus={mode !== 'reset'} />
+      {err && <p className="text-[13px] text-danger m-0" role="alert">{err}</p>}
+      <div className="grid grid-cols-2 gap-2">
+        <Btn type="submit" disabled={busy || !pw}><Icon name="LogIn" size={20} />כניסה</Btn>
+        <Btn variant="ghost" onClick={onCancel}>ביטול</Btn>
+      </div>
+      {mode === 'login' && <button type="button" className="text-accent font-semibold text-[14px] min-h-[40px] justify-self-start" onClick={() => { setMode('reset'); setErr(''); setPw(''); }}>שכחתי סיסמה</button>}
+    </form>
+  );
+}
+function WhoAreYou({ profiles, onPick, onCreate, onSetPass }) {
   const [name, setName] = useState('');
+  const [pw, setPw] = useState('');
   const [adding, setAdding] = useState(profiles.length === 0);
+  const [sel, setSel] = useState(null);
+  const [err, setErr] = useState('');
   const legacyCount = profiles.length === 0 ? countBooks('default') : 0;
   const taken = profiles.some(p => norm(p.name) === norm(name));
+  const selected = profiles.find(p => p.id === sel);
+  const create = async (e) => {
+    e.preventDefault(); setErr('');
+    if (!name.trim() || taken) return;
+    if (pw.length < PASS_MIN) { setErr(L('סיסמה של {0} תווים לפחות.', [PASS_MIN])); return; }
+    onCreate(name.trim(), await makePass(pw));
+  };
   return (
     <div className="min-h-screen bg-bg text-ink font-body">
       <main className="mx-auto max-w-md px-4 pt-10 pb-10 safe-top fade-in">
@@ -6296,33 +6391,37 @@ function WhoAreYou({ profiles, onPick, onCreate }) {
         </div>
         <div className="mb-6"><UiLangPicker /></div>
         <h1 className="font-display font-medium text-[26px] leading-snug mb-5">של מי הספרייה?</h1>
-        {profiles.length > 0 && (
+        {selected ? (
+          <div className="mb-4"><ProfileLogin key={selected.id} profile={selected} onEnter={() => onPick(selected.id)} onSetPass={(p) => onSetPass(selected.id, p)} onCancel={() => setSel(null)} /></div>
+        ) : profiles.length > 0 && (
           <ul className="grid gap-2 mb-4">
             {profiles.map(p => (
               <li key={p.id}>
-                <button type="button" onClick={() => onPick(p.id)}
+                <button type="button" onClick={() => { setSel(p.id); setAdding(false); }}
                   className="w-full min-h-[64px] flex items-center gap-3 px-3 rounded-xl bg-surface border border-line text-start active:bg-surface2">
                   <Avatar profile={p} size={44} />
                   <span className="flex-1 min-w-0">
                     <span className="block font-semibold text-[17px] truncate">{p.name}</span>
                     <span className="block text-muted text-[13px] tabular">{countBooks(p.id)} ספרים</span>
                   </span>
-                  <Icon name="ChevronLeft" size={20} className="text-muted" />
+                  <Icon name={p.passHash ? 'Lock' : 'ChevronLeft'} size={20} className="text-muted" />
                 </button>
               </li>
             ))}
           </ul>
         )}
-        {adding ? (
-          <form className="grid gap-2 bg-surface border border-line rounded-xl p-3" onSubmit={(e) => { e.preventDefault(); if (name.trim() && !taken) onCreate(name.trim()); }}>
+        {selected ? null : adding ? (
+          <form className="grid gap-2 bg-surface border border-line rounded-xl p-3" onSubmit={create}>
             {legacyCount > 0 && <Notice tone="info">במכשיר כבר יש ספרייה עם {legacyCount} ספרים. היא תשויך למשתמש הראשון שתיצרו.</Notice>}
             <label htmlFor="new-profile" className="font-semibold text-[15px]">{profiles.length ? 'משתמש חדש' : 'איך לקרוא לך?'}</label>
             <input id="new-profile" value={name} onChange={e => setName(e.target.value)} maxLength={24} autoFocus placeholder="שם או כינוי"
               className="w-full min-h-[52px] px-3 rounded-xl border border-line bg-bg text-[17px]" />
             {taken && <p className="text-[13px] text-danger">כבר יש משתמש בשם הזה.</p>}
+            <PassField id="new-pass" label="סיסמה" value={pw} onChange={setPw} />
+            {err && <p className="text-[13px] text-danger m-0" role="alert">{err}</p>}
             <div className={profiles.length ? 'grid grid-cols-2 gap-2' : 'grid'}>
-              <Btn type="submit" disabled={!name.trim() || taken}><Icon name="Check" size={20} />כניסה</Btn>
-              {profiles.length > 0 && <Btn variant="ghost" onClick={() => { setAdding(false); setName(''); }}>ביטול</Btn>}
+              <Btn type="submit" disabled={!name.trim() || taken || !pw}><Icon name="Check" size={20} />כניסה</Btn>
+              {profiles.length > 0 && <Btn variant="ghost" onClick={() => { setAdding(false); setName(''); setPw(''); }}>ביטול</Btn>}
             </div>
           </form>
         ) : (
@@ -6356,11 +6455,12 @@ function Root() {
   if (!active) {
     return <WhoAreYou profiles={state.profiles}
       onPick={(id) => change(s => ({ ...s, active: id }))}
-      onCreate={(name) => change(s => {
+      onSetPass={(id, pass) => change(s => ({ ...s, profiles: s.profiles.map(p => p.id === id ? { ...p, ...pass, updatedAt: Date.now() } : p) }))}
+      onCreate={(name, pass) => change(s => {
         const id = s.profiles.some(p => p.id === 'default') || loadCloud() ? uid() : 'default';
         const used = new Set(s.profiles.map(p => p.color));
         const color = [...AVATAR_COLORS.keys()].find(i => !used.has(i)) ?? s.profiles.length;
-        return { ...s, profiles: [...s.profiles, { id, name, color, createdAt: Date.now(), updatedAt: Date.now() }], active: id };
+        return { ...s, profiles: [...s.profiles, { id, name, color, ...(pass || {}), createdAt: Date.now(), updatedAt: Date.now() }], active: id };
       })} />;
   }
 
@@ -6369,10 +6469,11 @@ function Root() {
   ACTIVE.dbKey = dbKeyFor(active.id);
   ACTIVE.queueKey = queueKeyFor(active.id);
   return <App key={active.id} profile={active}
-    onSwitch={() => { try { sessionStorage.removeItem('vrt_tab'); } catch (e) { /* */ } change(s => ({ ...s, active: null })); }}
+    onSwitch={() => { try { sessionStorage.removeItem('vrt_tab'); localStorage.removeItem(REMEMBER_KEY); } catch (e) { /* */ } change(s => ({ ...s, active: null })); }}
+    onSetPassword={(pass) => change(s => ({ ...s, profiles: s.profiles.map(p => p.id === active.id ? { ...p, ...pass, updatedAt: Date.now() } : p) }))}
     onRenameProfile={(name) => change(s => ({ ...s, profiles: s.profiles.map(p => p.id === active.id ? { ...p, name, updatedAt: Date.now() } : p) }))}
     onDeleteProfile={() => {
-      try { localStorage.removeItem(dbKeyFor(active.id)); localStorage.removeItem(queueKeyFor(active.id)); } catch (e) { /* */ }
+      try { localStorage.removeItem(dbKeyFor(active.id)); localStorage.removeItem(queueKeyFor(active.id)); localStorage.removeItem(REMEMBER_KEY); } catch (e) { /* */ }
       idbDelete(dbKeyFor(active.id)).catch(() => {});
       change(s => ({ ...s, profiles: s.profiles.filter(p => p.id !== active.id), deleted: { ...(s.deleted || {}), [active.id]: Date.now() }, active: null }));
     }} />;

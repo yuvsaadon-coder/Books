@@ -1144,5 +1144,21 @@ export const EN = {
   "הספר גלוי שוב לחברים": "Friends can see the book again",
   "מוסתר מחברים": "Hidden from friends",
   "איך מסתירים ספר מסוים מחברים?": "How do I hide a specific book from friends?",
-  "לוחצים על הספר ב\"הספרים שלי\" ומפעילים \"הסתרה מחברים\". הספר נשאר אצלך, אבל לא מופיע במדף שלך אצל החברים, בהמלצות שלהם וב\"אהובים בקהילה\". ליד ספר מוסתר מופיע סימן של עין מחוקה.": "Tap the book in \"My books\" and turn on \"Hide from friends\". The book stays in your library, but it doesn't appear on your shelf for friends, in their recommendations or in \"Community favourites\". A hidden book shows a crossed-out eye."
+  "לוחצים על הספר ב\"הספרים שלי\" ומפעילים \"הסתרה מחברים\". הספר נשאר אצלך, אבל לא מופיע במדף שלך אצל החברים, בהמלצות שלהם וב\"אהובים בקהילה\". ליד ספר מוסתר מופיע סימן של עין מחוקה.": "Tap the book in \"My books\" and turn on \"Hide from friends\". The book stays in your library, but it doesn't appear on your shelf for friends, in their recommendations or in \"Community favourites\". A hidden book shows a crossed-out eye.",
+  "סיסמה של {0} תווים לפחות.": "At least {0} characters.",
+  "הסיסמה נשמרה": "Password saved",
+  "שינוי סיסמה": "Change password",
+  "קביעת סיסמה": "Set a password",
+  "שמירת הסיסמה": "Save password",
+  "הסתרת הסיסמה": "Hide password",
+  "הצגת הסיסמה": "Show password",
+  "הסיסמה לא נכונה. נסו שוב.": "Wrong password. Try again.",
+  "סיסמת המנהל לא נכונה.": "Wrong admin password.",
+  "למשתמש הזה עוד אין סיסמה. בחרו סיסמה, והיא תידרש בכניסה הבאה.": "This user has no password yet. Choose one; it will be needed next time.",
+  "סיסמת מנהל": "Admin password",
+  "סיסמה": "Password",
+  "סיסמה חדשה": "New password",
+  "שכחתי סיסמה": "Forgot password",
+  "איך עובדת הסיסמה?": "How does the password work?",
+  "כל משתמש בוחר סיסמה כשהוא נכנס בפעם הראשונה. המכשיר זוכר מי נכנס ממנו ופותח ישר את הספרייה שלו; אחרי \"החלפת משתמש\" צריך את הסיסמה שוב. משנים סיסמה בהגדרות ← \"החשבון שלי\". שכחתם? \"שכחתי סיסמה\" במסך הכניסה, עם סיסמת המנהל.": "Each user chooses a password the first time they sign in. The device remembers who signed in and opens their library directly; after \"Switch user\" the password is needed again. Change it in Settings → \"My account\". Forgot it? Tap \"Forgot password\" on the sign-in screen and use the admin password."
 };
