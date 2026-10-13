@@ -3,11 +3,14 @@
 // 2. /v1/messages  גישה ל-Claude עם חיפוש ברשת שמוגבל לאתרים אמינים. המפתח נשמר כאן ולא בדפדפן.
 // 3. /stores       חיפוש ספר בעברית, סטימצקי וצומת ספרים (דף ספר אמיתי = אימות)
 // 4. /gbooks /nli /page  Google Books, הספרייה הלאומית, ובדיקת דף ספר
+// 5. /shop/*      אפליקציית הקניות: השוואת מחירים ורשימה משותפת (worker/shop.js)
 //
 // הגדרות נדרשות ב-Cloudflare (ראו README.md בתיקייה הזו):
 //   Secret   ANTHROPIC_API_KEY  מפתח ה-API של Anthropic
 //   Secret   GOOGLE_BOOKS_KEY   (רשות) מפתח Google Books לחיפוש מלא בעברית
 //   KV       LIBRARY            מאגר KV לשמירת הספרייה
+
+import { handleShop } from './shop.js';
 
 const ALLOWED_ORIGINS = ['https://yuvsaadon-coder.github.io'];
 const ALLOWED_MODELS = ['claude-sonnet-4-6', 'claude-opus-5', 'claude-haiku-4-5-20251001'];   // הראשון הוא ברירת המחדל
@@ -992,6 +995,7 @@ export default {
       if (path === '/stores' && req.method === 'GET') return await handleStores(req, env, cors, ctx);
       if (path === '/nli' && req.method === 'GET') return await handleNli(req, env, cors, ctx);
       if (path === '/page' && req.method === 'GET') return await handlePage(req, cors, ctx);
+      if (path.startsWith('/shop/')) return await handleShop(req, env, cors, path);
       if (path === '/sync') return await handleSync(req, env, cors);
       if (path.startsWith('/v1/messages') && req.method === 'POST') return await handleAI(req, env, cors);
       return json({ error: 'not_found' }, 404, cors);
