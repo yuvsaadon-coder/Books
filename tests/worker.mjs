@@ -297,7 +297,7 @@ console.log('worker page verification: ok');
     deleted: {},
     dbs: {
       A: { books: [book('a1', 'ספר של A')], settings: {}, litProfile: { text: 'פרופיל' } },
-      B: { books: [book('b1', 'גלוי'), book('b2', 'מוסתר', { private: true })], settings: { share: { notes: false } }, litProfile: { text: 'סוד של B' }, feedback: [{ text: 'סוד' }] },
+      B: { books: [book('b1', 'גלוי'), book('b2', 'מוסתר', { private: true }), book('b3', 'אהוב')], settings: { share: { notes: false } }, litProfile: { text: 'סוד של B' }, feedback: [{ text: 'סוד' }] },
       C: { books: [book('c1', 'אהוב', { rating: 5 }), book('c2', 'בינוני', { rating: 3 })], settings: {}, history: [{ id: 'h' }] }
     },
     social: { items: [
@@ -306,27 +306,35 @@ console.log('worker page verification: ok');
       { id: 'r1', type: 'rec', from: 'C', to: 'B', status: 'new', at: 1 }
     ] }
   } }));
-  // 1. בלי כניסה: הכול חסום, חוץ מ-/ping ורשימת המשתמשים למסך הכניסה (בלי גיבובים)
+  // 1. בלי כניסה: הכול חסום, חוץ מ-/ping. מסך הכניסה לא מקבל את רשימת המשתמשים, רק את אלה שהמכשיר מכיר (בלי גיבובים)
   for (const p of ['/sync', '/bookinfo?title=x', '/digest', '/gbooks?u=x']) assert.equal((await call(p)).status, 401, p);
   assert.equal((await call('/v1/messages', { method: 'POST', body: {} })).status, 401);
   assert.equal((await call('/ping')).status, 200);
-  const list = (await call('/auth/profiles')).json;
-  assert.deepEqual(list.profiles.map(p => p.id), ['A', 'B', 'C']);
+  assert.deepEqual((await call('/auth/profiles')).json.profiles, []);
+  const list = (await call('/auth/profiles?ids=A,B,zz')).json;
+  assert.deepEqual(list.profiles.map(p => p.id), ['A', 'B']);
   assert.ok(!JSON.stringify(list).includes(legacy) && list.profiles[0].hasPass && !list.profiles[1].hasPass);
   // 2. סיסמה: שגויה נדחית; נכונה (הישנה) נותנת כניסה ומשודרגת ל-PBKDF2, והגיבוב הישן לא נשלח לאף אחד
   assert.equal((await call('/auth/password', { method: 'POST', body: { pid: 'A', password: 'nope' } })).status, 401);
   const a = (await call('/auth/password', { method: 'POST', body: { pid: 'A', password: '1234' } })).json;
   assert.ok(/^[0-9a-f]{64}$/.test(a.token) && a.pid === 'A');
   assert.equal(JSON.parse(kv.get('acct:A')).pass.alg, 'pbkdf2');
+  // כניסה לפי שם; שם שלא קיים נראה כמו סיסמה שגויה; משתמש בלי סיסמה לא נתפס (רק המנהל קובע לו)
+  assert.ok((await call('/auth/password', { method: 'POST', body: { name: ' אבי ', password: '1234' } })).json.token);
+  assert.equal((await call('/auth/password', { method: 'POST', body: { name: 'אין כזה', password: '1234' } })).json.error, 'wrong');
+  assert.equal((await call('/auth/password', { method: 'POST', body: { pid: 'C', password: 'grab' } })).status, 403);
+  assert.ok(!kv.has('acct:C'));
   // 3. מה A רואה: הכול שלו; מ-B (חבר) רק ספרים משותפים, בלי המוסתר ובלי הערות, בלי פרופיל/משוב; מ-C (לא חבר) רק האהוב, בלי הערה
   const v = (await call('/sync', { token: a.token })).json;
   assert.ok(!JSON.stringify(v).includes(legacy) && !JSON.stringify(v).includes('passSalt'));
   assert.equal(v.data.dbs.A.litProfile.text, 'פרופיל');
-  assert.deepEqual(v.data.dbs.B.books.map(b => b.title), ['גלוי']);
+  assert.deepEqual(v.data.dbs.B.books.map(b => b.title), ['גלוי', 'אהוב']);
   assert.equal(v.data.dbs.B.books[0].note, '');
   assert.ok(!JSON.stringify(v.data.dbs.B).includes('סוד'));
-  assert.deepEqual(v.data.dbs.C.books.map(b => b.title), ['אהוב']);
-  assert.ok(!JSON.stringify(v.data.dbs.C).includes('הערה פרטית') && !v.data.dbs.C.history);
+  // C (לא חבר): הספרייה שלו לא נשלחת בכלל. "אהובים בקהילה" מגיע כסיכום אנונימי (שניים לפחות אהבו), בלי מזהים והערות
+  assert.equal(v.data.dbs.C, undefined);
+  assert.deepEqual(v.data.community.map(x => [x.book.title, x.ratings]), [['אהוב', [5, 5]]]);
+  assert.ok(!/הערה פרטית|"c1"|"b3"/.test(JSON.stringify(v.data.community)));
   assert.deepEqual(v.data.social.items.map(x => x.id), ['f1']);   // רשומות של אחרים לא נשלחות
   // 4. כתיבה: A יכול לשנות רק את שלו. ניסיון לשנות את הספרייה של B, את השם של C, או לזייף רשומה בשם B – נזרק
   const forged = JSON.parse(JSON.stringify(v.data));
@@ -338,7 +346,7 @@ console.log('worker page verification: ok');
   assert.equal((await call('/sync', { method: 'PUT', token: a.token, body: { baseRev: v.rev, data: forged } })).status, 200);
   const st = JSON.parse(kv.get('state')).data;
   assert.deepEqual(st.dbs.A.books.map(b => b.title), ['ספר של A', 'חדש של A']);
-  assert.equal(st.dbs.B.books.length, 2);
+  assert.equal(st.dbs.B.books.length, 3);
   assert.deepEqual(st.profiles.map(p => p.name), ['אבי כהן', 'בת', 'כרמל']);
   assert.ok(!st.social.items.some(x => x.id === 'x1'));
   assert.equal(st.social.items.find(x => x.id === 'f2').status, 'accepted');
@@ -347,9 +355,8 @@ console.log('worker page verification: ok');
   const gB = await gToken({ sub: 'g-b', email: 'bat@example.com', name: 'Bat' });
   const l = (await call('/auth/google', { method: 'POST', body: { credential: gB } })).json;
   assert.ok(l.link && l.email === 'bat@example.com');
-  const lb = (await call('/auth/link', { method: 'POST', body: { link: l.link, pid: 'B' } })).json;
-  assert.equal(lb.pid, 'B');
-  assert.equal((await call('/auth/google', { method: 'POST', body: { credential: gB } })).json.pid, 'B');
+  // ל-B אין סיסמה: אי אפשר לחבר אליו חשבון Google (אחרת כל אחד יכול היה לתפוס אותו)
+  assert.equal((await call('/auth/link', { method: 'POST', body: { link: l.link, pid: 'B' } })).json.error, 'no_password');
   assert.equal((await call('/auth/google', { method: 'POST', body: { credential: await gToken({ sub: 'g-b' }, 'other-client') } })).status, 401);
   // קישור Google ל-A דורש את הסיסמה של A
   const l2 = (await call('/auth/google', { method: 'POST', body: { credential: await gToken({ sub: 'g-x', email: 'x@example.com' }) } })).json;
@@ -363,6 +370,11 @@ console.log('worker page verification: ok');
   assert.equal((await call('/auth/admin', { method: 'POST', token: ad.token, body: { action: 'reset', pid: 'C', password: 'new-pass' } })).status, 200);
   const cTok = (await call('/auth/password', { method: 'POST', body: { pid: 'C', password: 'new-pass' } })).json.token;
   assert.ok(cTok);
+  // אחרי שהמנהל קבע ל-B סיסמה: Google מתחבר אליו עם הסיסמה, ונכנס ישר בפעם הבאה. האיפוס לא נוגע בכניסות של אחרים
+  assert.equal((await call('/auth/admin', { method: 'POST', token: ad.token, body: { action: 'reset', pid: 'B', password: 'bpass' } })).status, 200);
+  assert.equal((await call('/auth/link', { method: 'POST', body: { link: l.link, pid: 'B', password: 'bpass' } })).json.pid, 'B');
+  assert.equal((await call('/auth/google', { method: 'POST', body: { credential: gB } })).json.pid, 'B');
+  assert.equal((await call('/sync', { token: cTok })).status, 200);
   // קישור מההגדרות לחשבון Google שכבר שייך למשתמש אחר: נדחה, ולא נותן כניסה אליו
   assert.equal((await call('/auth/google', { method: 'POST', token: cTok, body: { credential: gB } })).status, 409);
   assert.equal((await call('/auth/me', { token: cTok })).json.google, '');
@@ -376,6 +388,11 @@ console.log('worker page verification: ok');
   assert.equal((await call('/sync', { method: 'PUT', token: cTok, body: { baseRev: before.rev, data: { deleted: { C: Date.now() } } } })).status, 200);
   assert.equal((await call('/sync', { token: cTok })).status, 401);
   const stC = JSON.parse(kv.get('state')).data;
-  assert.ok(stC.deleted.C && !stC.dbs.C && !kv.has('acct:C'));
+  assert.ok(stC.deleted.C && !stC.dbs.C && !kv.has('acct:C') && !stC.profiles.some(p => p.name === 'כרמל'));
+  // הרשמה דורשת הסכמה לתנאים, וההסכמה נשמרת עם הגרסה
+  assert.equal((await call('/auth/register', { method: 'POST', body: { name: 'דן', password: '1234' } })).json.error, 'consent');
+  const dn = (await call('/auth/register', { method: 'POST', body: { name: 'דן', password: '1234', consent: '1' } })).json;
+  assert.equal(dn.consent, '1');
+  assert.equal(JSON.parse(kv.get('acct:' + dn.pid)).consent.v, '1');
   console.log('worker auth and per-user data: ok');
 }

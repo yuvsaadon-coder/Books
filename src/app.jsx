@@ -31,7 +31,7 @@ function setUiLang(lang) {
 const DEFAULT_LOCALE = IS_EN ? 'en-GB' : 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '45';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '46';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -1038,6 +1038,7 @@ function wipeOtherUsers(keepPid) {
       if (!k || keep.has(k)) continue;
       if (k.startsWith(STORAGE_KEY) || k.startsWith('verified_reading_tracker_queue_v1') || k.startsWith('vrt-starter2-') || k.startsWith('vrt-rec-job-') || k.startsWith('vrt-push-')) drop.push(k);
     }
+    drop.push(COMMUNITY_KEY);
     drop.forEach(k => { localStorage.removeItem(k); if (k.startsWith(STORAGE_KEY)) idbDelete(k).catch(() => {}); });
     if (localStorage.getItem('vrt-last-pid') !== keepPid) { localStorage.removeItem(SOCIAL_KEY); localStorage.removeItem(PROFILES_KEY); }
     localStorage.setItem('vrt-last-pid', keepPid);
@@ -1046,7 +1047,8 @@ function wipeOtherUsers(keepPid) {
 }
 function adoptSession(s) {
   wipeOtherUsers(s.pid);
-  saveSession({ token: s.token, pid: s.pid, name: s.name || '', admin: !!s.admin, email: s.email || '' });
+  rememberKnown({ id: s.pid, name: s.name });
+  saveSession({ token: s.token, pid: s.pid, name: s.name || '', admin: !!s.admin, email: s.email || '', consent: s.consent || '' });
 }
 async function logoutNow() {
   try { await authPost('/auth/logout'); } catch (e) { /* */ }
@@ -1146,7 +1148,15 @@ function mergeState(l, r, me) {
   const social = { items: mergeByIdNewest((l.social || {}).items, (r.social || {}).items, x => x.editedAt || x.at || 0)
     .filter(x => rIds.has(x.id) || x.from === me)
     .filter(x => (x.editedAt || x.at || 0) > cut && !deleted[x.from] && !deleted[x.to]).sort((x, y) => (y.at || 0) - (x.at || 0)).slice(0, 2000) };
-  return { profiles, deleted, dbs, social };
+  return { profiles, deleted, dbs, social, community: Array.isArray(r.community) ? r.community : [] };
+}
+// "אהובים בקהילה": סיכום אנונימי שמגיע מהשרת (בלי שמות ובלי ספריות של משתמשים שאינם חברים)
+const COMMUNITY_KEY = 'vrt-community';
+function loadCommunity() { try { const c = JSON.parse(localStorage.getItem(COMMUNITY_KEY) || '[]'); return Array.isArray(c) ? c : []; } catch (e) { return []; } }
+function useCommunity() {
+  const [c, setC] = useState(loadCommunity);
+  useEffect(() => { const f = () => setC(loadCommunity()); window.addEventListener('vrt-community-changed', f); return () => window.removeEventListener('vrt-community-changed', f); }, []);
+  return c;
 }
 // החלקים של המשתמש: רק אותם שולחים לשרת
 function mineOf(st, me) {
@@ -1160,6 +1170,10 @@ function applyLocal(state, me) {
     if (cur !== next) { try { localStorage.setItem(SOCIAL_KEY, next); } catch (e) { /* */ } window.dispatchEvent(new Event('vrt-social-changed')); }
   }
   saveProfiles({ profiles: state.profiles, deleted: state.deleted, active: me });
+  if (state.community) {
+    const next = JSON.stringify(state.community);
+    try { if (localStorage.getItem(COMMUNITY_KEY) !== next) { localStorage.setItem(COMMUNITY_KEY, next); window.dispatchEvent(new Event('vrt-community-changed')); } } catch (e) { /* */ }
+  }
   // ספריות של משתמשים אחרים שכבר לא מותר לראות (חבר שהוסר, ספר שהוסתר): נמחקות מהמכשיר
   try {
     const keep = new Set(Object.keys(state.dbs).map(dbKeyFor).concat(dbKeyFor(me)));
@@ -5483,6 +5497,12 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
       </SettingsGroup>
 
 
+      <SettingsGroup icon="Scale" title="מידע משפטי ונגישות" summary={L('פרטיות, תנאי שימוש, הצהרת נגישות')}>
+        <div className="grid gap-2">
+          {[['privacy', 'ShieldCheck', L('מדיניות פרטיות')], ['terms', 'FileText', L('תנאי שימוש')], ['access', 'Accessibility', L('הצהרת נגישות')]].map(([k, ic, l]) =>
+            <Btn key={k} variant="ghost" className="justify-start" onClick={() => openLegal(k)}><Icon name={ic} size={18} />{l}</Btn>)}
+        </div>
+      </SettingsGroup>
       <SettingsGroup icon="Database" title="הנתונים שלי" summary="מה האפליקציה יודעת, ייצוא, ייבוא וגיבוי">
       <KnowsAboutMe db={db} update={update} notify={notify} />
       <AppImport db={db} update={update} notify={notify} onExport={() => { downloadFile(`my-books-${profile.name}-${stamp}.csv`, toGoodreadsCSV(db), 'text/csv;charset=utf-8'); notify('קובץ ה-CSV נוצר'); }} />
@@ -5685,7 +5705,8 @@ function FriendsTab({ db, update, onPick, notify, onGoSettings }) {
   const setShare = (k) => update(d => ({ ...d, settings: { ...d.settings, share: { ...shareOf(d), [k]: !shareOf(d)[k] } } }));
   const others = profiles.filter(p => p.id !== me && !(rel.get(p.id) && ['accepted', 'pending'].includes(rel.get(p.id).status)));
   const fromFriends = useMemo(() => lovedBy(accepted, db.books).slice(0, 15), [accepted.join(), db.books]);
-  const community = useMemo(() => lovedBy(profiles.map(p => p.id).filter(p => p !== me), db.books, { minFans: 2, community: true }).slice(0, 10), [profiles.length, db.books]);
+  const communityAll = useCommunity();
+  const community = useMemo(() => communityAll.filter(x => x && x.book && Array.isArray(x.ratings) && !findInLibrary(x.book, db.books)).slice(0, 10), [communityAll, db.books]);
 
   if (view) return <FriendShelf pid={view} profile={profOf(view)} myBooks={db.books} onBack={() => setView(null)} onPick={onPick} />;
   const BookRow = ({ book, children }) => (
@@ -5778,7 +5799,7 @@ function FriendsTab({ db, update, onPick, notify, onGoSettings }) {
           
           <ul className="grid gap-2">{community.map(x => (
             <BookRow key={dedupeKey(x.book)} book={x.book}>
-              <div className="text-[13px] text-muted mt-1 tabular">{x.fans.length} משתמשים אהבו · ממוצע {(x.fans.reduce((s, f) => s + f.rating, 0) / x.fans.length).toFixed(1)}★</div>
+              <div className="text-[13px] text-muted mt-1 tabular">{x.ratings.length} משתמשים אהבו · ממוצע {(x.ratings.reduce((s, r) => s + r, 0) / x.ratings.length).toFixed(1)}★</div>
               <AddButtons book={x.book} />
             </BookRow>))}</ul>
         </section>
@@ -6218,7 +6239,8 @@ const GUIDE = [
     [L('איך מתקינים את האפליקציה על מסך הבית?'), L('באייפון: פותחים ב-Safari, לוחצים על כפתור השיתוף ובוחרים "הוספה למסך הבית". באנדרואיד: בכרום, בתפריט ⋮ בוחרים "התקנת האפליקציה", או לוחצים על ההודעה שמופיעה באפליקציה.')],
     [L('איך חוזרים לרשימת הספרים המוכרים?'), L('בהגדרות ← "המלצות" ← "רשימת 400 הספרים המוכרים": "המשך מאיפה שעצרתי" או "מההתחלה". יש גם קישור בתחתית לשונית "הוספת ספר". ספרים שכבר בספרייה לא מוצגים שוב.')],
     [L('איך נכנסים?'), L('עם חשבון Google ("המשך עם Google"), או עם שם וסיסמה. בכניסה הראשונה עם Google בוחרים אם לחבר אותו לספרייה שכבר יש לכם (עם הסיסמה שלה) או לפתוח משתמש חדש. המכשיר זוכר את הכניסה; "החלפת משתמש" מנתקת אותה ומוחקת את הספרייה מהמכשיר (היא נשמרת בשרת). בהגדרות ← "החשבון שלי" משנים סיסמה ומקשרים או מנתקים את Google. שכחתם סיסמה? נכנסים עם Google, או מבקשים מהמנהל לאפס אותה.')],
-    [L('הספרייה שלי מוגנת?'), L('כן. השרת בודק את הסיסמה או את חשבון ה-Google, ושולח לכל מכשיר רק את הספרייה של מי שנכנס. חברים מקבלים רק את מה שבחרתם לשתף (בלי ספרים מוסתרים), ושאר המשתמשים רק ספרים שדירגתם 4 ומעלה, בלי הערות, לצורך "אהובים בקהילה". אף מכשיר לא יכול לשנות ספרייה של מישהו אחר.')],
+    [L('הספרייה שלי מוגנת?'), L('כן. השרת בודק את הסיסמה או את חשבון ה-Google, ושולח לכל מכשיר רק את הספרייה של מי שנכנס. חברים מקבלים רק את מה שבחרתם לשתף (בלי ספרים מוסתרים). שאר המשתמשים רואים רק את השם שלכם, ו"אהובים בקהילה" הוא סיכום אנונימי, בלי שמות ובלי הערות. מסך הכניסה לא מציג את רשימת המשתמשים, ואף מכשיר לא יכול לשנות ספרייה של מישהו אחר.')],
+    [L('איפה מדיניות הפרטיות, תנאי השימוש והצהרת הנגישות?'), L('בהגדרות ← "מידע משפטי ונגישות", וגם בתחתית מסך הכניסה. שם כתוב מה נשמר, איפה, מי רואה את המידע, ואיך מעיינים בו, מתקנים או מוחקים אותו.')],
     [L('כמה משתמשים יכולים להשתמש בה?'), L('כל אחד במשפחה מקבל ספרייה, דירוגים והמלצות משלו. מחליפים משתמש בלחיצה על השם שבראש המסך.')],
     [L('הנתונים שלי נשמרים?'), L('הכול נשמר בטלפון ומסתנכרן אוטומטית, כך שהספרייה זמינה בכל מכשיר. הנקודה הירוקה ליד השם אומרת שהכול מסונכרן; כתומה = אין חיבור כרגע, והנתונים יסונכרנו כשיחזור.')]] },
   { id: 'library', title: L('הספרים שלי'), icon: 'Library', intro: L('הספרייה האישית: ארבעה מדפים, חיפוש, מיון, תגיות וסטטיסטיקות.'), qa: [
@@ -6524,6 +6546,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
 
   return (
     <div className="min-h-screen bg-bg text-ink font-body">
+      <a href="#main-content" className="skip-link">{L('דילוג לתוכן הראשי')}</a>
       <main className="mx-auto max-w-xl px-4 pb-28 safe-top">
         <div className="flex items-center justify-between gap-2 pt-3">
           <div className="flex items-center gap-2 min-w-0">
@@ -6553,6 +6576,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
             </div>
           </div>
         ), document.body)}
+        <div id="main-content" tabIndex={-1} className="outline-none" />
         {tab === 'library' && <LibraryTab db={db} update={update} onOpenStarter={() => openStarter(false)} onSummary={() => { setSummaryOpen(true); if (db.settings.summarySeen !== summaryPeriod()) update(d => ({ ...d, settings: { ...d.settings, summarySeen: summaryPeriod() } })); }} onEdit={(b) => setPending({ book: b, existing: b, status: ['want', 'reading'].includes(statusOf(b)) ? 'read' : undefined })} onDelete={(id) => { update(d => ({ ...d, books: d.books.filter(b => b.id !== id), tombstones: { ...d.tombstones, books: { ...d.tombstones.books, [id]: Date.now() } } })); notify('הספר נמחק'); }}
           onUpdateBook={(id, patch) => update(d => ({ ...d, books: d.books.map(b => b.id === id ? sanitizeBook({ ...b, ...patch, editedAt: Date.now() }) : b) }))} goAdd={() => setTab('add')} notify={notify} />}
         {tab === 'add' && <AddTab db={db} update={update} onPick={pick} goSettings={() => setTab('backup')} onOpenStarter={() => openStarter(false)} />}
@@ -6658,6 +6682,8 @@ function authErrText(e) {
   if (c === 'link_expired') return T('עבר יותר מדי זמן. התחברו שוב עם Google.');
   if (c === 'linked_elsewhere') return L('חשבון ה-Google הזה כבר מקושר למשתמש אחר.');
   if (c === 'forbidden') return L('רק המנהל יכול לעשות את זה.');
+  if (c === 'no_password') return T('למשתמש הזה עוד אין סיסמה. בקשו מהמנהל לקבוע לו סיסמה, ואז אפשר להיכנס.');
+  if (c === 'consent') return L('צריך לאשר את תנאי השימוש ואת מדיניות הפרטיות.');
   if (e && e.status === 401) return L('הכניסה עם Google לא אושרה.');
   return L('אין חיבור לשרת. נסו שוב.');
 }
@@ -6719,38 +6745,187 @@ function LoginHeader() {
     </>
   );
 }
-// כניסה למשתמש קיים עם סיסמה (או קביעת סיסמה ראשונה למשתמש ותיק שאין לו)
-function ProfileLogin({ profile, clientId, onGoogle, onCancel, linkId }) {
-  const setFirst = !profile.hasPass && !profile.google && !linkId;
-  const googleOnly = !profile.hasPass && profile.google;
-  const noPw = !!linkId && !profile.hasPass;   // קישור Google למשתמש ותיק בלי סיסמה: לא צריך סיסמה
-  const [pw, setPw] = useState(''), [err, setErr] = useState(''), [busy, setBusy] = useState(false), [forgot, setForgot] = useState(false);
+/* ---------- מסמכים משפטיים: מדיניות פרטיות (חוק הגנת הפרטיות ותיקון 13), תנאי שימוש, הצהרת נגישות (ת"י 5568) ----------
+   LEGAL_OWNER ו-LEGAL_EMAIL: שם האחראי על המידע ודרך ליצור קשר. כשריקים: "מפעיל האפליקציה" ו"משוב" בהגדרות.
+   שינוי מהותי במסמכים → מעלים את LEGAL_VERSION, וכל משתמש יתבקש להסכים מחדש. */
+const LEGAL_VERSION = '2026-10';
+const LEGAL_UPDATED = '2026-10-16';
+const LEGAL_OWNER = '';
+const LEGAL_EMAIL = '';
+const legalOwner = () => LEGAL_OWNER || L('מפעיל האפליקציה "מה שנקרא"');
+const legalContact = () => LEGAL_EMAIL ? L('דרך "משוב" בהגדרות, או במייל {0}', [LEGAL_EMAIL]) : L('דרך "משוב" בהגדרות');
+function legalDocs() {
+  const c = legalContact();
+  return {
+    privacy: { title: L('מדיניות פרטיות'), sections: [
+      [L('כללי'), [L('המדיניות מסבירה איזה מידע נאסף באפליקציה "מה שנקרא", למה, איפה הוא נשמר ומה הזכויות שלכם, לפי חוק הגנת הפרטיות, התשמ"א-1981, ותקנותיו. האחראי על המידע: {0}. פניות: {1}.', [legalOwner(), c])]],
+      [L('איזה מידע נאסף'), [
+        L('פרטי חשבון: שם או כינוי שבחרתם, וסיסמה – שנשמרת רק כגיבוב (PBKDF2), כך שאף אחד לא יכול לקרוא אותה. אם נכנסתם עם Google: כתובת המייל והמזהה של חשבון ה-Google.'),
+        L('הספרייה שלכם: ספרים, דירוגים, הערות, תגיות, מתי קראתם, "רוצה לקרוא", ספרים שדחיתם, בקשות המלצה, היסטוריית ההמלצות, הפרופיל הספרותי שנבנה מהם וההגדרות.'),
+        L('חברים: בקשות חברות, והמלצות ששלחתם או קיבלתם.'),
+        L('משוב ששלחתם (עם השם שלכם). אם הפעלתם התראות: כתובת ההרשמה של הדפדפן להתראות.'),
+        L('מידע טכני: כתובת ה-IP נשמרת עד רבע שעה, רק כדי להגביל ניסיונות כניסה. אין כלי מעקב, אין פרסומות, אין עוגיות ואין ניתוח התנהגות.'),
+        L('במכשיר עצמו נשמרים הספרייה, ההגדרות ואסימון הכניסה, כדי שהאפליקציה תעבוד גם בלי רשת. "החלפת משתמש" מוחקת אותם מהמכשיר.')]],
+      [L('האם חובה למסור את המידע?'), [L('אין חובה חוקית. המסירה היא מרצונכם ובהסכמתכם, אבל בלי חשבון אי אפשר להשתמש באפליקציה, ובלי ספרים אי אפשר לקבל המלצות. ההערות על ספרים הן רשות: מה שתכתבו בהן, כולל דעות, נשמר כמו שהוא – כתבו רק מה שנוח לכם.')]],
+      [L('למה משתמשים במידע'), [L('כדי לשמור ולסנכרן את הספרייה בין המכשירים שלכם; כדי ללמוד את הטעם שלכם ולהמליץ על ספרים, כולל ההצעות הדו-שבועיות; כדי להציג לחברים את מה שבחרתם לשתף; כדי לשפר את האפליקציה לפי משוב; וכדי לאבטח את החשבון. המידע לא נמכר, לא משמש לפרסום ולא נמסר לאף אחד לשום מטרה אחרת.')]],
+      [L('מי רואה את המידע'), [
+        L('חברים שאישרתם: רק מה שבחרתם בהגדרות ← "פרטיות וחברים", בלי ספרים שסימנתם "הסתרה מחברים".'),
+        L('שאר המשתמשים: רק השם והצבע שלכם, כדי שאפשר יהיה לשלוח לכם בקשת חברות. "אהובים בקהילה" הוא סיכום אנונימי של ספרים ששני משתמשים לפחות דירגו 4 ומעלה, בלי שמות ובלי הערות; אפשר לצאת ממנו בהגדרות.'),
+        L('המנהל יכול לראות את רשימת המשתמשים ולאפס סיסמה, אבל לא לראות את הסיסמה. מסך הכניסה לא מציג את רשימת המשתמשים למי שלא נכנס.')]],
+      [L('ספקי שירות והעברת מידע לחו"ל'), [
+        L('המידע נשמר ומעובד אצל ספקי שירות ששרתיהם מחוץ לישראל, בעיקר בארצות הברית ובאירופה:'),
+        L('Cloudflare – השרת ומסד הנתונים.'),
+        L('GitHub – אחסון קובצי האפליקציה, בלי מידע אישי.'),
+        L('Anthropic (Claude) – ההמלצות, הפרופיל הספרותי, זיהוי ספרים ותרגום. נשלחים רק הספרים, הדירוגים, ההערות והבקשה, בלי שם, מייל או סיסמה. לפי התנאים של Anthropic, מידע שעובר דרך השירות שלה לא משמש לאימון מודלים.'),
+        L('Google – הכניסה עם Google, וחיפוש ב-Google Books.'),
+        L('הספרייה הלאומית, Open Library, Wikidata ואתרי חנויות והוצאות – נשלחים רק שם הספר והסופר, בלי שום פרט מזהה.'),
+        L('ההסכמה למדיניות כוללת הסכמה להעברת המידע לספקים האלה, לפי תקנות הגנת הפרטיות (העברת מידע אל מאגרי מידע שמחוץ לגבולות המדינה), התשס"א-2001. הספקים מחויבים בתנאים שלהם לשמור על המידע ולא להשתמש בו למטרות אחרות.')]],
+      [L('כמה זמן המידע נשמר'), [L('כל עוד החשבון קיים. מחיקת המשתמש (הגדרות ← "החשבון שלי") מוחקת את הספרייה, פרטי הכניסה, ההתראות וההצעות, ומנתקת את כל המכשירים. עותקי הגיבוי של השרת נמחקים לבד תוך 30 יום. מטמון של פרטי ספרים, שאינו מידע אישי, נשמר עד 14 יום.')]],
+      [L('הזכויות שלכם'), [
+        L('עיון במידע (סעיף 13 לחוק): הגדרות ← "הנתונים שלי" ← "מה האפליקציה יודעת עליי", וייצוא מלא של הספרייה.'),
+        L('תיקון ומחיקה (סעיף 14 לחוק): אפשר לערוך או למחוק כל ספר, הערה או פריט, או למחוק את המשתמש כולו.'),
+        L('לכל בקשה אחרת, או אם משהו לא נענה: {0}. אפשר גם לפנות לרשות להגנת הפרטיות.', [c])]],
+      [L('אבטחת מידע'), [L('הסיסמאות נשמרות כגיבוב (PBKDF2), הכניסה נבדקת בשרת, כל התקשורת מוצפנת (HTTPS), ניסיונות כניסה מוגבלים, וכל מכשיר מקבל רק את המידע שמותר למשתמש שנכנס ממנו. אין אבטחה מושלמת; אם גיליתם בעיה, ספרו לנו.')]],
+      [L('קטינים'), [L('האפליקציה מיועדת לגיל 16 ומעלה. מתחת לגיל 16 – רק בהסכמת הורה.')]],
+      [L('שינויים במדיניות'), [L('שינוי מהותי במדיניות יוצג באפליקציה, והיא תבקש את הסכמתכם מחדש.')]]
+    ] },
+    terms: { title: L('תנאי שימוש'), sections: [
+      [L('השירות'), [L('"מה שנקרא" היא אפליקציה חינמית לשימוש אישי: ניהול ספרים שקראתם וקבלת המלצות. השימוש בה מותנה בתנאים האלה ובמדיניות הפרטיות.')]],
+      [L('גיל וחשבון'), [L('השימוש מגיל 16, או בהסכמת הורה. חשבון אחד לכל אדם, בלי להתחזות למישהו אחר. שמרו על הסיסמה: אתם אחראים למה שנעשה בחשבון שלכם.')]],
+      [L('המלצות ותוכן שנוצר בבינה מלאכותית'), [L('ההמלצות, הפרופיל הספרותי, סיכומי הביקורות והתרגומים נוצרים אוטומטית בעזרת בינה מלאכותית (Claude של Anthropic). האפליקציה בודקת שכל ספר מומלץ קיים במאגרים אמיתיים, אבל התוכן עלול לכלול טעויות. זו המלצה בלבד, ולא ייעוץ מכל סוג.')]],
+      [L('מידע מצדדים שלישיים'), [L('פרטי ספרים, כריכות, תקצירים, זמינות וקישורים מגיעים מ-Google Books, הספרייה הלאומית, Open Library, Wikidata ואתרי חנויות והוצאות, ומוצגים עם ציון המקור. לא מובטח שהם מדויקים או עדכניים. קנייה באתר חיצוני היא בינכם לבין האתר. לאפליקציה אין קשר מסחרי לחנויות, והיא לא מקבלת עמלות.')]],
+      [L('זכויות יוצרים'), [L('הכריכות, התקצירים והציטוטים שייכים לבעלי הזכויות בהם. הם מוצגים בהיקף מצומצם, לזיהוי הספר ולמידע, עם ציון המקור. בעל זכויות שמבקש להסיר תוכן: {0}, והתוכן יוסר בהקדם.', [c])]],
+      [L('התוכן שלכם'), [L('אתם אחראים למה שאתם כותבים: הערות, המלצות לחברים ומשוב. אסור לכתוב תוכן פוגעני, משמיץ, מפר זכויות או לא חוקי. אתם מרשים לאפליקציה לשמור ולעבד את התוכן רק כדי לתת לכם את השירות.')]],
+      [L('שימוש אסור'), [L('אסור לנסות לפרוץ, לעקוף את הגבלות הכניסה, לאסוף מידע על משתמשים אחרים או להעמיס על השרת.')]],
+      [L('זמינות ואחריות'), [L('השירות ניתן כמו שהוא (AS IS), בלי התחייבות לזמינות רציפה; מומלץ לייצא גיבוי מדי פעם. ככל שהדין מתיר, מפעיל האפליקציה לא אחראי לנזק עקיף או תוצאתי מהשימוש בה. השירות יכול להשתנות או להיפסק; לפני הפסקה מתוכננת תוצג הודעה באפליקציה, כדי שאפשר יהיה לייצא את הספרייה.')]],
+      [L('הפסקת שימוש'), [L('אפשר להפסיק בכל רגע ולמחוק את המשתמש. מפעיל האפליקציה רשאי לחסום חשבון שמפר את התנאים.')]],
+      [L('דין ושיפוט'), [L('על התנאים חל הדין הישראלי, וסמכות השיפוט לבתי המשפט המוסמכים בישראל.')]],
+      [L('יצירת קשר'), [c]]
+    ] },
+    access: { title: L('הצהרת נגישות'), sections: [
+      [L('המחויבות שלנו'), [L('אנחנו רוצים שכל אחד יוכל להשתמש באפליקציה. היא נבנתה לפי תקנות שוויון זכויות לאנשים עם מוגבלות (התאמות נגישות לשירות), התשע"ג-2013, ולפי התקן הישראלי ת"י 5568, המבוסס על הנחיות WCAG 2.0 ברמה AA.')]],
+      [L('מה יש באפליקציה'), [
+        L('מצב נגישות (הגדרות ← "תצוגה ונגישות"): ניגודיות גבוהה, סימון בולט של המיקום במקלדת, קישורים מודגשים ובלי הנפשות.'),
+        L('הגדלת טקסט עד 150%, בחירת גופן, מצב כהה, ושש ערכות צבע שנבדקו לניגודיות ברמה AA.'),
+        L('תמיכה בקוראי מסך: תוויות לכל הכפתורים, כותרות מסודרות והודעות שמוקראות.'),
+        L('ניווט מלא במקלדת, וקישור "דילוג לתוכן הראשי".'),
+        L('כפתורים ושטחי לחיצה גדולים, ובלי הגבלות זמן.'),
+        L('מצב קורא אלקטרוני בשחור-לבן, ממשק בעברית ובאנגלית, ומדריך למשתמש עם חיפוש.')]],
+      [L('מגבלות ידועות'), [L('כפתור הכניסה של Google ודפים של אתרים חיצוניים (חנויות, הוצאות) אינם בשליטתנו. לכריכות הספרים אין תיאור נוסף מעבר לשם הספר שמופיע לידן.')]],
+      [L('נתקלתם בבעיה?'), [L('ספרו לנו {0}: מה ניסיתם לעשות, באיזה מכשיר ובאיזו טכנולוגיה מסייעת. נחזור אליכם ונתקן בהקדם.', [c])]]
+    ] }
+  };
+}
+const openLegal = (id) => window.dispatchEvent(new CustomEvent('vrt-open-legal', { detail: id }));
+function LegalHost() {
+  const [doc, setDoc] = useState(null);
+  useEffect(() => { const f = (e) => setDoc(e.detail); window.addEventListener('vrt-open-legal', f); return () => window.removeEventListener('vrt-open-legal', f); }, []);
+  const d = doc && legalDocs()[doc];
+  return (
+    <Sheet open={!!d} onClose={() => setDoc(null)} title={d ? d.title : ''}>
+      {d && (
+        <article className="grid gap-4 text-[15px] leading-relaxed">
+          {d.sections.map(([h, ps]) => (
+            <section key={h}>
+              <h3 className="font-semibold text-[16px] mb-1">{h}</h3>
+              {ps.map((p, i) => <p key={i} className="m-0 mb-1.5">{p}</p>)}
+            </section>
+          ))}
+          <p className="text-[13px] text-muted m-0">{L('עודכן: {0}', [new Date(LEGAL_UPDATED).toLocaleDateString(DEFAULT_LOCALE, { day: 'numeric', month: 'long', year: 'numeric' })])}</p>
+        </article>
+      )}
+    </Sheet>
+  );
+}
+function LegalLinks({ className = '' }) {
+  return (
+    <nav aria-label={L('מידע משפטי')} className={`flex flex-wrap gap-x-4 gap-y-1 text-[13px] ${className}`}>
+      {[['privacy', L('מדיניות פרטיות')], ['terms', L('תנאי שימוש')], ['access', L('הצהרת נגישות')]].map(([k, l]) =>
+        <button key={k} type="button" className="underline text-muted min-h-[40px]" onClick={() => openLegal(k)}>{l}</button>)}
+    </nav>
+  );
+}
+// תיבת ההסכמה בהרשמה: לא מסומנת מראש, וההסכמה נשמרת בשרת עם הגרסה
+function ConsentCheck({ checked, onChange }) {
+  return (
+    <div className="flex items-start gap-2.5 text-[14px]">
+      <input id="consent" type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} className="mt-1 w-5 h-5 shrink-0 accent-[var(--accent)]" />
+      <label htmlFor="consent" className="leading-snug">
+        {L('קראתי ואני מסכים/ה ל')}<button type="button" className="underline text-accent" onClick={() => openLegal('terms')}>{L('תנאי השימוש')}</button>{L(' ול')}<button type="button" className="underline text-accent" onClick={() => openLegal('privacy')}>{L('מדיניות הפרטיות')}</button>{L(', כולל שמירת המידע אצל ספקי שירות מחוץ לישראל. אני בן/בת 16 ומעלה, או שהורה הסכים.')}
+      </label>
+    </div>
+  );
+}
+// משתמש קיים שעוד לא הסכים לגרסה הנוכחית של התנאים
+function ConsentScreen() {
+  const [ok, setOk] = useState(false), [err, setErr] = useState(''), [busy, setBusy] = useState(false);
+  const accept = async () => {
+    setBusy(true); setErr('');
+    try { await authPost('/auth/consent', { v: LEGAL_VERSION }); saveSession({ ...loadSession(), consent: LEGAL_VERSION }); }
+    catch (e) { setErr(authErrText(e)); setBusy(false); }
+  };
+  return (
+    <div className="min-h-screen bg-bg text-ink font-body">
+      <main className="mx-auto max-w-md px-4 pt-10 pb-10 safe-top fade-in grid gap-4">
+        <div className="flex items-center gap-3"><Logo size={48} /><div className="wordmark text-[30px] leading-none">מה שנקרא</div></div>
+        <h1 className="font-display font-medium text-[24px] leading-snug m-0">{L('עדכנו את תנאי השימוש ואת מדיניות הפרטיות')}</h1>
+        <p className="m-0 text-[15px]">{L('כדי להמשיך, צריך להסכים להם. הם מסבירים מה נשמר, איפה, מי רואה את המידע ואיך מוחקים אותו.')}</p>
+        <LegalLinks />
+        <ConsentCheck checked={ok} onChange={setOk} />
+        {err && <p className="text-[13px] text-danger m-0" role="alert">{err}</p>}
+        <Btn disabled={!ok || busy} onClick={accept}><Icon name="Check" size={20} />{L('הסכמה והמשך')}</Btn>
+        <Btn variant="ghost" onClick={logoutNow}>{L('לא עכשיו (יציאה)')}</Btn>
+      </main>
+    </div>
+  );
+}
+
+// משתמשים שנכנסו מהמכשיר הזה (שם וצבע בלבד): מסך הכניסה מציג רק אותם, ולא את כל המשתמשים באפליקציה
+const KNOWN_KEY = 'vrt-known';
+function loadKnown() { try { const k = JSON.parse(localStorage.getItem(KNOWN_KEY) || '[]'); return Array.isArray(k) ? k.filter(x => x && x.id) : []; } catch (e) { return []; } }
+function rememberKnown(p) {
+  try { localStorage.setItem(KNOWN_KEY, JSON.stringify([{ id: p.id, name: p.name || '', color: p.color || 0 }, ...loadKnown().filter(x => x.id !== p.id)].slice(0, 8))); } catch (e) { /* */ }
+}
+function forgetKnown(id) { try { localStorage.setItem(KNOWN_KEY, JSON.stringify(loadKnown().filter(x => x.id !== id))); } catch (e) { /* */ } }
+// כניסה עם סיסמה: למשתמש שהמכשיר מכיר (profile), או לפי שם שמקלידים
+function PasswordLogin({ profile, clientId, onGoogle, onCancel, linkId }) {
+  const googleOnly = profile && !profile.hasPass && profile.google;
+  const noPass = profile && !profile.hasPass && !profile.google;
+  const [name, setName] = useState(''), [pw, setPw] = useState(''), [err, setErr] = useState(''), [busy, setBusy] = useState(false), [forgot, setForgot] = useState(false);
   const submit = async (e) => {
-    e.preventDefault(); setErr('');
-    if (setFirst && pw.length < PASS_MIN) { setErr(L('סיסמה של {0} תווים לפחות.', [PASS_MIN])); return; }
-    setBusy(true);
-    try { adoptSession(await authPost(linkId ? '/auth/link' : '/auth/password', linkId ? { link: linkId, pid: profile.id, password: pw } : { pid: profile.id, password: pw })); }
+    e.preventDefault(); setErr(''); setBusy(true);
+    const who = profile ? { pid: profile.id } : { name: name.trim() };
+    try { adoptSession(await authPost(linkId ? '/auth/link' : '/auth/password', { ...who, password: pw, ...(linkId ? { link: linkId } : {}) })); }
     catch (er) { setErr(authErrText(er)); setBusy(false); }
   };
   return (
     <form className="grid gap-2.5 bg-surface border border-line rounded-xl p-3" onSubmit={submit}>
-      <div className="flex items-center gap-2.5"><Avatar profile={profile} size={36} /><span className="font-semibold text-[17px] flex-1 truncate">{profile.name}</span></div>
+      {profile
+        ? <div className="flex items-center gap-2.5"><Avatar profile={profile} size={36} /><span className="font-semibold text-[17px] flex-1 truncate">{profile.name}</span></div>
+        : <div className="grid gap-1">
+            <label htmlFor="login-name" className="font-semibold text-[15px]">{L('שם משתמש')}</label>
+            <input id="login-name" value={name} onChange={e => setName(e.target.value)} maxLength={24} autoFocus autoComplete="username" className="w-full min-h-[52px] px-3 rounded-xl border border-line bg-bg text-[17px]" />
+          </div>}
       {googleOnly && !linkId ? (
         <>
           <p className="text-[14px] m-0">{T('המשתמש הזה נכנס עם Google.')}</p>
           <GoogleButton clientId={clientId} onCredential={onGoogle} />
           <Btn variant="ghost" onClick={onCancel}>ביטול</Btn>
         </>
+      ) : noPass ? (
+        <>
+          <Notice tone="info">{T('למשתמש הזה עוד אין סיסמה. בקשו מהמנהל לקבוע לו סיסמה, ואז אפשר להיכנס.')}</Notice>
+          <Btn variant="ghost" onClick={onCancel}>ביטול</Btn>
+        </>
       ) : (
         <>
-          {setFirst && <p className="text-[14px] m-0">{T('למשתמש הזה עוד אין סיסמה. בחרו סיסמה, והיא תידרש בכניסה הבאה.')}</p>}
-          {!noPw && <PassField id="profile-pass" label={setFirst ? 'סיסמה חדשה' : 'סיסמה'} value={pw} onChange={setPw} autoFocus isNew={setFirst} />}
+          <PassField id="profile-pass" label="סיסמה" value={pw} onChange={setPw} autoFocus={!!profile} />
           {err && <p className="text-[13px] text-danger m-0" role="alert">{err}</p>}
           <div className="grid grid-cols-2 gap-2">
-            <Btn type="submit" disabled={busy || (!pw && !noPw)}><Icon name="LogIn" size={20} />כניסה</Btn>
+            <Btn type="submit" disabled={busy || !pw || (!profile && !name.trim())}><Icon name="LogIn" size={20} />כניסה</Btn>
             <Btn variant="ghost" onClick={onCancel}>ביטול</Btn>
           </div>
-          {!setFirst && !noPw && !forgot && <button type="button" className="text-accent font-semibold text-[14px] min-h-[40px] justify-self-start" onClick={() => setForgot(true)}>שכחתי סיסמה</button>}
+          {!forgot && <button type="button" className="text-accent font-semibold text-[14px] min-h-[40px] justify-self-start" onClick={() => setForgot(true)}>שכחתי סיסמה</button>}
           {forgot && <Notice tone="info">{T('אפשר להיכנס עם Google, אם קישרתם אותו בהגדרות, או לבקש מהמנהל לאפס את הסיסמה.')}</Notice>}
         </>
       )}
@@ -6766,34 +6941,33 @@ function ProfileList({ profiles, onPick }) {
             className="w-full min-h-[64px] flex items-center gap-3 px-3 rounded-xl bg-surface border border-line text-start active:bg-surface2">
             <Avatar profile={p} size={44} />
             <span className="flex-1 min-w-0 block font-semibold text-[17px] truncate">{p.name}</span>
-            <Icon name={p.hasPass || p.google ? 'Lock' : 'ChevronLeft'} size={20} className="text-muted" />
+            <Icon name="Lock" size={20} className="text-muted" />
           </button>
         </li>
       ))}
     </ul>
   );
 }
-function NewProfileForm({ profiles, onCancel, linkId, initialName = '' }) {
-  const [name, setName] = useState(initialName), [pw, setPw] = useState(''), [err, setErr] = useState(''), [busy, setBusy] = useState(false);
-  const taken = profiles.some(p => norm(p.name) === norm(name));
+function NewProfileForm({ first, onCancel, linkId, initialName = '' }) {
+  const [name, setName] = useState(initialName), [pw, setPw] = useState(''), [ok, setOk] = useState(false), [err, setErr] = useState(''), [busy, setBusy] = useState(false);
   const submit = async (e) => {
     e.preventDefault(); setErr('');
-    if (!name.trim() || taken) return;
+    if (!name.trim() || !ok) return;
     if (!linkId && pw.length < PASS_MIN) { setErr(L('סיסמה של {0} תווים לפחות.', [PASS_MIN])); return; }
     setBusy(true);
-    try { adoptSession(await authPost(linkId ? '/auth/link' : '/auth/register', linkId ? { link: linkId, create: name.trim() } : { name: name.trim(), password: pw })); }
+    try { adoptSession(await authPost(linkId ? '/auth/link' : '/auth/register', linkId ? { link: linkId, create: name.trim(), consent: LEGAL_VERSION } : { name: name.trim(), password: pw, consent: LEGAL_VERSION })); }
     catch (er) { setErr(authErrText(er)); setBusy(false); }
   };
   return (
-    <form className="grid gap-2 bg-surface border border-line rounded-xl p-3" onSubmit={submit}>
-      <label htmlFor="new-profile" className="font-semibold text-[15px]">{profiles.length ? 'משתמש חדש' : 'איך לקרוא לך?'}</label>
+    <form className="grid gap-2.5 bg-surface border border-line rounded-xl p-3" onSubmit={submit}>
+      <label htmlFor="new-profile" className="font-semibold text-[15px]">{first ? 'איך לקרוא לך?' : 'משתמש חדש'}</label>
       <input id="new-profile" value={name} onChange={e => setName(e.target.value)} maxLength={24} autoFocus placeholder="שם או כינוי"
         className="w-full min-h-[52px] px-3 rounded-xl border border-line bg-bg text-[17px]" />
-      {taken && <p className="text-[13px] text-danger">כבר יש משתמש בשם הזה.</p>}
       {!linkId && <PassField id="new-pass" label="סיסמה" value={pw} onChange={setPw} isNew />}
+      <ConsentCheck checked={ok} onChange={setOk} />
       {err && <p className="text-[13px] text-danger m-0" role="alert">{err}</p>}
       <div className={onCancel ? 'grid grid-cols-2 gap-2' : 'grid'}>
-        <Btn type="submit" disabled={busy || !name.trim() || taken || (!linkId && !pw)}><Icon name="Check" size={20} />כניסה</Btn>
+        <Btn type="submit" disabled={busy || !name.trim() || !ok || (!linkId && !pw)}><Icon name="Check" size={20} />כניסה</Btn>
         {onCancel && <Btn variant="ghost" onClick={onCancel}>ביטול</Btn>}
       </div>
     </form>
@@ -6802,23 +6976,30 @@ function NewProfileForm({ profiles, onCancel, linkId, initialName = '' }) {
 function LoginScreen() {
   const [info, setInfo] = useState(null);
   const [loadErr, setLoadErr] = useState(false);
-  const [sel, setSel] = useState(null);
-  const [adding, setAdding] = useState(false);
+  const [mode, setMode] = useState(null);   // null | 'pid:<id>' | 'name' | 'new'
   const [link, setLink] = useState(null);   // חשבון Google שעוד לא קושר: {link, email, name}
   const [err, setErr] = useState('');
   const load = () => {
     setLoadErr(false);
-    fetchJSON(loadCloud().url + '/auth/profiles?t=' + Date.now(), 15000).then(j => { setInfo(j); if (!(j.profiles || []).length) setAdding(true); }).catch(() => setLoadErr(true));
+    const ids = loadKnown().map(x => x.id).join(',');
+    fetchJSON(loadCloud().url + '/auth/profiles?ids=' + encodeURIComponent(ids) + '&t=' + Date.now(), 15000).then(j => {
+      // משתמש שנמחק בינתיים יורד מהרשימה של המכשיר
+      const live = new Set((j.profiles || []).map(p => p.id));
+      loadKnown().forEach(k => { if (!live.has(k.id)) forgetKnown(k.id); });
+      setInfo(j);
+    }).catch(() => setLoadErr(true));
   };
   useEffect(load, []);
   const onGoogle = async (credential) => {
     setErr('');
-    try { const j = await authPost('/auth/google', { credential }); if (j.token) adoptSession(j); else if (j.link) { setLink(j); setSel(null); setAdding(false); } }
+    try { const j = await authPost('/auth/google', { credential }); if (j.token) adoptSession(j); else if (j.link) { setLink(j); setMode(null); } }
     catch (e) { setErr(authErrText(e)); }
   };
-  const profiles = (info && info.profiles) || [];
+  const known = (info && info.profiles) || [];
   const clientId = (info && info.google) || '';
-  const selected = profiles.find(p => p.id === sel);
+  const first = info && !info.count;
+  const selected = mode && mode.startsWith('pid:') ? known.find(p => p.id === mode.slice(4)) : null;
+  const back = () => setMode(null);
   let body;
   if (loadErr) body = (
     <div className="grid gap-3">
@@ -6827,37 +7008,42 @@ function LoginScreen() {
     </div>
   );
   else if (!info) body = <div className="grid place-items-center py-10" role="status" aria-label="טוען"><Icon name="LoaderCircle" size={28} className="animate-spin text-muted" /></div>;
-  else if (link) {
-    const free = profiles.filter(p => !p.google);
-    body = (
-      <div className="grid gap-3">
-        <h1 className="font-display font-medium text-[24px] leading-snug m-0">{T('ברוכים הבאים!')}</h1>
-        <p className="m-0 text-[15px]"><span dir="ltr">{link.email}</span></p>
-        {selected ? <ProfileLogin key={selected.id} profile={selected} clientId="" linkId={link.link} onCancel={() => setSel(null)} />
-          : adding ? <NewProfileForm profiles={profiles} linkId={link.link} initialName={link.name || ''} onCancel={free.length ? () => setAdding(false) : null} />
-          : (
-            <>
-              {free.length > 0 && <><h2 className="font-semibold text-[16px] m-0">{T('כבר יש לכם ספרייה כאן? בחרו אותה:')}</h2><ProfileList profiles={free} onPick={setSel} /></>}
-              <Btn variant={free.length ? 'ghost' : 'primary'} onClick={() => setAdding(true)}><Icon name="UserPlus" size={20} />{L('משתמש חדש')}</Btn>
-            </>
-          )}
-        <button type="button" className="text-accent font-semibold text-[14px] min-h-[40px] justify-self-start" onClick={() => { setLink(null); setSel(null); setAdding(false); }}>חזרה</button>
-      </div>
-    );
-  } else body = (
+  else if (link) body = (
+    <div className="grid gap-3">
+      <h1 className="font-display font-medium text-[24px] leading-snug m-0">{T('ברוכים הבאים!')}</h1>
+      <p className="m-0 text-[15px]"><span dir="ltr">{link.email}</span></p>
+      {mode === 'name' ? <PasswordLogin linkId={link.link} onCancel={back} />
+        : mode === 'new' ? <NewProfileForm linkId={link.link} initialName={link.name || ''} onCancel={back} />
+        : (
+          <>
+            <Btn variant="soft" onClick={() => setMode('name')}><Icon name="Library" size={20} />{T('כבר יש לי ספרייה כאן: חיבור עם השם והסיסמה')}</Btn>
+            <Btn variant="ghost" onClick={() => setMode('new')}><Icon name="UserPlus" size={20} />{L('משתמש חדש')}</Btn>
+          </>
+        )}
+      <button type="button" className="text-accent font-semibold text-[14px] min-h-[40px] justify-self-start" onClick={() => { setLink(null); setMode(null); }}>חזרה</button>
+    </div>
+  );
+  else body = (
     <>
       <h1 className="font-display font-medium text-[26px] leading-snug mb-5">של מי הספרייה?</h1>
-      {clientId && !selected && !adding && (
+      {clientId && !mode && (
         <div className="grid gap-3 mb-5">
           <GoogleButton clientId={clientId} onCredential={onGoogle} />
           <div className="flex items-center gap-3 text-muted text-[13px]"><span className="flex-1 h-px bg-line" />{L('או עם סיסמה')}<span className="flex-1 h-px bg-line" /></div>
         </div>
       )}
-      {selected ? (
-        <div className="mb-4"><ProfileLogin key={selected.id} profile={selected} clientId={clientId} onGoogle={onGoogle} onCancel={() => setSel(null)} /></div>
-      ) : profiles.length > 0 && <ProfileList profiles={profiles} onPick={(id) => { setSel(id); setAdding(false); }} />}
-      {selected ? null : adding ? <NewProfileForm profiles={profiles} onCancel={profiles.length ? () => setAdding(false) : null} />
-        : <Btn variant="ghost" className="w-full" onClick={() => setAdding(true)}><Icon name="UserPlus" size={20} />הוספת משתמש</Btn>}
+      {selected ? <div className="mb-4"><PasswordLogin key={selected.id} profile={selected} clientId={clientId} onGoogle={onGoogle} onCancel={back} /></div>
+        : mode === 'name' ? <div className="mb-4"><PasswordLogin clientId={clientId} onGoogle={onGoogle} onCancel={back} /></div>
+        : mode === 'new' || first ? <NewProfileForm first={first} onCancel={first ? null : back} />
+        : (
+          <>
+            {known.length > 0 && <ProfileList profiles={known} onPick={(id) => setMode('pid:' + id)} />}
+            <div className="grid gap-2">
+              <Btn variant={known.length ? 'ghost' : 'soft'} onClick={() => setMode('name')}><Icon name="LogIn" size={20} />{L('כניסה עם שם וסיסמה')}</Btn>
+              <Btn variant="ghost" onClick={() => setMode('new')}><Icon name="UserPlus" size={20} />הוספת משתמש</Btn>
+            </div>
+          </>
+        )}
     </>
   );
   return (
@@ -6866,6 +7052,7 @@ function LoginScreen() {
         <LoginHeader />
         {err && <div className="mb-3"><Notice tone="warn">{err}</Notice></div>}
         {body}
+        <LegalLinks className="mt-8" />
       </main>
     </div>
   );
@@ -6995,7 +7182,8 @@ function Root() {
     syncFlush().finally(() => { setState(loadProfiles()); setReadyPid(pid); });
   }, [pid]);
 
-  if (!session) return <LoginScreen />;
+  if (!session) return <><LoginScreen /><LegalHost /></>;
+  if (session.consent !== LEGAL_VERSION) return <><ConsentScreen /><LegalHost /></>;
   if (readyPid !== pid) return (
     <div className="min-h-screen bg-bg text-ink font-body grid place-items-center" role="status" aria-label="טוען">
       <div className="grid gap-4 justify-items-center"><Logo size={56} /><Icon name="LoaderCircle" size={28} className="animate-spin text-muted" /></div>
@@ -7006,7 +7194,7 @@ function Root() {
   ACTIVE.name = active.name;
   ACTIVE.dbKey = dbKeyFor(active.id);
   ACTIVE.queueKey = queueKeyFor(active.id);
-  return <App key={active.id} profile={active}
+  return <><LegalHost /><App key={active.id} profile={active}
     onSwitch={async () => {
       if (!(await syncFlush()) && !window.confirm(T('אין חיבור לשרת, ושינויים אחרונים עוד לא נשמרו בו. לצאת בכל זאת?'))) return;
       await logoutNow();
@@ -7016,8 +7204,9 @@ function Root() {
       const next = { ...loadProfiles(), deleted: { ...(loadProfiles().deleted || {}), [active.id]: Date.now() } };
       saveProfiles(next);
       await syncFlush();
+      forgetKnown(active.id);
       await logoutNow();
-    }} />;
+    }} /></>;
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(<Root />);

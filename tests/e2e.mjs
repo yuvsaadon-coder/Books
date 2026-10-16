@@ -210,7 +210,13 @@ function googleMock(route, u) {
 // ההגדרות מחולקות לקבוצות מקופלות; פותחים את הקבוצה לפני שעובדים בתוכה
 const group = async (p, title) => { const b = p.locator(`[data-group="${title}"] > h2 > button[aria-expanded="false"]`); if (await b.count()) await b.click(); };
 // כניסה למשתמש קיים ממסך "של מי הספרייה?" (כל משתמש עם סיסמה)
-const login = async (p, name, pw = '1234') => { await p.click(`main li:has-text("${name}")`); await p.fill('#profile-pass', pw); await p.click('form button[type=submit]'); };
+// משתמש שכבר נכנס מהמכשיר מופיע ברשימה; אחרת מקלידים את השם (מסך הכניסה לא מציג את כל המשתמשים)
+const login = async (p, name, pw = '1234') => {
+  const byName = p.locator('button:has-text("כניסה עם שם וסיסמה")'); await byName.waitFor();
+  const li = p.locator(`main li:has-text("${name}")`);
+  if (await li.count()) await li.click(); else { await byName.click(); await p.fill('#login-name', name); }
+  await p.fill('#profile-pass', pw); await p.click('form button[type=submit]');
+};
 // יציאה: מחכים למסך הכניסה (היציאה מסנכרנת קודם, ורק אז מנתקת)
 const signOut = async (p) => { await p.click('[aria-label="החלפת משתמש"]'); await p.waitForSelector('text=של מי הספרייה?'); };
 const step = async (name, fn) => { process.stdout.write(`• ${name} … `); await fn(); console.log('ok'); };
@@ -232,20 +238,23 @@ try {
 
   await step('two phones create users and books, auto-connected, no setup', async () => {
     // משתמש חדש: רשימת הספרים המוכרים נפתחת בחלון מלא; מדלגים עליה
-    await A.fill('#new-profile', 'יובל'); await A.fill('#new-pass', '1234'); await A.click('button:has-text("כניסה")');
+    await A.fill('#new-profile', 'יובל'); await A.fill('#new-pass', '1234');
+    assert.ok(await A.locator('form button[type=submit]').isDisabled(), 'sign-up needs consent to the terms');
+    await A.check('#consent'); await A.click('button:has-text("כניסה")');
     await A.locator('[role=dialog][aria-label="היכרות עם הטעם שלך"]').waitFor(); await A.waitForTimeout(600); await shot(A, 'first-entry', false);
     await A.click('button:has-text("דילוג על ההיכרות")'); await addBook(A, 'מיכאל שלי');
-    await B.fill('#new-profile', 'יעל'); await B.fill('#new-pass', '1234'); await B.click('button:has-text("כניסה")'); await B.click('button:has-text("דילוג על ההיכרות")'); await addBook(B, 'קפקא על החוף');
+    await B.fill('#new-profile', 'יעל'); await B.fill('#new-pass', '1234'); await B.check('#consent'); await B.click('button:has-text("כניסה")'); await B.click('button:has-text("דילוג על ההיכרות")'); await addBook(B, 'קפקא על החוף');
     await syncBoth();
-    // פרטיות: יעל (לא חברה) מקבלת מהשרת רק ספרים שיובל אהב, בלי ההערות שלו
+    // פרטיות: הספרייה של יובל לא מגיעה בכלל לטלפון של יעל (הם לא חברים)
     const seen = await B.evaluate(() => { const me = JSON.parse(localStorage.getItem('vrt-session')).pid; return Object.keys(localStorage).filter(k => k.startsWith('verified_reading_tracker_db_v1__') && !k.endsWith('__' + me)).map(k => JSON.parse(localStorage.getItem(k)).books); });
-    assert.equal(seen.length, 1); assert.ok(seen[0].length === 1 && seen[0].every(b => !b.note), 'community view only, no notes');
+    assert.equal(seen.length, 0, 'a non-friend library never reaches the device');
     // סנכרון בלי שינוי לא כותב לשרת (עבודות רקע, כמו זיהוי מדינה, עוד יכולות לשנות משהו בסבב הראשון)
     let quiet = false;
     for (let i = 0; i < 5 && !quiet; i++) { const rev0 = JSON.parse(kv.get('state')).rev; await syncBoth(); quiet = JSON.parse(kv.get('state')).rev === rev0; }
     assert.ok(quiet, 'a sync with nothing new writes nothing');
-    await signOut(A); await A.locator('main li >> nth=1').waitFor(); assert.equal((await A.locator('main li').count()), 2);
-    await signOut(B); await B.locator('main li >> nth=1').waitFor(); assert.equal((await B.locator('main li').count()), 2);
+    // מסך הכניסה מציג רק את מי שנכנס מהמכשיר הזה
+    await signOut(A); await A.locator('button:has-text("כניסה עם שם וסיסמה")').waitFor(); assert.deepEqual(await texts(A.locator('main li span.truncate')), ['יובל']);
+    await signOut(B); await B.locator('button:has-text("כניסה עם שם וסיסמה")').waitFor(); assert.deepEqual(await texts(B.locator('main li span.truncate')), ['יעל']);
     assert.equal(await B.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('verified_reading_tracker_db_v1')).length), 0, 'signing out removes the library from the device');
   });
   await step('a deletion on one phone reaches the other', async () => {
@@ -267,7 +276,7 @@ try {
     await A.evaluate(c => { window.__gcred = c; }, await gToken({ sub: 'g-admin', email: 'admin@example.com', name: 'מנהלת' }));
     await A.click('.gis-mock'); await A.waitForSelector('text=ברוכים הבאים!');
     await A.click('button:has-text("משתמש חדש")'); assert.equal(await A.inputValue('#new-profile'), 'מנהלת');
-    await A.click('form button[type=submit]'); await A.click('button:has-text("דילוג על ההיכרות")');
+    await A.check('#consent'); await A.click('form button[type=submit]'); await A.click('button:has-text("דילוג על ההיכרות")');
     await A.click('nav >> text=הגדרות'); await group(A, 'ניהול משתמשים');
     await A.locator('li:has-text("יובל")').locator('button:has-text("איפוס סיסמה")').click();
     await A.fill('#admin-reset-pass', 'abcd'); await A.click('form:has(#admin-reset-pass) button[type=submit]'); await A.waitForSelector('text=הסיסמה אופסה');
@@ -281,6 +290,15 @@ try {
     await A.click('.gis-mock'); await A.waitForSelector('text=yuval@example.com');
     await signOut(A); await A.click('.gis-mock'); await A.waitForSelector('nav >> text=ספרים שלי');
     assert.equal(await A.evaluate(() => JSON.parse(localStorage.getItem('vrt-session')).name), 'יובל', 'Google signs straight into the linked user');
+    assert.equal(await A.locator('a.skip-link').count(), 1, 'skip to main content');
+    // תנאים חדשים: משתמש קיים מתבקש להסכים מחדש, וההסכמה נשמרת בשרת
+    const pidY = await A.evaluate(() => JSON.parse(localStorage.getItem('vrt-session')).pid);
+    kv.set('acct:' + pidY, JSON.stringify({ ...JSON.parse(kv.get('acct:' + pidY)), consent: { v: 'old', at: 1 } }));
+    await signOut(A);
+    await A.click('button:has-text("הצהרת נגישות")'); await A.waitForSelector('[role=dialog] >> text=ת"י 5568'); await A.keyboard.press('Escape');
+    await login(A, 'יובל'); await A.waitForSelector('text=עדכנו את תנאי השימוש');
+    await A.check('#consent'); await A.click('button:has-text("הסכמה והמשך")'); await A.waitForSelector('nav >> text=ספרים שלי');
+    assert.notEqual(JSON.parse(kv.get('acct:' + pidY)).consent.v, 'old');
     await A.click('nav >> text=ספרים שלי');
   });
   await step('Hebrew edition first; full synopsis on expand; translation kept', async () => {
@@ -780,7 +798,7 @@ try {
   await step('first entry: pick known books → verified ones added, the rest queued', async () => {
     const C = await phone(browser, 'C');
     if (!(await C.locator('#new-profile').count())) await C.click('button:has-text("הוספת משתמש")');
-    await C.fill('#new-profile', 'דנה'); await C.fill('#new-pass', '1234'); await C.click('button:has-text("כניסה")');
+    await C.fill('#new-profile', 'דנה'); await C.fill('#new-pass', '1234'); await C.check('#consent'); await C.click('button:has-text("כניסה")');
     // קודם בוחרים סוגות: בלי הומור
     await C.waitForSelector('text=אילו סוגות להציג?'); await shot(C, 'genres', false);
     await C.click('[role=group][aria-label="סוגות להצגה"] button:has-text("הומור")');
@@ -906,7 +924,7 @@ try {
     await E.waitForSelector('text=Whose library is this?');
     assert.deepEqual(await E.evaluate(() => [document.documentElement.dir, document.documentElement.lang, document.title]), ['ltr', 'en', 'What We Read']);
     if (!(await E.locator('#new-profile').count())) await E.click('button:has-text("Add a user")');
-    await E.fill('#new-profile', 'Dana'); await E.fill('#new-pass', '1234'); await E.click('button:has-text("Enter")');
+    await E.fill('#new-profile', 'Dana'); await E.fill('#new-pass', '1234'); await E.check('#consent'); await E.click('button:has-text("Enter")');
     // רשימת ההיכרות: אותם ספרים, בשמות באנגלית
     const dlg = E.locator('[role=dialog]');
     await dlg.locator('text=Which genres should we show?').waitFor();
