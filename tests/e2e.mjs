@@ -211,6 +211,8 @@ function googleMock(route, u) {
 const group = async (p, title) => { const b = p.locator(`[data-group="${title}"] > h2 > button[aria-expanded="false"]`); if (await b.count()) await b.click(); };
 // כניסה למשתמש קיים ממסך "של מי הספרייה?" (כל משתמש עם סיסמה)
 const login = async (p, name, pw = '1234') => { await p.click(`main li:has-text("${name}")`); await p.fill('#profile-pass', pw); await p.click('form button[type=submit]'); };
+// יציאה: מחכים למסך הכניסה (היציאה מסנכרנת קודם, ורק אז מנתקת)
+const signOut = async (p) => { await p.click('[aria-label="החלפת משתמש"]'); await p.waitForSelector('text=של מי הספרייה?'); };
 const step = async (name, fn) => { process.stdout.write(`• ${name} … `); await fn(); console.log('ok'); };
 const texts = (loc) => loc.allTextContents();
 // SHOTS=<תיקייה>: צילומי מסך של המסכים העיקריים (לבדיקת עיצוב)
@@ -238,10 +240,12 @@ try {
     // פרטיות: יעל (לא חברה) מקבלת מהשרת רק ספרים שיובל אהב, בלי ההערות שלו
     const seen = await B.evaluate(() => { const me = JSON.parse(localStorage.getItem('vrt-session')).pid; return Object.keys(localStorage).filter(k => k.startsWith('verified_reading_tracker_db_v1__') && !k.endsWith('__' + me)).map(k => JSON.parse(localStorage.getItem(k)).books); });
     assert.equal(seen.length, 1); assert.ok(seen[0].length === 1 && seen[0].every(b => !b.note), 'community view only, no notes');
-    const rev0 = JSON.parse(kv.get('state')).rev; await syncBoth();
-    assert.equal(JSON.parse(kv.get('state')).rev, rev0, 'a sync with nothing new writes nothing');
-    await A.click('[aria-label="החלפת משתמש"]'); await A.locator('main li >> nth=1').waitFor(); assert.equal((await A.locator('main li').count()), 2);
-    await B.click('[aria-label="החלפת משתמש"]'); await B.locator('main li >> nth=1').waitFor(); assert.equal((await B.locator('main li').count()), 2);
+    // סנכרון בלי שינוי לא כותב לשרת (עבודות רקע, כמו זיהוי מדינה, עוד יכולות לשנות משהו בסבב הראשון)
+    let quiet = false;
+    for (let i = 0; i < 5 && !quiet; i++) { const rev0 = JSON.parse(kv.get('state')).rev; await syncBoth(); quiet = JSON.parse(kv.get('state')).rev === rev0; }
+    assert.ok(quiet, 'a sync with nothing new writes nothing');
+    await signOut(A); await A.locator('main li >> nth=1').waitFor(); assert.equal((await A.locator('main li').count()), 2);
+    await signOut(B); await B.locator('main li >> nth=1').waitFor(); assert.equal((await B.locator('main li').count()), 2);
     assert.equal(await B.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('verified_reading_tracker_db_v1')).length), 0, 'signing out removes the library from the device');
   });
   await step('a deletion on one phone reaches the other', async () => {
@@ -254,7 +258,7 @@ try {
   });
   await step('sign-in: the device remembers its user; wrong password; Google admin resets a password; Google link', async () => {
     await A.reload(); await A.waitForSelector('nav >> text=ספרים שלי');   // נכנס ישר, בלי מסך המשתמשים
-    await A.click('[aria-label="החלפת משתמש"]'); await A.reload();
+    await signOut(A); await A.reload();
     await A.waitForSelector('text=של מי הספרייה?');   // אחרי החלפה: לא נכנס לבד
     await login(A, 'יובל', 'wrong'); await A.waitForSelector('text=הסיסמה לא נכונה');
     await A.click('button:has-text("שכחתי סיסמה")'); await A.waitForSelector('text=לבקש מהמנהל');
@@ -267,7 +271,7 @@ try {
     await A.click('nav >> text=הגדרות'); await group(A, 'ניהול משתמשים');
     await A.locator('li:has-text("יובל")').locator('button:has-text("איפוס סיסמה")').click();
     await A.fill('#admin-reset-pass', 'abcd'); await A.click('form:has(#admin-reset-pass) button[type=submit]'); await A.waitForSelector('text=הסיסמה אופסה');
-    await A.click('[aria-label="החלפת משתמש"]'); await login(A, 'יובל', 'abcd'); await A.waitForSelector('nav >> text=ספרים שלי');
+    await signOut(A); await login(A, 'יובל', 'abcd'); await A.waitForSelector('nav >> text=ספרים שלי');
     await A.click('nav >> text=הגדרות');
     assert.equal(await A.locator('[data-group="ניהול משתמשים"]').count(), 0, 'admin panel only for the admin');
     // מחזירים את הסיסמה, ומקשרים את יובל ל-Google
@@ -275,7 +279,7 @@ try {
     await A.fill('#change-pass', '1234'); await A.click('button:has-text("שמירת הסיסמה")'); await A.waitForSelector('text=הסיסמה נשמרה');
     await A.evaluate(c => { window.__gcred = c; }, await gToken({ sub: 'g-yuval', email: 'yuval@example.com', name: 'Yuval' }));
     await A.click('.gis-mock'); await A.waitForSelector('text=yuval@example.com');
-    await A.click('[aria-label="החלפת משתמש"]'); await A.click('.gis-mock'); await A.waitForSelector('nav >> text=ספרים שלי');
+    await signOut(A); await A.click('.gis-mock'); await A.waitForSelector('nav >> text=ספרים שלי');
     assert.equal(await A.evaluate(() => JSON.parse(localStorage.getItem('vrt-session')).name), 'יובל', 'Google signs straight into the linked user');
     await A.click('nav >> text=ספרים שלי');
   });
@@ -409,7 +413,7 @@ try {
   });
   await step('friends: request, accept, see the shelf, wishlist from a friend, recommend to a friend', async () => {
     await A.click('nav >> text=חברים'); await A.locator('li:has-text("יעל")').locator('button:has-text("בקשת חברות")').click();
-    await B.click('[aria-label="החלפת משתמש"]'); await login(B, 'יעל');
+    await signOut(B); await login(B, 'יעל');
     await syncBoth();
     await B.click('nav >> text=חברים'); await B.click('button:has-text("אישור")');
     await syncBoth();
