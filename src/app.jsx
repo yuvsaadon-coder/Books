@@ -31,7 +31,7 @@ function setUiLang(lang) {
 const DEFAULT_LOCALE = IS_EN ? 'en-GB' : 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '44';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '45';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -972,7 +972,7 @@ function findInLibrary(c, books) {
 /* ============================================================
    ספרייה משפחתית: סנכרון בין מכשירים דרך השרת המשפחתי (Cloudflare)
    ============================================================ */
-// כתובת השרת (Cloudflare Worker). האפליקציה מתחברת אליו לבד; אין קוד גישה.
+// כתובת השרת (Cloudflare Worker). האפליקציה מתחברת אליו לבד; הנתונים נפתחים רק אחרי כניסה (Google או סיסמה).
 const CLOUD_URL = 'https://books.yuvsaadon.workers.dev';
 const cloudBase = (url) => url.trim().replace(/\/+$/, '');
 function loadCloud() {
@@ -998,6 +998,66 @@ async function discoverCloud() {
   }
   setSyncStatus({ status: 'error', error: T('השרת לא נמצא. שלחו ל-Claude Code את כתובת ה-Worker מ-Cloudflare.') });
   return false;
+}
+/* ---------- כניסה: אסימון כניסה מהשרת (Google או סיסמה שנבדקת בשרת), נשלח בכל בקשה לשרת ---------- */
+const SESSION_KEY = 'vrt-session';
+function loadSession() { try { const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); return s && s.token && s.pid ? s : null; } catch (e) { return null; } }
+function saveSession(s) {
+  try { if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s)); else localStorage.removeItem(SESSION_KEY); } catch (e) { /* */ }
+  window.dispatchEvent(new Event('vrt-session-changed'));
+}
+const rawFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => {
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input && input.url) || '';
+  const c = loadCloud(), s = loadSession();
+  const ours = !!c && url.startsWith(c.url + '/');
+  if (ours && s) {
+    const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+    if (!headers.has('Authorization')) headers.set('Authorization', 'Bearer ' + s.token);
+    init = { ...init, headers };
+  }
+  const p = rawFetch(input, init);
+  // השרת לא מכיר את האסימון (פג, או שהמשתמש נמחק): חוזרים למסך הכניסה. הנתונים במכשיר נשארים עד שמישהו אחר נכנס
+  if (ours && s) p.then(r => { if (r.status === 401 && !url.includes('/auth/') && loadSession() && loadSession().token === s.token) saveSession(null); }).catch(() => {});
+  return p;
+};
+async function authPost(path, body) {
+  const c = loadCloud();
+  const r = await fetch(c.url + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+  let j = {}; try { j = await r.json(); } catch (e) { /* */ }
+  if (!r.ok) { const e = new Error(j.error || 'http_' + r.status); e.code = j.error || 'http_' + r.status; e.status = r.status; throw e; }
+  return j;
+}
+// מכשיר שעובר למשתמש אחר: מוחקים את מה שנשמר בו מהמשתמש הקודם
+function wipeOtherUsers(keepPid) {
+  try {
+    const keep = new Set([dbKeyFor(keepPid), queueKeyFor(keepPid)]);
+    const drop = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || keep.has(k)) continue;
+      if (k.startsWith(STORAGE_KEY) || k.startsWith('verified_reading_tracker_queue_v1') || k.startsWith('vrt-starter2-') || k.startsWith('vrt-rec-job-') || k.startsWith('vrt-push-')) drop.push(k);
+    }
+    drop.forEach(k => { localStorage.removeItem(k); if (k.startsWith(STORAGE_KEY)) idbDelete(k).catch(() => {}); });
+    if (localStorage.getItem('vrt-last-pid') !== keepPid) { localStorage.removeItem(SOCIAL_KEY); localStorage.removeItem(PROFILES_KEY); }
+    localStorage.setItem('vrt-last-pid', keepPid);
+    localStorage.removeItem('vrt-active');
+  } catch (e) { /* */ }
+}
+function adoptSession(s) {
+  wipeOtherUsers(s.pid);
+  saveSession({ token: s.token, pid: s.pid, name: s.name || '', admin: !!s.admin, email: s.email || '' });
+}
+async function logoutNow() {
+  try { await authPost('/auth/logout'); } catch (e) { /* */ }
+  wipeOtherUsers('');
+  try { sessionStorage.removeItem('vrt_tab'); } catch (e) { /* */ }
+  saveSession(null);
+}
+function useSession() {
+  const [s, setS] = useState(loadSession);
+  useEffect(() => { const f = () => setS(loadSession()); window.addEventListener('vrt-session-changed', f); window.addEventListener('storage', f); return () => { window.removeEventListener('vrt-session-changed', f); window.removeEventListener('storage', f); }; }, []);
+  return s;
 }
 async function cloudFetch(path, opts = {}) {
   const c = loadCloud();
@@ -1062,40 +1122,51 @@ function mergeDB(a, b) {
     updatedAt: Math.max(a.updatedAt || 0, b.updatedAt || 0)
   };
 }
-function collectLocal() {
+// הסנכרון: השרת מחזיר לכל משתמש רק את מה שמותר לו לראות (הספרייה שלו במלואה, ושל חברים רק מה ששיתפו),
+// והמכשיר שולח רק את החלקים שלו: הפרופיל, הספרייה, והרשומות החברתיות שלו
+const publicProfile = (p) => ({ id: p.id, name: p.name, color: p.color, createdAt: p.createdAt, updatedAt: p.updatedAt });
+function collectLocal(me) {
   const p = loadProfiles();
-  const dbs = {};
-  p.profiles.forEach(pr => {
-    try { const raw = localStorage.getItem(dbKeyFor(pr.id)); const d = raw ? sanitizeDB(JSON.parse(raw)) : null; if (d) dbs[pr.id] = d; } catch (e) { /* */ }
-  });
-  return { profiles: p.profiles, deleted: p.deleted || {}, dbs, social: loadSocial() };
+  const d = loadDBOf(me);
+  return { profiles: p.profiles, deleted: p.deleted || {}, dbs: d ? { [me]: d } : {}, social: loadSocial() };
 }
-function mergeState(l, r) {
+function mergeState(l, r, me) {
   if (!r || !Array.isArray(r.profiles)) return l;
-  const deleted = mergeTomb(l.deleted, r.deleted);
-  const profiles = mergeByIdNewest(l.profiles, r.profiles, p => p.updatedAt || p.createdAt || 0)
+  const deleted = { ...(r.deleted || {}), ...((l.deleted || {})[me] ? { [me]: l.deleted[me] } : {}) };
+  const lMe = (l.profiles || []).find(p => p.id === me), rMe = r.profiles.find(p => p.id === me);
+  const meP = lMe && (!rMe || (lMe.updatedAt || 0) > (rMe.updatedAt || 0)) ? lMe : rMe;
+  const profiles = [...r.profiles.filter(p => p.id !== me), ...(meP ? [meP] : [])].map(publicProfile)
     .filter(p => !deleted[p.id]).sort((x, y) => (x.createdAt || 0) - (y.createdAt || 0));
   const dbs = {};
-  profiles.forEach(p => {
-    const m = mergeDB(l.dbs[p.id] || null, r.dbs && r.dbs[p.id] ? sanitizeDB(r.dbs[p.id]) : null);
-    if (m) dbs[p.id] = m;
-  });
+  Object.entries(r.dbs || {}).forEach(([pid, d]) => { if (pid !== me && !deleted[pid]) { const x = sanitizeDB(d); if (x) dbs[pid] = x; } });
+  const mine = mergeDB(l.dbs[me] || null, r.dbs && r.dbs[me] ? sanitizeDB(r.dbs[me]) : null);
+  if (mine) dbs[me] = mine;
   const cut = Date.now() - 365 * 86400000;
+  const rIds = new Set(((r.social || {}).items || []).map(x => x.id));
   const social = { items: mergeByIdNewest((l.social || {}).items, (r.social || {}).items, x => x.editedAt || x.at || 0)
+    .filter(x => rIds.has(x.id) || x.from === me)
     .filter(x => (x.editedAt || x.at || 0) > cut && !deleted[x.from] && !deleted[x.to]).sort((x, y) => (y.at || 0) - (x.at || 0)).slice(0, 2000) };
   return { profiles, deleted, dbs, social };
 }
-function applyLocal(state) {
+// החלקים של המשתמש: רק אותם שולחים לשרת
+function mineOf(st, me) {
+  const p = (st.profiles || []).find(x => x.id === me);
+  const items = ((st.social || {}).items || []).filter(x => x.from === me || x.to === me).sort((x, y) => (x.id < y.id ? -1 : 1));
+  return { profiles: p ? [publicProfile(p)] : [], deleted: (st.deleted || {})[me] ? { [me]: st.deleted[me] } : {}, dbs: st.dbs && st.dbs[me] ? { [me]: st.dbs[me] } : {}, social: { items } };
+}
+function applyLocal(state, me) {
   if (state.social) {
     const cur = JSON.stringify(loadSocial()), next = JSON.stringify(state.social);
     if (cur !== next) { try { localStorage.setItem(SOCIAL_KEY, next); } catch (e) { /* */ } window.dispatchEvent(new Event('vrt-social-changed')); }
   }
-  const cur = loadProfiles();
-  let remembered = null; try { remembered = localStorage.getItem(REMEMBER_KEY); } catch (e) { /* */ }
-  const active = state.profiles.some(p => p.id === cur.active) ? cur.active
-    : cur.active === undefined || cur.active === null ? null : state.profiles.some(p => p.id === remembered) ? remembered : null;
-  saveProfiles({ profiles: state.profiles, deleted: state.deleted, active });
-  Object.keys(state.deleted || {}).forEach(pid => { try { localStorage.removeItem(dbKeyFor(pid)); } catch (e) { /* */ } });
+  saveProfiles({ profiles: state.profiles, deleted: state.deleted, active: me });
+  // ספריות של משתמשים אחרים שכבר לא מותר לראות (חבר שהוסר, ספר שהוסתר): נמחקות מהמכשיר
+  try {
+    const keep = new Set(Object.keys(state.dbs).map(dbKeyFor).concat(dbKeyFor(me)));
+    const drop = [];
+    for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith(STORAGE_KEY) && !keep.has(k)) drop.push(k); }
+    drop.forEach(k => localStorage.removeItem(k));
+  } catch (e) { /* */ }
   Object.entries(state.dbs).forEach(([pid, d]) => {
     const key = dbKeyFor(pid);
     const str = JSON.stringify(d);
@@ -1106,21 +1177,27 @@ function applyLocal(state) {
 const SYNC = { running: false, again: false, status: 'off', lastAt: 0, error: '', ai: null, gbooks: null, nli: null, jobs: null };
 function setSyncStatus(patch) { Object.assign(SYNC, patch); window.dispatchEvent(new Event('vrt-sync-status')); }
 async function syncNow() {
-  if (!loadCloud()) { setSyncStatus({ status: 'off' }); return; }
+  const sess = loadSession();
+  if (!loadCloud() || !sess) { setSyncStatus({ status: 'off' }); return; }
   if (SYNC.running) { SYNC.again = true; return; }
   SYNC.running = true;
   setSyncStatus({ status: 'syncing' });
+  const me = sess.pid;
   try {
+    let r = await cloudFetch('/sync');
     for (let attempt = 0; attempt < 4; attempt++) {
-      const r = await cloudFetch('/sync');
-      if (!r.ok) throw new Error('http_' + r.status);
+      if (r.status === 401) throw new Error('auth');
+      if (!r.ok && r.status !== 409) throw new Error('http_' + r.status);
       const remote = await r.json();
-      const merged = mergeState(collectLocal(), remote.data);
-      applyLocal(merged);
-      if (remote.data && JSON.stringify(remote.data) === JSON.stringify(merged)) break;
-      const put = await cloudFetch('/sync', { method: 'PUT', body: JSON.stringify({ baseRev: remote.rev, data: merged }) });
-      if (put.status === 409) continue;
-      if (!put.ok) throw new Error('http_' + put.status);
+      if ((loadSession() || {}).pid !== me) return;   // המשתמש התחלף באמצע
+      const merged = mergeState(collectLocal(me), remote.data, me);
+      applyLocal(merged, me);
+      const out = mineOf(merged, me);
+      if (remote.data && JSON.stringify(mineOf({ ...remote.data, profiles: (remote.data.profiles || []).map(publicProfile) }, me)) === JSON.stringify(out)) break;
+      r = await cloudFetch('/sync', { method: 'PUT', body: JSON.stringify({ baseRev: remote.rev, data: out }) });
+      if (r.status === 409) continue;   // מישהו אחר עדכן בינתיים: ממזגים שוב עם מה שהשרת החזיר
+      if (r.status === 401) throw new Error('auth');
+      if (!r.ok) throw new Error('http_' + r.status);
       break;
     }
     setSyncStatus({ status: 'ok', lastAt: Date.now(), error: '' });
@@ -1132,34 +1209,7 @@ async function syncNow() {
   }
 }
 let syncTimer = null;
-function scheduleSync(ms = 2500) { if (!loadCloud()) return; clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, ms); }
-// חיבור ראשון של מכשיר: אם גם במכשיר וגם בשרת יש משתמש 'default' שונה, מעבירים את המקומי למזהה חדש כדי שלא יתמזגו
-const JOINED_KEY = 'verified_reading_tracker_joined_v1';
-async function ensureJoined() {
-  if (!loadCloud()) return;
-  try { if (localStorage.getItem(JOINED_KEY)) return; } catch (e) { return; }
-  const r = await cloudFetch('/sync');
-  if (!r.ok) return;
-  const remote = await r.json();
-  const rp = remote.data && remote.data.profiles || [];
-  const lp = loadProfiles();
-  const ld = lp.profiles.find(p => p.id === 'default');
-  const rd = rp.find(p => p.id === 'default');
-  if (ld && rd && ld.createdAt !== rd.createdAt) {
-    const nid = uid();
-    try {
-      const raw = localStorage.getItem(dbKeyFor('default'));
-      if (raw) localStorage.setItem(dbKeyFor(nid), raw);
-      localStorage.removeItem(dbKeyFor('default'));
-      idbDelete(dbKeyFor('default')).catch(() => {});
-      const q = localStorage.getItem(queueKeyFor('default'));
-      if (q) { localStorage.setItem(queueKeyFor(nid), q); localStorage.removeItem(queueKeyFor('default')); }
-    } catch (e) { /* */ }
-    saveProfiles({ ...lp, profiles: lp.profiles.map(p => p.id === 'default' ? { ...p, id: nid, updatedAt: Date.now() } : p), active: lp.active === 'default' ? nid : lp.active });
-    window.dispatchEvent(new Event('vrt-profiles-changed'));
-  }
-  try { localStorage.setItem(JOINED_KEY, '1'); } catch (e) { /* */ }
-}
+function scheduleSync(ms = 2500) { if (!loadCloud() || !loadSession()) return; clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, ms); }
 function useSyncStatus() {
   const [, force] = useState(0);
   useEffect(() => {
@@ -1192,7 +1242,7 @@ async function aiClient() {
   return {
     Anthropic,
     client: new Anthropic({
-      apiKey: 'held-by-family-server', baseURL: cloudBase(c.url), dangerouslyAllowBrowser: true,
+      apiKey: 'held-by-family-server', baseURL: cloudBase(c.url), dangerouslyAllowBrowser: true, fetch: (...a) => window.fetch(...a),
       maxRetries: 1, timeout: 6 * 60 * 1000
     })
   };
@@ -1294,7 +1344,8 @@ const PLURAL_FORMS = {
   'רוצים': ['רוצה', 'רוצה'], 'אתם': ['אתה', 'את'], 'גללו': ['גלול', 'גללי'], 'העלו': ['העלה', 'העלי'],
   'מוזמנים': ['מוזמן', 'מוזמנת'], 'ודאו': ['ודא', 'ודאי'], 'העתיקו': ['העתק', 'העתיקי'], 'תרצו': ['תרצה', 'תרצי'], 'שמרו': ['שמור', 'שמרי'], 'ייבאו': ['ייבא', 'ייבאי'], 'בחרתם': ['בחרת', 'בחרת'],
   'סיימתם': ['סיימת', 'סיימת'], 'דירגתם': ['דירגת', 'דירגת'], 'הייתם': ['היית', 'היית'], 'תגלו': ['תגלה', 'תגלי'], 'קראו': ['קרא', 'קראי'],
-  'מחקו': ['מחק', 'מחקי'], 'הפעילו': ['הפעל', 'הפעילי'], 'אפשרו': ['אפשר', 'אפשרי'], 'בטלו': ['בטל', 'בטלי'], 'אתכם': ['אותך', 'אותך'], 'סימנתם': ['סימנת', 'סימנת']
+  'מחקו': ['מחק', 'מחקי'], 'הפעילו': ['הפעל', 'הפעילי'], 'אפשרו': ['אפשר', 'אפשרי'], 'בטלו': ['בטל', 'בטלי'], 'אתכם': ['אותך', 'אותך'], 'סימנתם': ['סימנת', 'סימנת'],
+  'התחברו': ['התחבר', 'התחברי'], 'קישרתם': ['קישרת', 'קישרת'], 'קבעו': ['קבע', 'קבעי'], 'ברוכים': ['ברוך', 'ברוכה'], 'הבאים': ['הבא', 'הבאה']
 };
 // מילים שכתובות בזכר יחיד (למשל דוגמאות בשדות טקסט): בלשון נקבה מחליפים
 const MASC_FORMS = { 'אוהב': 'אוהבת', 'מתחבר': 'מתחברת', 'מחפש': 'מחפשת', 'תקרא': 'תקראי', 'שאתה': 'שאת', 'אתה': 'את', 'קורא': 'קוראת', 'מוכן': 'מוכנה', 'תאהב': 'תאהבי', 'קורא/ת': 'קוראת', 'ממליץ': 'ממליצה', 'ממליץ…': 'ממליצה…' };
@@ -5260,21 +5311,8 @@ function SettingsGroup({ icon, title, summary, children }) {
     </section>
   );
 }
-function PasswordChange({ onSetPassword, notify, hasPass }) {
-  const [pw, setPw] = useState('');
-  const save = async (e) => {
-    e.preventDefault();
-    if (pw.length < PASS_MIN) { notify(L('סיסמה של {0} תווים לפחות.', [PASS_MIN])); return; }
-    onSetPassword(await makePass(pw)); setPw(''); notify('הסיסמה נשמרה');
-  };
-  return (
-    <form className="grid gap-2" onSubmit={save}>
-      <PassField id="change-pass" label={hasPass ? 'שינוי סיסמה' : 'קביעת סיסמה'} value={pw} onChange={setPw} />
-      <Btn variant="soft" type="submit" disabled={!pw}><Icon name="KeyRound" size={18} />שמירת הסיסמה</Btn>
-    </form>
-  );
-}
-function BackupTab({ db, update, replace, status, notify, profile, onRenameProfile, onDeleteProfile, onOpenStarter, onSetPassword }) {
+function BackupTab({ db, update, replace, status, notify, profile, onRenameProfile, onDeleteProfile, onOpenStarter }) {
+  const session = useSession();
   // רשימת ההיכרות הושלמה (עברו על כל 400 הספרים, או שכולם כבר בספרייה): לא מציגים אותה בהגדרות
   const [nameDraft, setNameDraft] = useState(profile.name);
   const [confirmProfileDel, setConfirmProfileDel] = useState(false);
@@ -5365,9 +5403,9 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
             className="flex-1 min-w-0 min-h-[48px] px-3 rounded-xl border border-line bg-bg text-[16px]" />
           <Btn variant="soft" type="submit" disabled={!nameDraft.trim() || nameDraft.trim() === profile.name}>שינוי שם</Btn>
         </form>
-        {onSetPassword && <PasswordChange onSetPassword={onSetPassword} notify={notify} hasPass={!!profile.passHash} />}
+        <AccountSecurity notify={notify} />
         <Btn variant="danger" onClick={() => { if (!confirmProfileDel) { setConfirmProfileDel(true); return; } onDeleteProfile(); }}>
-          {confirmProfileDel ? T(`לחצו שוב: מחיקת "${profile.name}" וכל הספרים שלו`) : 'מחיקת המשתמש מהמכשיר'}
+          {confirmProfileDel ? T(`לחצו שוב: מחיקת "${profile.name}" וכל הספרים שלו`) : 'מחיקת המשתמש'}
         </Btn>
         <div>
           <div className="text-[14px] text-muted mb-1.5">{UI_LANG_LABEL}</div>
@@ -5382,6 +5420,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
           </div>
         </div>}
       </SettingsGroup>
+      {session && session.admin && <SettingsGroup icon="ShieldCheck" title="ניהול משתמשים" summary={L('איפוס סיסמאות')}><AdminPanel notify={notify} /></SettingsGroup>}
       <SettingsGroup icon="Sparkles" title="המלצות" summary={`שפות: ${langsLabel(langsOf(db.settings))} · רשימת הספרים המוכרים`}>
         <div>
           <div className="text-[15px] font-semibold">רשימת 400 הספרים המוכרים</div>
@@ -6178,7 +6217,8 @@ const GUIDE = [
     [L('איך מתחילים?'), L('בוחרים שם וסיסמה. בכניסה הראשונה בוחרים אילו סוגות להציג (למשל בלי ספרי ילדים), ואז נפתחת רשימה של ספרים מוכרים: החלקה ימינה = קראתי (ואז בוחרים דירוג), שמאלה = לא קראתי, והסימנייה = רוצה לקרוא. אפשר לדלג ולחזור אליה מהכרטיס שבראש "הספרים שלי".')],
     [L('איך מתקינים את האפליקציה על מסך הבית?'), L('באייפון: פותחים ב-Safari, לוחצים על כפתור השיתוף ובוחרים "הוספה למסך הבית". באנדרואיד: בכרום, בתפריט ⋮ בוחרים "התקנת האפליקציה", או לוחצים על ההודעה שמופיעה באפליקציה.')],
     [L('איך חוזרים לרשימת הספרים המוכרים?'), L('בהגדרות ← "המלצות" ← "רשימת 400 הספרים המוכרים": "המשך מאיפה שעצרתי" או "מההתחלה". יש גם קישור בתחתית לשונית "הוספת ספר". ספרים שכבר בספרייה לא מוצגים שוב.')],
-    [L('איך עובדת הסיסמה?'), L('כל משתמש בוחר סיסמה כשהוא נכנס בפעם הראשונה. המכשיר זוכר מי נכנס ממנו ופותח ישר את הספרייה שלו; אחרי "החלפת משתמש" צריך את הסיסמה שוב. משנים סיסמה בהגדרות ← "החשבון שלי". שכחתם? "שכחתי סיסמה" במסך הכניסה, עם סיסמת המנהל.')],
+    [L('איך נכנסים?'), L('עם חשבון Google ("המשך עם Google"), או עם שם וסיסמה. בכניסה הראשונה עם Google בוחרים אם לחבר אותו לספרייה שכבר יש לכם (עם הסיסמה שלה) או לפתוח משתמש חדש. המכשיר זוכר את הכניסה; "החלפת משתמש" מנתקת אותה ומוחקת את הספרייה מהמכשיר (היא נשמרת בשרת). בהגדרות ← "החשבון שלי" משנים סיסמה ומקשרים או מנתקים את Google. שכחתם סיסמה? נכנסים עם Google, או מבקשים מהמנהל לאפס אותה.')],
+    [L('הספרייה שלי מוגנת?'), L('כן. השרת בודק את הסיסמה או את חשבון ה-Google, ושולח לכל מכשיר רק את הספרייה של מי שנכנס. חברים מקבלים רק את מה שבחרתם לשתף (בלי ספרים מוסתרים), ושאר המשתמשים רק ספרים שדירגתם 4 ומעלה, בלי הערות, לצורך "אהובים בקהילה". אף מכשיר לא יכול לשנות ספרייה של מישהו אחר.')],
     [L('כמה משתמשים יכולים להשתמש בה?'), L('כל אחד במשפחה מקבל ספרייה, דירוגים והמלצות משלו. מחליפים משתמש בלחיצה על השם שבראש המסך.')],
     [L('הנתונים שלי נשמרים?'), L('הכול נשמר בטלפון ומסתנכרן אוטומטית, כך שהספרייה זמינה בכל מכשיר. הנקודה הירוקה ליד השם אומרת שהכול מסונכרן; כתומה = אין חיבור כרגע, והנתונים יסונכרנו כשיחזור.')]] },
   { id: 'library', title: L('הספרים שלי'), icon: 'Library', intro: L('הספרייה האישית: ארבעה מדפים, חיפוש, מיון, תגיות וסטטיסטיקות.'), qa: [
@@ -6358,7 +6398,7 @@ const TABS = [
   { id: 'backup', label: L('הגדרות'), icon: 'Settings' }
 ];
 
-function App({ profile, onSwitch, onRenameProfile, onDeleteProfile, onSetPassword }) {
+function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
   const { db, update, replace, status } = usePersistentDB();
   const friendsBadge = useFriends().badge;
   const [digestOpen, setDigestOpen] = useState(null);
@@ -6518,7 +6558,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile, onSetPasswor
         {tab === 'add' && <AddTab db={db} update={update} onPick={pick} goSettings={() => setTab('backup')} onOpenStarter={() => openStarter(false)} />}
         {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} onOpenDigest={setDigestOpen} />}
         {tab === 'friends' && <FriendsTab db={db} update={update} onPick={pick} notify={notify} onGoSettings={() => { openSettingsGroup(L('פרטיות וחברים')); setTab('backup'); setTimeout(() => { const el = document.querySelector(`[data-group="${L('פרטיות וחברים')}"]`); if (el) el.scrollIntoView({ block: 'start' }); }, 60); }} />}
-        {tab === 'backup' && <BackupTab onOpenStarter={openStarter} db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onSetPassword={onSetPassword} onDeleteProfile={onDeleteProfile} />}
+        {tab === 'backup' && <BackupTab onOpenStarter={openStarter} db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
       </main>
 
       <nav className="fixed bottom-0 inset-x-0 z-30 bg-surface border-t border-line safe-bottom" aria-label="ניווט ראשי">
@@ -6547,7 +6587,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile, onSetPasswor
 }
 
 /* ============================================================
-   משתמשים: הזדהות בלי סיסמה. כל משתמש מקבל ספרייה נפרדת במכשיר.
+   משתמשים: כניסה עם Google או סיסמה שנבדקת בשרת. כל משתמש מקבל ספרייה נפרדת.
    ============================================================ */
 const AVATAR_COLORS = ['#3446B0', '#D4506C', '#14897F', '#DF8A1F', '#7A4FC2', '#2E8BD6', '#B5534A', '#4E8A3E'];
 // סמליל "מה שנקרא": ספר פתוח בלילה, עם כוכב קטן של "מה עוד נקרא" (תואם לאייקון במסך הבית)
@@ -6582,33 +6622,13 @@ function loadProfiles() {
   try {
     const p = JSON.parse(localStorage.getItem(PROFILES_KEY) || 'null');
     if (p && Array.isArray(p.profiles)) {
-      const out = { deleted: {}, ...p };
-      if (!out.active) { const r = localStorage.getItem(REMEMBER_KEY); if (r && out.profiles.some(x => x.id === r)) out.active = r; }
-      return out;
+      return { deleted: {}, ...p };
     }
   } catch (e) { /* */ }
   return { profiles: [], active: null, deleted: {} };
 }
 function saveProfiles(p) {
-  try { localStorage.setItem(PROFILES_KEY, JSON.stringify(p)); if (p.active) localStorage.setItem(REMEMBER_KEY, p.active); } catch (e) { /* */ }
-}
-/* ---------- סיסמה לכל משתמש: לתחושת פרטיות בין בני המשפחה, לא אבטחה (הנתונים עצמם מסתנכרנים לכל המכשירים) ----------
-   נשמר רק גיבוב (SHA-256 עם מלח אקראי) בפרופיל, שמסתנכרן. סיסמת המנהל פותחת כל משתמש ומאפשרת לקבוע לו סיסמה חדשה. */
-const REMEMBER_KEY = 'vrt-active';   // המשתמש שנכנס מהמכשיר הזה: נכנס ישר בפעם הבאה
-const ADMIN_HASH = '1c0713d67db5f8cbcf3bc20f8ff39c62ccb85ce909ad674f697efff0410b615d';   // sha256('vrt-admin|' + סיסמת המנהל)
-async function sha256hex(str) {
-  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
-  return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
-}
-async function makePass(pw) { const passSalt = uid(); return { passSalt, passHash: await sha256hex(`vrt|${passSalt}|${pw}`) }; }
-const isAdminPass = async (pw) => (await sha256hex('vrt-admin|' + pw)) === ADMIN_HASH;
-async function checkPass(profile, pw) {
-  if (await isAdminPass(pw)) return true;
-  return !!profile.passHash && (await sha256hex(`vrt|${profile.passSalt || ''}|${pw}`)) === profile.passHash;
-}
-const PASS_MIN = 4;
-function countBooks(pid) {
-  try { const d = JSON.parse(localStorage.getItem(dbKeyFor(pid)) || 'null'); return d && Array.isArray(d.books) ? d.books.length : 0; } catch (e) { return 0; }
+  try { localStorage.setItem(PROFILES_KEY, JSON.stringify(p)); } catch (e) { /* */ }
 }
 
 // בחירת שפת הממשק: בכניסה הראשונה ובהגדרות. השמות כתובים כל אחד בשפתו, ולא מתורגמים
@@ -6626,125 +6646,331 @@ function UiLangPicker() {
     </div>
   );
 }
-function PassField({ id, value, onChange, label, autoFocus }) {
+/* ---------- כניסה: Google, או סיסמה שנבדקת בשרת. השרת נותן אסימון כניסה, ובלעדיו הוא לא מחזיר נתונים ---------- */
+const PASS_MIN = 4;
+function authErrText(e) {
+  const c = (e && e.code) || '';
+  if (c === 'wrong') return T('הסיסמה לא נכונה. נסו שוב.');
+  if (c === 'too_many') return T('יותר מדי ניסיונות. נסו שוב בעוד רבע שעה.');
+  if (c === 'short') return L('סיסמה של {0} תווים לפחות.', [PASS_MIN]);
+  if (c === 'name_taken') return L('כבר יש משתמש בשם הזה.');
+  if (c === 'name') return L('צריך שם או כינוי.');
+  if (c === 'link_expired') return T('עבר יותר מדי זמן. התחברו שוב עם Google.');
+  if (c === 'linked_elsewhere') return L('חשבון ה-Google הזה כבר מקושר למשתמש אחר.');
+  if (c === 'forbidden') return L('רק המנהל יכול לעשות את זה.');
+  if (e && e.status === 401) return L('הכניסה עם Google לא אושרה.');
+  return L('אין חיבור לשרת. נסו שוב.');
+}
+// כפתור Google (Google Identity Services): מחזיר ID token שהשרת בודק מול המפתחות של Google
+let gisPromise = null;
+function loadGis() {
+  if (window.google && window.google.accounts && window.google.accounts.id) return Promise.resolve(window.google);
+  if (!gisPromise) gisPromise = new Promise((res, rej) => {
+    const sc = document.createElement('script');
+    sc.src = 'https://accounts.google.com/gsi/client'; sc.async = true;
+    sc.onload = () => window.google && window.google.accounts ? res(window.google) : rej(new Error('gis'));
+    sc.onerror = () => { gisPromise = null; rej(new Error('gis')); };
+    document.head.appendChild(sc);
+  });
+  return gisPromise;
+}
+function GoogleButton({ clientId, onCredential, text = 'continue_with' }) {
+  const ref = useRef(null);
+  const cb = useRef(onCredential); cb.current = onCredential;
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!clientId) return;
+    let alive = true;
+    loadGis().then(g => {
+      if (!alive || !ref.current) return;
+      g.accounts.id.initialize({ client_id: clientId, callback: (r) => r && r.credential && cb.current(r.credential), ux_mode: 'popup', auto_select: false, cancel_on_tap_outside: true });
+      g.accounts.id.renderButton(ref.current, { type: 'standard', theme: 'outline', size: 'large', shape: 'pill', text, locale: IS_EN ? 'en' : 'he', width: Math.min(360, ref.current.offsetWidth || 320) });
+    }).catch(() => alive && setFailed(true));
+    return () => { alive = false; };
+  }, [clientId]);
+  if (!clientId) return null;
+  if (failed) return <p className="text-[13px] text-muted m-0">{L('הכניסה עם Google לא נטענה. בדקו את החיבור לרשת.')}</p>;
+  return <div ref={ref} className="google-btn min-h-[44px] flex justify-center" />;
+}
+function PassField({ id, value, onChange, label, autoFocus, isNew }) {
   const [show, setShow] = useState(false);
   return (
     <div className="grid gap-1">
       <label htmlFor={id} className="font-semibold text-[15px]">{label}</label>
       <div className="relative">
-        <input id={id} type={show ? 'text' : 'password'} value={value} onChange={e => onChange(e.target.value)} autoFocus={autoFocus} autoComplete="current-password" dir="ltr"
+        <input id={id} type={show ? 'text' : 'password'} value={value} onChange={e => onChange(e.target.value)} autoFocus={autoFocus} autoComplete={isNew ? 'new-password' : 'current-password'} dir="ltr"
           className="w-full min-h-[52px] ps-3 pe-12 rounded-xl border border-line bg-bg text-[17px]" />
         <button type="button" onClick={() => setShow(!show)} aria-label={show ? 'הסתרת הסיסמה' : 'הצגת הסיסמה'} className="absolute end-1 top-1 w-11 h-11 grid place-items-center text-muted"><Icon name={show ? 'EyeOff' : 'Eye'} size={18} /></button>
       </div>
     </div>
   );
 }
-// כניסה למשתמש קיים: סיסמה (או קביעת סיסמה למשתמש ותיק שאין לו), ו"שכחתי" עם סיסמת המנהל
-function ProfileLogin({ profile, onEnter, onSetPass, onCancel }) {
-  const [mode, setMode] = useState(profile.passHash ? 'login' : 'set');
-  const [pw, setPw] = useState(''), [adminPw, setAdminPw] = useState(''), [err, setErr] = useState(''), [busy, setBusy] = useState(false);
+function LoginHeader() {
+  return (
+    <>
+      <div className="flex items-center gap-3 mb-6">
+        <Logo size={56} />
+        <div>
+          <div className="wordmark text-[34px] leading-none">מה שנקרא</div>
+          <div className="text-muted text-[14px] mt-1">{T('מה קראת, מה תקרא, ומה החברים אוהבים')}</div>
+        </div>
+      </div>
+      <div className="mb-6"><UiLangPicker /></div>
+    </>
+  );
+}
+// כניסה למשתמש קיים עם סיסמה (או קביעת סיסמה ראשונה למשתמש ותיק שאין לו)
+function ProfileLogin({ profile, clientId, onGoogle, onCancel, linkId }) {
+  const setFirst = !profile.hasPass && !profile.google && !linkId;
+  const googleOnly = !profile.hasPass && profile.google;
+  const noPw = !!linkId && !profile.hasPass;   // קישור Google למשתמש ותיק בלי סיסמה: לא צריך סיסמה
+  const [pw, setPw] = useState(''), [err, setErr] = useState(''), [busy, setBusy] = useState(false), [forgot, setForgot] = useState(false);
   const submit = async (e) => {
-    e.preventDefault(); setErr(''); setBusy(true);
-    try {
-      if (mode === 'login') {
-        if (await checkPass(profile, pw)) onEnter(); else setErr(T('הסיסמה לא נכונה. נסו שוב.'));
-      } else if (mode === 'set') {
-        if (pw.length < PASS_MIN) setErr(L('סיסמה של {0} תווים לפחות.', [PASS_MIN])); else { onSetPass(await makePass(pw)); onEnter(); }
-      } else {
-        if (!(await isAdminPass(adminPw))) setErr('סיסמת המנהל לא נכונה.');
-        else if (pw.length < PASS_MIN) setErr(L('סיסמה של {0} תווים לפחות.', [PASS_MIN]));
-        else { onSetPass(await makePass(pw)); onEnter(); }
-      }
-    } finally { setBusy(false); }
+    e.preventDefault(); setErr('');
+    if (setFirst && pw.length < PASS_MIN) { setErr(L('סיסמה של {0} תווים לפחות.', [PASS_MIN])); return; }
+    setBusy(true);
+    try { adoptSession(await authPost(linkId ? '/auth/link' : '/auth/password', linkId ? { link: linkId, pid: profile.id, password: pw } : { pid: profile.id, password: pw })); }
+    catch (er) { setErr(authErrText(er)); setBusy(false); }
   };
   return (
     <form className="grid gap-2.5 bg-surface border border-line rounded-xl p-3" onSubmit={submit}>
       <div className="flex items-center gap-2.5"><Avatar profile={profile} size={36} /><span className="font-semibold text-[17px] flex-1 truncate">{profile.name}</span></div>
-      {mode === 'set' && <p className="text-[14px] m-0">{T('למשתמש הזה עוד אין סיסמה. בחרו סיסמה, והיא תידרש בכניסה הבאה.')}</p>}
-      {mode === 'reset' && <PassField id="admin-pass" label="סיסמת מנהל" value={adminPw} onChange={setAdminPw} autoFocus />}
-      <PassField id="profile-pass" label={mode === 'login' ? 'סיסמה' : 'סיסמה חדשה'} value={pw} onChange={setPw} autoFocus={mode !== 'reset'} />
-      {err && <p className="text-[13px] text-danger m-0" role="alert">{err}</p>}
-      <div className="grid grid-cols-2 gap-2">
-        <Btn type="submit" disabled={busy || !pw}><Icon name="LogIn" size={20} />כניסה</Btn>
-        <Btn variant="ghost" onClick={onCancel}>ביטול</Btn>
-      </div>
-      {mode === 'login' && <button type="button" className="text-accent font-semibold text-[14px] min-h-[40px] justify-self-start" onClick={() => { setMode('reset'); setErr(''); setPw(''); }}>שכחתי סיסמה</button>}
+      {googleOnly && !linkId ? (
+        <>
+          <p className="text-[14px] m-0">{T('המשתמש הזה נכנס עם Google.')}</p>
+          <GoogleButton clientId={clientId} onCredential={onGoogle} />
+          <Btn variant="ghost" onClick={onCancel}>ביטול</Btn>
+        </>
+      ) : (
+        <>
+          {setFirst && <p className="text-[14px] m-0">{T('למשתמש הזה עוד אין סיסמה. בחרו סיסמה, והיא תידרש בכניסה הבאה.')}</p>}
+          {!noPw && <PassField id="profile-pass" label={setFirst ? 'סיסמה חדשה' : 'סיסמה'} value={pw} onChange={setPw} autoFocus isNew={setFirst} />}
+          {err && <p className="text-[13px] text-danger m-0" role="alert">{err}</p>}
+          <div className="grid grid-cols-2 gap-2">
+            <Btn type="submit" disabled={busy || (!pw && !noPw)}><Icon name="LogIn" size={20} />כניסה</Btn>
+            <Btn variant="ghost" onClick={onCancel}>ביטול</Btn>
+          </div>
+          {!setFirst && !noPw && !forgot && <button type="button" className="text-accent font-semibold text-[14px] min-h-[40px] justify-self-start" onClick={() => setForgot(true)}>שכחתי סיסמה</button>}
+          {forgot && <Notice tone="info">{T('אפשר להיכנס עם Google, אם קישרתם אותו בהגדרות, או לבקש מהמנהל לאפס את הסיסמה.')}</Notice>}
+        </>
+      )}
     </form>
   );
 }
-function WhoAreYou({ profiles, onPick, onCreate, onSetPass }) {
-  const [name, setName] = useState('');
-  const [pw, setPw] = useState('');
-  const [adding, setAdding] = useState(profiles.length === 0);
-  const [sel, setSel] = useState(null);
-  const [err, setErr] = useState('');
-  const legacyCount = profiles.length === 0 ? countBooks('default') : 0;
+function ProfileList({ profiles, onPick }) {
+  return (
+    <ul className="grid gap-2 mb-4">
+      {profiles.map(p => (
+        <li key={p.id}>
+          <button type="button" onClick={() => onPick(p.id)}
+            className="w-full min-h-[64px] flex items-center gap-3 px-3 rounded-xl bg-surface border border-line text-start active:bg-surface2">
+            <Avatar profile={p} size={44} />
+            <span className="flex-1 min-w-0 block font-semibold text-[17px] truncate">{p.name}</span>
+            <Icon name={p.hasPass || p.google ? 'Lock' : 'ChevronLeft'} size={20} className="text-muted" />
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+function NewProfileForm({ profiles, onCancel, linkId, initialName = '' }) {
+  const [name, setName] = useState(initialName), [pw, setPw] = useState(''), [err, setErr] = useState(''), [busy, setBusy] = useState(false);
   const taken = profiles.some(p => norm(p.name) === norm(name));
-  const selected = profiles.find(p => p.id === sel);
-  const create = async (e) => {
+  const submit = async (e) => {
     e.preventDefault(); setErr('');
     if (!name.trim() || taken) return;
-    if (pw.length < PASS_MIN) { setErr(L('סיסמה של {0} תווים לפחות.', [PASS_MIN])); return; }
-    onCreate(name.trim(), await makePass(pw));
+    if (!linkId && pw.length < PASS_MIN) { setErr(L('סיסמה של {0} תווים לפחות.', [PASS_MIN])); return; }
+    setBusy(true);
+    try { adoptSession(await authPost(linkId ? '/auth/link' : '/auth/register', linkId ? { link: linkId, create: name.trim() } : { name: name.trim(), password: pw })); }
+    catch (er) { setErr(authErrText(er)); setBusy(false); }
   };
+  return (
+    <form className="grid gap-2 bg-surface border border-line rounded-xl p-3" onSubmit={submit}>
+      <label htmlFor="new-profile" className="font-semibold text-[15px]">{profiles.length ? 'משתמש חדש' : 'איך לקרוא לך?'}</label>
+      <input id="new-profile" value={name} onChange={e => setName(e.target.value)} maxLength={24} autoFocus placeholder="שם או כינוי"
+        className="w-full min-h-[52px] px-3 rounded-xl border border-line bg-bg text-[17px]" />
+      {taken && <p className="text-[13px] text-danger">כבר יש משתמש בשם הזה.</p>}
+      {!linkId && <PassField id="new-pass" label="סיסמה" value={pw} onChange={setPw} isNew />}
+      {err && <p className="text-[13px] text-danger m-0" role="alert">{err}</p>}
+      <div className={onCancel ? 'grid grid-cols-2 gap-2' : 'grid'}>
+        <Btn type="submit" disabled={busy || !name.trim() || taken || (!linkId && !pw)}><Icon name="Check" size={20} />כניסה</Btn>
+        {onCancel && <Btn variant="ghost" onClick={onCancel}>ביטול</Btn>}
+      </div>
+    </form>
+  );
+}
+function LoginScreen() {
+  const [info, setInfo] = useState(null);
+  const [loadErr, setLoadErr] = useState(false);
+  const [sel, setSel] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const [link, setLink] = useState(null);   // חשבון Google שעוד לא קושר: {link, email, name}
+  const [err, setErr] = useState('');
+  const load = () => {
+    setLoadErr(false);
+    fetchJSON(loadCloud().url + '/auth/profiles?t=' + Date.now(), 15000).then(j => { setInfo(j); if (!(j.profiles || []).length) setAdding(true); }).catch(() => setLoadErr(true));
+  };
+  useEffect(load, []);
+  const onGoogle = async (credential) => {
+    setErr('');
+    try { const j = await authPost('/auth/google', { credential }); if (j.token) adoptSession(j); else if (j.link) { setLink(j); setSel(null); setAdding(false); } }
+    catch (e) { setErr(authErrText(e)); }
+  };
+  const profiles = (info && info.profiles) || [];
+  const clientId = (info && info.google) || '';
+  const selected = profiles.find(p => p.id === sel);
+  let body;
+  if (loadErr) body = (
+    <div className="grid gap-3">
+      <Notice tone="warn">{L('אין חיבור לשרת. נסו שוב.')}</Notice>
+      <Btn variant="soft" onClick={load}><Icon name="RefreshCw" size={18} />ניסיון נוסף</Btn>
+    </div>
+  );
+  else if (!info) body = <div className="grid place-items-center py-10" role="status" aria-label="טוען"><Icon name="LoaderCircle" size={28} className="animate-spin text-muted" /></div>;
+  else if (link) {
+    const free = profiles.filter(p => !p.google);
+    body = (
+      <div className="grid gap-3">
+        <h1 className="font-display font-medium text-[24px] leading-snug m-0">{T('ברוכים הבאים!')}</h1>
+        <p className="m-0 text-[15px]"><span dir="ltr">{link.email}</span></p>
+        {selected ? <ProfileLogin key={selected.id} profile={selected} clientId="" linkId={link.link} onCancel={() => setSel(null)} />
+          : adding ? <NewProfileForm profiles={profiles} linkId={link.link} initialName={link.name || ''} onCancel={free.length ? () => setAdding(false) : null} />
+          : (
+            <>
+              {free.length > 0 && <><h2 className="font-semibold text-[16px] m-0">{T('כבר יש לכם ספרייה כאן? בחרו אותה:')}</h2><ProfileList profiles={free} onPick={setSel} /></>}
+              <Btn variant={free.length ? 'ghost' : 'primary'} onClick={() => setAdding(true)}><Icon name="UserPlus" size={20} />{L('משתמש חדש')}</Btn>
+            </>
+          )}
+        <button type="button" className="text-accent font-semibold text-[14px] min-h-[40px] justify-self-start" onClick={() => { setLink(null); setSel(null); setAdding(false); }}>חזרה</button>
+      </div>
+    );
+  } else body = (
+    <>
+      <h1 className="font-display font-medium text-[26px] leading-snug mb-5">של מי הספרייה?</h1>
+      {clientId && !selected && !adding && (
+        <div className="grid gap-3 mb-5">
+          <GoogleButton clientId={clientId} onCredential={onGoogle} />
+          <div className="flex items-center gap-3 text-muted text-[13px]"><span className="flex-1 h-px bg-line" />{L('או עם סיסמה')}<span className="flex-1 h-px bg-line" /></div>
+        </div>
+      )}
+      {selected ? (
+        <div className="mb-4"><ProfileLogin key={selected.id} profile={selected} clientId={clientId} onGoogle={onGoogle} onCancel={() => setSel(null)} /></div>
+      ) : profiles.length > 0 && <ProfileList profiles={profiles} onPick={(id) => { setSel(id); setAdding(false); }} />}
+      {selected ? null : adding ? <NewProfileForm profiles={profiles} onCancel={profiles.length ? () => setAdding(false) : null} />
+        : <Btn variant="ghost" className="w-full" onClick={() => setAdding(true)}><Icon name="UserPlus" size={20} />הוספת משתמש</Btn>}
+    </>
+  );
   return (
     <div className="min-h-screen bg-bg text-ink font-body">
       <main className="mx-auto max-w-md px-4 pt-10 pb-10 safe-top fade-in">
-        <div className="flex items-center gap-3 mb-6">
-          <Logo size={56} />
-          <div>
-            <div className="wordmark text-[34px] leading-none">מה שנקרא</div>
-            <div className="text-muted text-[14px] mt-1">{T('מה קראת, מה תקרא, ומה החברים אוהבים')}</div>
-          </div>
-        </div>
-        <div className="mb-6"><UiLangPicker /></div>
-        <h1 className="font-display font-medium text-[26px] leading-snug mb-5">של מי הספרייה?</h1>
-        {selected ? (
-          <div className="mb-4"><ProfileLogin key={selected.id} profile={selected} onEnter={() => onPick(selected.id)} onSetPass={(p) => onSetPass(selected.id, p)} onCancel={() => setSel(null)} /></div>
-        ) : profiles.length > 0 && (
-          <ul className="grid gap-2 mb-4">
-            {profiles.map(p => (
-              <li key={p.id}>
-                <button type="button" onClick={() => { setSel(p.id); setAdding(false); }}
-                  className="w-full min-h-[64px] flex items-center gap-3 px-3 rounded-xl bg-surface border border-line text-start active:bg-surface2">
-                  <Avatar profile={p} size={44} />
-                  <span className="flex-1 min-w-0">
-                    <span className="block font-semibold text-[17px] truncate">{p.name}</span>
-                    <span className="block text-muted text-[13px] tabular">{countBooks(p.id)} ספרים</span>
-                  </span>
-                  <Icon name={p.passHash ? 'Lock' : 'ChevronLeft'} size={20} className="text-muted" />
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-        {selected ? null : adding ? (
-          <form className="grid gap-2 bg-surface border border-line rounded-xl p-3" onSubmit={create}>
-            {legacyCount > 0 && <Notice tone="info">במכשיר כבר יש ספרייה עם {legacyCount} ספרים. היא תשויך למשתמש הראשון שתיצרו.</Notice>}
-            <label htmlFor="new-profile" className="font-semibold text-[15px]">{profiles.length ? 'משתמש חדש' : 'איך לקרוא לך?'}</label>
-            <input id="new-profile" value={name} onChange={e => setName(e.target.value)} maxLength={24} autoFocus placeholder="שם או כינוי"
-              className="w-full min-h-[52px] px-3 rounded-xl border border-line bg-bg text-[17px]" />
-            {taken && <p className="text-[13px] text-danger">כבר יש משתמש בשם הזה.</p>}
-            <PassField id="new-pass" label="סיסמה" value={pw} onChange={setPw} />
-            {err && <p className="text-[13px] text-danger m-0" role="alert">{err}</p>}
-            <div className={profiles.length ? 'grid grid-cols-2 gap-2' : 'grid'}>
-              <Btn type="submit" disabled={!name.trim() || taken || !pw}><Icon name="Check" size={20} />כניסה</Btn>
-              {profiles.length > 0 && <Btn variant="ghost" onClick={() => { setAdding(false); setName(''); setPw(''); }}>ביטול</Btn>}
-            </div>
-          </form>
-        ) : (
-          <Btn variant="ghost" className="w-full" onClick={() => setAdding(true)}><Icon name="UserPlus" size={20} />הוספת משתמש</Btn>
-        )}
+        <LoginHeader />
+        {err && <div className="mb-3"><Notice tone="warn">{err}</Notice></div>}
+        {body}
       </main>
     </div>
   );
 }
+// הגדרות ← החשבון שלי: סיסמה וקישור ל-Google
+function AccountSecurity({ notify }) {
+  const session = useSession();
+  const [me, setMe] = useState(null);
+  const [clientId, setClientId] = useState('');
+  const [pw, setPw] = useState(''), [err, setErr] = useState('');
+  const refresh = () => {
+    const c = loadCloud();
+    fetchJSON(c.url + '/auth/me?t=' + Date.now(), 12000).then(setMe).catch(() => {});
+    fetchJSON(c.url + '/auth/profiles?t=' + Math.floor(Date.now() / 60000), 12000).then(j => setClientId(j.google || '')).catch(() => {});
+  };
+  useEffect(refresh, []);
+  const savePw = async (e) => {
+    e.preventDefault(); setErr('');
+    if (pw.length < PASS_MIN) { setErr(L('סיסמה של {0} תווים לפחות.', [PASS_MIN])); return; }
+    try { await authPost('/auth/setpass', { password: pw }); setPw(''); notify('הסיסמה נשמרה'); setMe(m => m && { ...m, hasPass: true }); } catch (er) { setErr(authErrText(er)); }
+  };
+  const onGoogle = async (credential) => {
+    setErr('');
+    try { const j = await authPost('/auth/google', { credential }); if (j.token && j.pid === session.pid) { adoptSession(j); notify('החשבון קושר ל-Google'); refresh(); } }
+    catch (er) { setErr(authErrText(er)); }
+  };
+  const unlink = async () => {
+    setErr('');
+    if (!me.hasPass) { setErr(T('כדי לנתק את Google, קבעו קודם סיסמה.')); return; }
+    try { await authPost('/auth/unlink'); notify('החשבון נותק מ-Google'); refresh(); } catch (er) { setErr(authErrText(er)); }
+  };
+  return (
+    <div className="grid gap-3">
+      <form className="grid gap-2" onSubmit={savePw}>
+        <PassField id="change-pass" label={me && !me.hasPass ? 'קביעת סיסמה' : 'שינוי סיסמה'} value={pw} onChange={setPw} isNew />
+        <Btn variant="soft" type="submit" disabled={!pw}><Icon name="KeyRound" size={18} />שמירת הסיסמה</Btn>
+      </form>
+      {me && (me.google ? (
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="flex-1 min-w-0 text-[14px]">{L('מחובר עם Google')}{me.google !== '-' && <> · <span dir="ltr">{me.google}</span></>}</span>
+          <Btn variant="ghost" onClick={unlink}>{L('ניתוק מ-Google')}</Btn>
+        </div>
+      ) : clientId ? (
+        <div className="grid gap-1.5">
+          <div className="text-[14px] text-muted">{L('קישור לחשבון Google')}</div>
+          <GoogleButton clientId={clientId} onCredential={onGoogle} text="signin_with" />
+        </div>
+      ) : null)}
+      {err && <p className="text-[13px] text-danger m-0" role="alert">{err}</p>}
+    </div>
+  );
+}
+// ניהול משתמשים: רק למנהל (לפי חשבון ה-Google). איפוס סיסמה וניתוק Google
+function AdminPanel({ notify }) {
+  const [list, setList] = useState(null), [sel, setSel] = useState(''), [pw, setPw] = useState(''), [err, setErr] = useState('');
+  const load = () => { authPost('/auth/admin', { action: 'list' }).then(j => setList(j.profiles || [])).catch(e => setErr(authErrText(e))); };
+  useEffect(load, []);
+  const reset = async (e) => {
+    e.preventDefault(); setErr('');
+    if (pw.length < PASS_MIN) { setErr(L('סיסמה של {0} תווים לפחות.', [PASS_MIN])); return; }
+    try { await authPost('/auth/admin', { action: 'reset', pid: sel, password: pw }); setPw(''); setSel(''); notify('הסיסמה אופסה'); load(); } catch (er) { setErr(authErrText(er)); }
+  };
+  const unlink = async (pid) => { setErr(''); try { await authPost('/auth/unlink', { pid }); notify('החשבון נותק מ-Google'); load(); } catch (er) { setErr(authErrText(er)); } };
+  if (!list) return err ? <p className="text-[13px] text-danger m-0" role="alert">{err}</p> : <Icon name="LoaderCircle" size={22} className="animate-spin text-muted" />;
+  const chosen = list.find(p => p.id === sel);
+  return (
+    <div className="grid gap-2">
+      <ul className="grid gap-1.5">
+        {list.map(p => (
+          <li key={p.id} className={`flex items-center gap-2.5 p-2 rounded-xl border ${sel === p.id ? 'border-accent bg-accentSoft' : 'border-line bg-bg'}`}>
+            <Avatar profile={p} size={32} />
+            <span className="flex-1 min-w-0">
+              <span className="block font-semibold text-[15px] truncate">{p.name}</span>
+              <span className="block text-[12px] text-muted truncate">{[p.hasPass ? L('סיסמה') : L('בלי סיסמה'), p.google ? 'Google · ' + p.google : ''].filter(Boolean).join(' · ')}</span>
+            </span>
+            {p.google && <button type="button" className="text-[13px] text-muted min-h-[40px] px-2" onClick={() => unlink(p.id)}>{L('ניתוק Google')}</button>}
+            <Btn variant="soft" className="min-h-[40px] px-3 text-[14px]" onClick={() => { setSel(p.id); setPw(''); setErr(''); }}>{L('איפוס סיסמה')}</Btn>
+          </li>
+        ))}
+      </ul>
+      {chosen && (
+        <form className="grid gap-2" onSubmit={reset}>
+          <PassField id="admin-reset-pass" label={L('סיסמה חדשה ל{0}', [chosen.name])} value={pw} onChange={setPw} autoFocus isNew />
+          <div className="grid grid-cols-2 gap-2">
+            <Btn type="submit" disabled={!pw}><Icon name="KeyRound" size={18} />{L('איפוס סיסמה')}</Btn>
+            <Btn variant="ghost" onClick={() => setSel('')}>ביטול</Btn>
+          </div>
+        </form>
+      )}
+      {err && <p className="text-[13px] text-danger m-0" role="alert">{err}</p>}
+    </div>
+  );
+}
 
+// מחכים לסנכרון שרץ, ומסנכרנים עוד פעם אחת: לפני יציאה או מחיקה
+async function syncFlush() {
+  for (let i = 0; i < 60 && SYNC.running; i++) await new Promise(r => setTimeout(r, 200));
+  await syncNow();
+  return SYNC.status === 'ok';
+}
 function Root() {
+  const session = useSession();
   const [state, setState] = useState(loadProfiles);
   useSyncStatus();   // רינדור מחדש כשהשרת נמצא או כשמצב הסנכרון משתנה
   const change = (fn) => setState(prev => { const next = fn(prev); saveProfiles(next); scheduleSync(800); return next; });
-  const active = state.profiles.find(p => p.id === state.active);
   useEffect(() => {
     const onStorage = (e) => { if (e.key === PROFILES_KEY) setState(loadProfiles()); };
     const onProfiles = () => setState(loadProfiles());
@@ -6752,38 +6978,45 @@ function Root() {
     window.addEventListener('storage', onStorage);
     window.addEventListener('vrt-profiles-changed', onProfiles);
     document.addEventListener('visibilitychange', onVisible);
-    discoverCloud().then(ok => ok && ensureJoined()).catch(() => {}).finally(() => syncNow());
+    discoverCloud().catch(() => {});
     const iv = setInterval(() => { if (document.visibilityState === 'visible') syncNow(); }, 45000);
     return () => {
       window.removeEventListener('storage', onStorage); window.removeEventListener('vrt-profiles-changed', onProfiles);
       document.removeEventListener('visibilitychange', onVisible); clearInterval(iv);
     };
   }, []);
+  const pid = session && session.pid;
+  // כניסה במכשיר חדש: מחכים לסנכרון הראשון, כדי שהספרייה מהשרת תיטען לפני שהאפליקציה מתחילה לשמור
+  const [readyPid, setReadyPid] = useState(() => pid && loadDBOf(pid) ? pid : null);
+  useEffect(() => {
+    if (!pid) return;
+    setState(loadProfiles());
+    if (loadDBOf(pid)) setReadyPid(pid);
+    syncFlush().finally(() => { setState(loadProfiles()); setReadyPid(pid); });
+  }, [pid]);
 
-  if (!active) {
-    return <WhoAreYou profiles={state.profiles}
-      onPick={(id) => change(s => ({ ...s, active: id }))}
-      onSetPass={(id, pass) => change(s => ({ ...s, profiles: s.profiles.map(p => p.id === id ? { ...p, ...pass, updatedAt: Date.now() } : p) }))}
-      onCreate={(name, pass) => change(s => {
-        const id = s.profiles.some(p => p.id === 'default') || loadCloud() ? uid() : 'default';
-        const used = new Set(s.profiles.map(p => p.color));
-        const color = [...AVATAR_COLORS.keys()].find(i => !used.has(i)) ?? s.profiles.length;
-        return { ...s, profiles: [...s.profiles, { id, name, color, ...(pass || {}), createdAt: Date.now(), updatedAt: Date.now() }], active: id };
-      })} />;
-  }
-
+  if (!session) return <LoginScreen />;
+  if (readyPid !== pid) return (
+    <div className="min-h-screen bg-bg text-ink font-body grid place-items-center" role="status" aria-label="טוען">
+      <div className="grid gap-4 justify-items-center"><Logo size={56} /><Icon name="LoaderCircle" size={28} className="animate-spin text-muted" /></div>
+    </div>
+  );
+  const active = state.profiles.find(p => p.id === pid) || { id: pid, name: session.name || '', color: 0 };
   ACTIVE.id = active.id;
   ACTIVE.name = active.name;
   ACTIVE.dbKey = dbKeyFor(active.id);
   ACTIVE.queueKey = queueKeyFor(active.id);
   return <App key={active.id} profile={active}
-    onSwitch={() => { try { sessionStorage.removeItem('vrt_tab'); localStorage.removeItem(REMEMBER_KEY); } catch (e) { /* */ } change(s => ({ ...s, active: null })); }}
-    onSetPassword={(pass) => change(s => ({ ...s, profiles: s.profiles.map(p => p.id === active.id ? { ...p, ...pass, updatedAt: Date.now() } : p) }))}
-    onRenameProfile={(name) => change(s => ({ ...s, profiles: s.profiles.map(p => p.id === active.id ? { ...p, name, updatedAt: Date.now() } : p) }))}
-    onDeleteProfile={() => {
-      try { localStorage.removeItem(dbKeyFor(active.id)); localStorage.removeItem(queueKeyFor(active.id)); localStorage.removeItem(REMEMBER_KEY); } catch (e) { /* */ }
-      idbDelete(dbKeyFor(active.id)).catch(() => {});
-      change(s => ({ ...s, profiles: s.profiles.filter(p => p.id !== active.id), deleted: { ...(s.deleted || {}), [active.id]: Date.now() }, active: null }));
+    onSwitch={async () => {
+      if (!(await syncFlush()) && !window.confirm(T('אין חיבור לשרת, ושינויים אחרונים עוד לא נשמרו בו. לצאת בכל זאת?'))) return;
+      await logoutNow();
+    }}
+    onRenameProfile={(name) => change(s => ({ ...s, profiles: s.profiles.some(p => p.id === active.id) ? s.profiles.map(p => p.id === active.id ? { ...p, name, updatedAt: Date.now() } : p) : [...s.profiles, { ...active, name, updatedAt: Date.now() }] }))}
+    onDeleteProfile={async () => {
+      const next = { ...loadProfiles(), deleted: { ...(loadProfiles().deleted || {}), [active.id]: Date.now() } };
+      saveProfiles(next);
+      await syncFlush();
+      await logoutNow();
     }} />;
 }
 

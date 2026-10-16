@@ -4,6 +4,7 @@ import { chromium } from 'playwright';
 import { readFileSync } from 'node:fs';
 import { build } from 'esbuild';
 import assert from 'node:assert/strict';
+import worker, { sha256hex } from '../worker/worker.js';
 
 const root = new URL('..', import.meta.url).pathname;
 const nm = root + 'tests/node_modules/';
@@ -46,7 +47,28 @@ function wikidataMock(route, u) {
   if (p.get('action') === 'query' && p.get('srsearch') === 'haswbstatement:P179=Q5') return route.fulfill({ json: { query: { search: [{ title: 'Q1' }, { title: 'Q2' }, { title: 'Q3' }] } }, headers: cors });
   return route.fulfill({ json: { search: [] }, headers: cors });
 }
-let store = { rev: 0, data: null };
+// השרת האמיתי (worker.js) מטפל בכניסה ובסנכרון, עם KV בזיכרון ומפתח RSA לבדיקה במקום המפתחות של Google
+const kv = new Map();
+const KV = {
+  get: async (k, t) => kv.has(k) ? (t === 'json' ? JSON.parse(kv.get(k)) : kv.get(k)) : null,
+  put: async (k, v) => { kv.set(k, typeof v === 'string' ? v : JSON.stringify(v)); },
+  delete: async (k) => { kv.delete(k); }
+};
+const gPair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify']);
+const WENV = { LIBRARY: KV, GOOGLE_CLIENT_ID: 'test-client.apps.googleusercontent.com', __googleKeys: [{ ...(await crypto.subtle.exportKey('jwk', gPair.publicKey)), kid: 'k1' }], ADMIN_EMAIL_SHA256: await sha256hex('admin@example.com') };
+const b64u = (x) => Buffer.from(typeof x === 'string' ? x : JSON.stringify(x)).toString('base64url');
+const gToken = async (claims) => {
+  const head = b64u({ alg: 'RS256', kid: 'k1', typ: 'JWT' });
+  const body = b64u({ iss: 'https://accounts.google.com', aud: WENV.GOOGLE_CLIENT_ID, exp: Math.floor(Date.now() / 1000) + 600, email_verified: true, ...claims });
+  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', gPair.privateKey, new TextEncoder().encode(head + '.' + body));
+  return `${head}.${body}.${Buffer.from(sig).toString('base64url')}`;
+};
+// Google Identity Services מדומה: הכפתור מחזיר את האסימון שהבדיקה קבעה (window.__gcred)
+const GIS = `window.google = { accounts: { id: {
+  initialize(o) { window.__gisCb = o.callback; },
+  renderButton(el) { el.innerHTML = ''; const b = document.createElement('button'); b.type = 'button'; b.className = 'gis-mock'; b.textContent = 'Google'; b.onclick = () => window.__gisCb({ credential: window.__gcred }); el.appendChild(b); }
+} } };`;
+const noAuth = [];
 const aiCalls = [], aiScript = [], errors = [], feedbacks = [], bookinfoCalls = [];
 const digestFor = new Map();
 let stallNext = false;
@@ -81,10 +103,16 @@ async function phone(browser, name) {
     const asset = Object.keys(ASSETS).find(k => url.endsWith(k));
     if (asset) return route.fulfill({ body: ASSETS[asset], contentType: 'application/javascript', headers: cors });
     if (url.includes('@anthropic-ai/sdk')) return route.fulfill({ body: SDK, contentType: 'application/javascript', headers: cors });
+    if (url.startsWith('https://accounts.google.com/gsi/client')) return route.fulfill({ body: GIS, contentType: 'application/javascript', headers: cors });
     const u = new URL(url);
     if (u.origin === WORKER) {
       if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
-      if (u.pathname === '/ping') return route.fulfill({ headers: cors, json: { ok: true, ai: true, sync: true, gbooks: true, nli: true, jobs: true } });
+      if (u.pathname === '/ping') return route.fulfill({ headers: cors, json: { ok: true, ai: true, sync: true, gbooks: true, nli: true, jobs: true, google: WENV.GOOGLE_CLIENT_ID, auth: 2 } });
+      if (u.pathname === '/sync' || u.pathname.startsWith('/auth/')) {
+        const r = await worker.fetch(new Request(url, { method: req.method(), headers: req.headers(), body: ['GET', 'HEAD'].includes(req.method()) ? undefined : req.postData() }), WENV, { waitUntil() {} });
+        return route.fulfill({ status: r.status, headers: { ...cors, 'content-type': 'application/json' }, body: await r.text() });
+      }
+      if (!['/push/key', '/push/notice'].includes(u.pathname) && !req.headers()['authorization']) noAuth.push(u.pathname);
       if (u.pathname === '/feedback') { feedbacks.push(JSON.parse(req.postData())); return route.fulfill({ headers: cors, json: { ok: true } }); }
       if (u.pathname === '/reviews') {
         const t = u.searchParams.get('title') || '';
@@ -111,13 +139,6 @@ async function phone(browser, name) {
       if (u.pathname === '/nli') {
         const t = u.searchParams.get('title') || '';
         return route.fulfill({ headers: cors, json: { items: t.includes('נגד הטבע') ? [{ id: '990012345670205171', title: 'נגד הטבע', authors: ['תומס אספדל'], year: '2023', publisher: 'תשע נשמות', language: 'heb', isbns: ['9789650000777'], cover: '', link: 'https://www.nli.org.il/he/books/NNL_ALEPH990012345670205171/NLI' }] : [] } });
-      }
-      if (u.pathname === '/sync' && req.method() === 'GET') return route.fulfill({ headers: cors, json: store });
-      if (u.pathname === '/sync' && req.method() === 'PUT') {
-        const body = JSON.parse(req.postData());
-        if (body.baseRev !== store.rev) return route.fulfill({ status: 409, headers: cors, json: store });
-        store = { rev: store.rev + 1, data: body.data };
-        return route.fulfill({ headers: cors, json: { rev: store.rev } });
       }
       // עבודות רקע: כמו השרת האמיתי, מריצים את כל הסבבים (כולל pause_turn) עד שמגיעה קריאה לכלי ההגשה
       if (u.pathname === '/jobs' && req.method() === 'POST') {
@@ -214,8 +235,14 @@ try {
     await A.click('button:has-text("דילוג על ההיכרות")'); await addBook(A, 'מיכאל שלי');
     await B.fill('#new-profile', 'יעל'); await B.fill('#new-pass', '1234'); await B.click('button:has-text("כניסה")'); await B.click('button:has-text("דילוג על ההיכרות")'); await addBook(B, 'קפקא על החוף');
     await syncBoth();
-    await A.click('[aria-label="החלפת משתמש"]'); assert.equal((await A.locator('main li').count()), 2);
-    await B.click('[aria-label="החלפת משתמש"]'); assert.equal((await B.locator('main li').count()), 2);
+    // פרטיות: יעל (לא חברה) מקבלת מהשרת רק ספרים שיובל אהב, בלי ההערות שלו
+    const seen = await B.evaluate(() => { const me = JSON.parse(localStorage.getItem('vrt-session')).pid; return Object.keys(localStorage).filter(k => k.startsWith('verified_reading_tracker_db_v1__') && !k.endsWith('__' + me)).map(k => JSON.parse(localStorage.getItem(k)).books); });
+    assert.equal(seen.length, 1); assert.ok(seen[0].length === 1 && seen[0].every(b => !b.note), 'community view only, no notes');
+    const rev0 = JSON.parse(kv.get('state')).rev; await syncBoth();
+    assert.equal(JSON.parse(kv.get('state')).rev, rev0, 'a sync with nothing new writes nothing');
+    await A.click('[aria-label="החלפת משתמש"]'); await A.locator('main li >> nth=1').waitFor(); assert.equal((await A.locator('main li').count()), 2);
+    await B.click('[aria-label="החלפת משתמש"]'); await B.locator('main li >> nth=1').waitFor(); assert.equal((await B.locator('main li').count()), 2);
+    assert.equal(await B.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('verified_reading_tracker_db_v1')).length), 0, 'signing out removes the library from the device');
   });
   await step('a deletion on one phone reaches the other', async () => {
     await login(B, 'יובל');
@@ -225,20 +252,31 @@ try {
     await login(A, 'יובל'); await syncBoth(); await B.click('nav >> text=ספרים שלי'); await A.click('nav >> text=ספרים שלי');
     await A.waitForSelector('text=הספרייה שלך מחכה לספר הראשון');
   });
-  await step('passwords: the device remembers its user; switching needs the password; admin resets a forgotten one', async () => {
+  await step('sign-in: the device remembers its user; wrong password; Google admin resets a password; Google link', async () => {
     await A.reload(); await A.waitForSelector('nav >> text=ספרים שלי');   // נכנס ישר, בלי מסך המשתמשים
     await A.click('[aria-label="החלפת משתמש"]'); await A.reload();
     await A.waitForSelector('text=של מי הספרייה?');   // אחרי החלפה: לא נכנס לבד
     await login(A, 'יובל', 'wrong'); await A.waitForSelector('text=הסיסמה לא נכונה');
-    await A.click('button:has-text("שכחתי סיסמה")');
-    await A.fill('#admin-pass', 'nope'); await A.fill('#profile-pass', 'abcd'); await A.click('form button[type=submit]');
-    await A.waitForSelector('text=סיסמת המנהל לא נכונה');
-    await A.fill('#admin-pass', 'Admin123'); await A.click('form button[type=submit]');
-    await A.waitForSelector('nav >> text=ספרים שלי');
+    await A.click('button:has-text("שכחתי סיסמה")'); await A.waitForSelector('text=לבקש מהמנהל');
+    await A.click('form button:has-text("ביטול")');
+    // המנהל נכנס עם Google (חשבון חדש → משתמש חדש) ומאפס את הסיסמה של יובל
+    await A.evaluate(c => { window.__gcred = c; }, await gToken({ sub: 'g-admin', email: 'admin@example.com', name: 'מנהלת' }));
+    await A.click('.gis-mock'); await A.waitForSelector('text=ברוכים הבאים!');
+    await A.click('button:has-text("משתמש חדש")'); assert.equal(await A.inputValue('#new-profile'), 'מנהלת');
+    await A.click('form button[type=submit]'); await A.click('button:has-text("דילוג על ההיכרות")');
+    await A.click('nav >> text=הגדרות'); await group(A, 'ניהול משתמשים');
+    await A.locator('li:has-text("יובל")').locator('button:has-text("איפוס סיסמה")').click();
+    await A.fill('#admin-reset-pass', 'abcd'); await A.click('form:has(#admin-reset-pass) button[type=submit]'); await A.waitForSelector('text=הסיסמה אופסה');
     await A.click('[aria-label="החלפת משתמש"]'); await login(A, 'יובל', 'abcd'); await A.waitForSelector('nav >> text=ספרים שלי');
-    // מחזירים את הסיסמה מההגדרות
-    await A.click('nav >> text=הגדרות'); await group(A, 'החשבון שלי');
+    await A.click('nav >> text=הגדרות');
+    assert.equal(await A.locator('[data-group="ניהול משתמשים"]').count(), 0, 'admin panel only for the admin');
+    // מחזירים את הסיסמה, ומקשרים את יובל ל-Google
+    await group(A, 'החשבון שלי');
     await A.fill('#change-pass', '1234'); await A.click('button:has-text("שמירת הסיסמה")'); await A.waitForSelector('text=הסיסמה נשמרה');
+    await A.evaluate(c => { window.__gcred = c; }, await gToken({ sub: 'g-yuval', email: 'yuval@example.com', name: 'Yuval' }));
+    await A.click('.gis-mock'); await A.waitForSelector('text=yuval@example.com');
+    await A.click('[aria-label="החלפת משתמש"]'); await A.click('.gis-mock'); await A.waitForSelector('nav >> text=ספרים שלי');
+    assert.equal(await A.evaluate(() => JSON.parse(localStorage.getItem('vrt-session')).name), 'יובל', 'Google signs straight into the linked user');
     await A.click('nav >> text=ספרים שלי');
   });
   await step('Hebrew edition first; full synopsis on expand; translation kept', async () => {
@@ -914,6 +952,7 @@ try {
     assert.equal(await E.evaluate(() => document.documentElement.dir), 'rtl');
   });
   assert.deepEqual(errors, [], 'page errors');
+  assert.deepEqual([...new Set(noAuth)], [], 'every request to the server carries the sign-in token');
   console.log('\nכל הבדיקות עברו');
 } finally {
   await browser.close();

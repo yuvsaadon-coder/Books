@@ -64,6 +64,14 @@ assert.ok(!sanitizeTools([{ type: 'web_search_20260209', name: 'web_search' }], 
 console.log('worker blocked-domain retry: ok');
 // סבב מלא: Anthropic דוחה פעם אחת בגלל אתר חסום → השרת מסיר אותו, זוכר, ומצליח בניסיון השני
 import worker from '../worker/worker.js';
+// בקשות לשרת נשלחות בשם משתמש מחובר (מפתח כניסה בדיקה)
+const TEST_TOKEN = 'a'.repeat(64);
+const authed = (req, env, ctx) => {
+  const h = new Headers(req.headers); h.set('Authorization', 'Bearer ' + TEST_TOKEN);
+  const get0 = env.LIBRARY.get;
+  const lib = { ...env.LIBRARY, get: async (k, t) => k === 'sess:' + TEST_TOKEN ? (t === 'json' ? { pid: 'tester', exp: Date.now() + 1e9 } : JSON.stringify({ pid: 'tester' })) : get0(k, t) };
+  return worker.fetch(new Request(req, { headers: h }), { ...env, LIBRARY: lib }, ctx);
+};
 const kv = new Map();
 const env = { ANTHROPIC_API_KEY: 'k', LIBRARY: { get: async (k, t) => kv.has(k) ? (t === 'json' ? JSON.parse(kv.get(k)) : kv.get(k)) : null, put: async (k, v) => { kv.set(k, v); } } };
 const sent = [];
@@ -72,7 +80,7 @@ globalThis.fetch = async (url, init) => {
   if (sent.length === 1) return new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: "The following domains are not accessible to our user agent: ['goodreads.com']." } }), { status: 400 });
   return new Response('{"ok":1}', { status: 200, headers: { 'content-type': 'application/json' } });
 };
-const res = await worker.fetch(new Request('https://w/v1/messages', { method: 'POST', headers: { origin: 'https://yuvsaadon-coder.github.io' }, body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 100, tools: [{ type: 'web_search_20260209', name: 'web_search' }], messages: [] }) }), env, { waitUntil() {} });
+const res = await authed(new Request('https://w/v1/messages', { method: 'POST', headers: { origin: 'https://yuvsaadon-coder.github.io' }, body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 100, tools: [{ type: 'web_search_20260209', name: 'web_search' }], messages: [] }) }), env, { waitUntil() {} });
 assert.equal(res.status, 200);
 assert.equal(sent.length, 2);
 assert.ok(sent[0].tools[0].allowed_domains.includes('goodreads.com') && !sent[1].tools[0].allowed_domains.includes('goodreads.com'));
@@ -105,13 +113,13 @@ console.log('worker page verification: ok');
   };
   const envS = { ANTHROPIC_API_KEY: 'k', LIBRARY: { get: async () => null, put: async () => {} } };
   const waits = []; const ctx = { waitUntil: (p) => waits.push(p) };
-  const res = await worker.fetch(new Request('https://w/stores?title=' + encodeURIComponent('נגד הטבע') + '&author=' + encodeURIComponent('תומס אספדל'), { headers: { Origin: 'https://yuvsaadon-coder.github.io' } }), envS, ctx);
+  const res = await authed(new Request('https://w/stores?title=' + encodeURIComponent('נגד הטבע') + '&author=' + encodeURIComponent('תומס אספדל'), { headers: { Origin: 'https://yuvsaadon-coder.github.io' } }), envS, ctx);
   const j = await res.json();
   assert.equal(j.via, 'search');
   assert.deepEqual(j.items.map(x => [x.title, x.site]), [['נגד הטבע', 'e-vrit.co.il']]);
   await Promise.all(waits);
   const n = calls.length;
-  const again = await (await worker.fetch(new Request('https://w/stores?title=' + encodeURIComponent('נגד הטבע') + '&author=' + encodeURIComponent('תומס אספדל')), envS, ctx)).json();
+  const again = await (await authed(new Request('https://w/stores?title=' + encodeURIComponent('נגד הטבע') + '&author=' + encodeURIComponent('תומס אספדל')), envS, ctx)).json();
   assert.equal(again.items.length, 1); assert.equal(calls.length, n, 'second call served from cache');
   console.log('worker store search: ok');
 }
@@ -159,10 +167,10 @@ console.log('worker page verification: ok');
   assert.ok(info.synopsis.startsWith('הארי מורגן') && info.synopsisSource === 'steimatzky.co.il', 'Hebrew synopsis from the store because the catalogue has only English');
   assert.ok(!calls.some(u => u.includes('api.anthropic.com')), 'no paid search when the store page is found directly');
   // המטמון: הבקשה השנייה לא יוצאת לרשת
-  const res1 = await (await worker.fetch(new Request('https://w/bookinfo?title=' + encodeURIComponent('יש ואין') + '&author=' + encodeURIComponent('ארנסט המינגוויי')), envB, ctx)).json();
+  const res1 = await (await authed(new Request('https://w/bookinfo?title=' + encodeURIComponent('יש ואין') + '&author=' + encodeURIComponent('ארנסט המינגוויי')), envB, ctx)).json();
   await Promise.all(waits);
   const n = calls.length;
-  const res2 = await (await worker.fetch(new Request('https://w/bookinfo?title=' + encodeURIComponent('יש ואין') + '&author=' + encodeURIComponent('ארנסט המינגוויי')), envB, ctx)).json();
+  const res2 = await (await authed(new Request('https://w/bookinfo?title=' + encodeURIComponent('יש ואין') + '&author=' + encodeURIComponent('ארנסט המינגוויי')), envB, ctx)).json();
   assert.equal(calls.length, n); assert.ok(res2.cached); assert.equal(res2.isbn, res1.isbn);
   console.log('worker book info: ok');
 }
@@ -256,4 +264,118 @@ console.log('worker page verification: ok');
   assert.equal(r2.ran, 0);
   assert.ok(JSON.parse(kv.get('digest-meta:new')).next >= now + 1000 + 86400000 - 5);
   console.log('worker biweekly digest: ok');
+}
+// ---------- אבטחה: כניסה, מה כל משתמש רואה, ומה מותר לו לכתוב ----------
+{
+  const kv = new Map();
+  const LIB = {
+    get: async (k, t) => kv.has(k) ? (t === 'json' ? JSON.parse(kv.get(k)) : kv.get(k)) : null,
+    put: async (k, v) => { kv.set(k, typeof v === 'string' ? v : JSON.stringify(v)); },
+    delete: async (k) => { kv.delete(k); }
+  };
+  // מפתח RSA לבדיקה במקום המפתחות של Google
+  const pair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify']);
+  const pub = await crypto.subtle.exportKey('jwk', pair.publicKey);
+  const env = { LIBRARY: LIB, GOOGLE_CLIENT_ID: 'cid.apps.googleusercontent.com', __googleKeys: [{ ...pub, kid: 'k1' }], ADMIN_EMAIL_SHA256: await (await import('../worker/worker.js')).sha256hex('admin@example.com') };
+  const b64u = (x) => Buffer.from(typeof x === 'string' ? x : JSON.stringify(x)).toString('base64url');
+  const gToken = async (claims, aud = env.GOOGLE_CLIENT_ID) => {
+    const head = b64u({ alg: 'RS256', kid: 'k1', typ: 'JWT' });
+    const body = b64u({ iss: 'https://accounts.google.com', aud, exp: Math.floor(Date.now() / 1000) + 600, email_verified: true, ...claims });
+    const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', pair.privateKey, new TextEncoder().encode(head + '.' + body));
+    return `${head}.${body}.${Buffer.from(sig).toString('base64url')}`;
+  };
+  const call = async (path, { method = 'GET', body, token } = {}) => {
+    const r = await worker.fetch(new Request('https://w' + path, { method, headers: { 'content-type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined }), env, { waitUntil() {} });
+    return { status: r.status, json: await r.json().catch(() => null) };
+  };
+  // מצב התחלתי: A (סיסמה ישנה בפרופיל), B חבר של A (מסתיר ספר אחד ואת ההערות), C לא חבר
+  const { sha256hex } = await import('../worker/worker.js');
+  const legacy = await sha256hex('vrt|s1|1234');
+  const book = (id, title, extra = {}) => ({ id, key: 'k' + id, title, authors: ['x'], status: 'read', rating: 5, note: 'הערה פרטית', tags: [], ...extra });
+  kv.set('state', JSON.stringify({ rev: 1, data: {
+    profiles: [{ id: 'A', name: 'אבי', color: 0, passHash: legacy, passSalt: 's1', updatedAt: 1 }, { id: 'B', name: 'בת', color: 1, updatedAt: 1 }, { id: 'C', name: 'כרמל', color: 2, updatedAt: 1 }],
+    deleted: {},
+    dbs: {
+      A: { books: [book('a1', 'ספר של A')], settings: {}, litProfile: { text: 'פרופיל' } },
+      B: { books: [book('b1', 'גלוי'), book('b2', 'מוסתר', { private: true })], settings: { share: { notes: false } }, litProfile: { text: 'סוד של B' }, feedback: [{ text: 'סוד' }] },
+      C: { books: [book('c1', 'אהוב', { rating: 5 }), book('c2', 'בינוני', { rating: 3 })], settings: {}, history: [{ id: 'h' }] }
+    },
+    social: { items: [
+      { id: 'f1', type: 'friend', from: 'A', to: 'B', status: 'accepted', at: 1, editedAt: 2 },
+      { id: 'f2', type: 'friend', from: 'B', to: 'C', status: 'accepted', at: 1, editedAt: 2 },
+      { id: 'r1', type: 'rec', from: 'C', to: 'B', status: 'new', at: 1 }
+    ] }
+  } }));
+  // 1. בלי כניסה: הכול חסום, חוץ מ-/ping ורשימת המשתמשים למסך הכניסה (בלי גיבובים)
+  for (const p of ['/sync', '/bookinfo?title=x', '/digest', '/gbooks?u=x']) assert.equal((await call(p)).status, 401, p);
+  assert.equal((await call('/v1/messages', { method: 'POST', body: {} })).status, 401);
+  assert.equal((await call('/ping')).status, 200);
+  const list = (await call('/auth/profiles')).json;
+  assert.deepEqual(list.profiles.map(p => p.id), ['A', 'B', 'C']);
+  assert.ok(!JSON.stringify(list).includes(legacy) && list.profiles[0].hasPass && !list.profiles[1].hasPass);
+  // 2. סיסמה: שגויה נדחית; נכונה (הישנה) נותנת כניסה ומשודרגת ל-PBKDF2, והגיבוב הישן לא נשלח לאף אחד
+  assert.equal((await call('/auth/password', { method: 'POST', body: { pid: 'A', password: 'nope' } })).status, 401);
+  const a = (await call('/auth/password', { method: 'POST', body: { pid: 'A', password: '1234' } })).json;
+  assert.ok(/^[0-9a-f]{64}$/.test(a.token) && a.pid === 'A');
+  assert.equal(JSON.parse(kv.get('acct:A')).pass.alg, 'pbkdf2');
+  // 3. מה A רואה: הכול שלו; מ-B (חבר) רק ספרים משותפים, בלי המוסתר ובלי הערות, בלי פרופיל/משוב; מ-C (לא חבר) רק האהוב, בלי הערה
+  const v = (await call('/sync', { token: a.token })).json;
+  assert.ok(!JSON.stringify(v).includes(legacy) && !JSON.stringify(v).includes('passSalt'));
+  assert.equal(v.data.dbs.A.litProfile.text, 'פרופיל');
+  assert.deepEqual(v.data.dbs.B.books.map(b => b.title), ['גלוי']);
+  assert.equal(v.data.dbs.B.books[0].note, '');
+  assert.ok(!JSON.stringify(v.data.dbs.B).includes('סוד'));
+  assert.deepEqual(v.data.dbs.C.books.map(b => b.title), ['אהוב']);
+  assert.ok(!JSON.stringify(v.data.dbs.C).includes('הערה פרטית') && !v.data.dbs.C.history);
+  assert.deepEqual(v.data.social.items.map(x => x.id), ['f1']);   // רשומות של אחרים לא נשלחות
+  // 4. כתיבה: A יכול לשנות רק את שלו. ניסיון לשנות את הספרייה של B, את השם של C, או לזייף רשומה בשם B – נזרק
+  const forged = JSON.parse(JSON.stringify(v.data));
+  forged.dbs.A.books.push(book('a2', 'חדש של A'));
+  forged.dbs.B = { books: [], settings: {} };
+  forged.profiles = forged.profiles.map(p => p.id === 'C' ? { ...p, name: 'נפרץ', updatedAt: 99 } : p.id === 'A' ? { ...p, name: 'אבי כהן', updatedAt: 5 } : p);
+  forged.social.items.push({ id: 'x1', type: 'friend', from: 'B', to: 'C', status: 'declined', at: 9, editedAt: 9 });
+  forged.social.items.push({ id: 'f2', type: 'friend', from: 'B', to: 'C', status: 'declined', at: 1, editedAt: 9 });
+  assert.equal((await call('/sync', { method: 'PUT', token: a.token, body: { baseRev: v.rev, data: forged } })).status, 200);
+  const st = JSON.parse(kv.get('state')).data;
+  assert.deepEqual(st.dbs.A.books.map(b => b.title), ['ספר של A', 'חדש של A']);
+  assert.equal(st.dbs.B.books.length, 2);
+  assert.deepEqual(st.profiles.map(p => p.name), ['אבי כהן', 'בת', 'כרמל']);
+  assert.ok(!st.social.items.some(x => x.id === 'x1'));
+  assert.equal(st.social.items.find(x => x.id === 'f2').status, 'accepted');
+  assert.equal((await call('/sync', { method: 'PUT', token: a.token, body: { baseRev: 0, data: forged } })).status, 409);
+  // 5. Google: חשבון חדש מקושר ל-B (ל-B אין עדיין סיסמה); אחר כך נכנס ישר. aud אחר נדחה
+  const gB = await gToken({ sub: 'g-b', email: 'bat@example.com', name: 'Bat' });
+  const l = (await call('/auth/google', { method: 'POST', body: { credential: gB } })).json;
+  assert.ok(l.link && l.email === 'bat@example.com');
+  const lb = (await call('/auth/link', { method: 'POST', body: { link: l.link, pid: 'B' } })).json;
+  assert.equal(lb.pid, 'B');
+  assert.equal((await call('/auth/google', { method: 'POST', body: { credential: gB } })).json.pid, 'B');
+  assert.equal((await call('/auth/google', { method: 'POST', body: { credential: await gToken({ sub: 'g-b' }, 'other-client') } })).status, 401);
+  // קישור Google ל-A דורש את הסיסמה של A
+  const l2 = (await call('/auth/google', { method: 'POST', body: { credential: await gToken({ sub: 'g-x', email: 'x@example.com' }) } })).json;
+  assert.equal((await call('/auth/link', { method: 'POST', body: { link: l2.link, pid: 'A', password: 'bad' } })).status, 401);
+  // 6. מנהל: רק חשבון ה-Google של המנהל; מאפס סיסמה למשתמש
+  assert.equal((await call('/auth/admin', { method: 'POST', token: a.token, body: { action: 'list' } })).status, 403);
+  const adm = (await call('/auth/google', { method: 'POST', body: { credential: await gToken({ sub: 'g-admin', email: 'admin@example.com' }) } })).json;
+  const ad = (await call('/auth/link', { method: 'POST', body: { link: adm.link, pid: 'A', password: '1234' } })).json;
+  assert.equal(ad.admin, true);
+  assert.equal((await call('/auth/admin', { method: 'POST', token: ad.token, body: { action: 'list' } })).json.profiles.length, 3);
+  assert.equal((await call('/auth/admin', { method: 'POST', token: ad.token, body: { action: 'reset', pid: 'C', password: 'new-pass' } })).status, 200);
+  const cTok = (await call('/auth/password', { method: 'POST', body: { pid: 'C', password: 'new-pass' } })).json.token;
+  assert.ok(cTok);
+  // קישור מההגדרות לחשבון Google שכבר שייך למשתמש אחר: נדחה, ולא נותן כניסה אליו
+  assert.equal((await call('/auth/google', { method: 'POST', token: cTok, body: { credential: gB } })).status, 409);
+  assert.equal((await call('/auth/me', { token: cTok })).json.google, '');
+  // 7. הגבלת ניסיונות, ויציאה מבטלת את מפתח הכניסה
+  for (let i = 0; i < 8; i++) await call('/auth/password', { method: 'POST', body: { pid: 'C', password: 'x' + i } });
+  assert.equal((await call('/auth/password', { method: 'POST', body: { pid: 'C', password: 'new-pass' } })).status, 429);
+  await call('/auth/logout', { method: 'POST', token: a.token });
+  assert.equal((await call('/sync', { token: a.token })).status, 401);
+  // מחיקה עצמית: הספרייה ופרטי הכניסה נמחקים
+  const before = (await call('/sync', { token: cTok })).json;
+  assert.equal((await call('/sync', { method: 'PUT', token: cTok, body: { baseRev: before.rev, data: { deleted: { C: Date.now() } } } })).status, 200);
+  assert.equal((await call('/sync', { token: cTok })).status, 401);
+  const stC = JSON.parse(kv.get('state')).data;
+  assert.ok(stC.deleted.C && !stC.dbs.C && !kv.has('acct:C'));
+  console.log('worker auth and per-user data: ok');
 }
