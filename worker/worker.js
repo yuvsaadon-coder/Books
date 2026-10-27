@@ -953,22 +953,15 @@ async function handleDigest(req, env, cors, path, sess) {
 }
 
 // ---------- כניסה ואבטחה ----------
-// כל בקשה (חוץ מ-/ping, /auth/*, מפתח ההתראות והודעת ההתראה) דורשת מפתח כניסה (Bearer), שנוצר אחרי כניסה עם Google או עם שם וסיסמה.
-// הסיסמאות נבדקות כאן בלבד (PBKDF2 עם מלח), ולא נשלחות אף פעם לאפליקציה. המנהל: מי שנכנס עם חשבון ה-Google של יובל.
-// כל משתמש מקבל מהסנכרון רק את הספרייה שלו; מחברים – רק מה שהם בחרו לשתף; משאר המשתמשים – רק את מה שנכנס ל"אהובים בקהילה".
+// כל בקשה (חוץ מ-/ping, /auth/*, מפתח ההתראות והודעת ההתראה) דורשת מפתח כניסה (Bearer), שנוצר כשבוחרים שם במסך הכניסה (בלי סיסמה).
+// כל משתמש מקבל מהסנכרון רק את הספרייה שלו; מחברים – רק מה שהם בחרו לשתף; משאר המשתמשים – רק סיכום אנונימי ל"אהובים בקהילה".
 // ומה שנכתב לשרת: רק הספרייה של המשתמש עצמו, הפרופיל שלו, ורשומות חברות/המלצה שהוא צד בהן.
 const SESSION_TTL = 180 * 86400;
-const ADMIN_EMAIL_HASHES = ['011088e17f95ff8b9c35a364e2893d371c8a4519d3671a35d994f3faad6ffe90'];   // sha256 של כתובת המייל של המנהל
-const PBKDF2_ITER = 100000;   // המקסימום שנתמך ב-Workers
+// כניסה בלי סיסמה: בוחרים שם, והשרת נותן אסימון כניסה. האסימון מזהה מי כותב (כל מכשיר כותב רק לספרייה שלו), אבל לא מגן על הספרייה מפני מי שבוחר את אותו שם
 const enc = new TextEncoder();
 const hex = (buf) => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
 export const sha256hex = async (s) => hex(await crypto.subtle.digest('SHA-256', enc.encode(s)));
 const randomHex = (n = 32) => hex(crypto.getRandomValues(new Uint8Array(n)));
-async function pbkdf2(pw, salt, iter = PBKDF2_ITER) {
-  const key = await crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveBits']);
-  return hex(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: enc.encode(salt), iterations: iter }, key, 256));
-}
-const safeEq = (a, b) => { if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false; let r = 0; for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i); return r === 0; };
 const emptyData = () => ({ profiles: [], deleted: {}, dbs: {}, social: { items: [] } });
 async function loadState(env) { return (await env.LIBRARY.get('state', 'json')) || { rev: 0, data: null }; }
 async function saveState(env, cur, data) {
@@ -985,91 +978,51 @@ export async function sessionOf(req, env) {
   if (!s || !s.pid || (s.exp && s.exp < Date.now())) return null;
   return { ...s, token: m[1] };
 }
-async function newSession(env, pid, extra = {}) {
+async function newSession(env, pid) {
   const token = randomHex(32);
-  await env.LIBRARY.put('sess:' + token, JSON.stringify({ pid, ...extra, at: Date.now(), exp: Date.now() + SESSION_TTL * 1000 }), { expirationTtl: SESSION_TTL });
-  // רשימת הכניסות של המשתמש, כדי שאפשר יהיה לנתק את כל המכשירים (מחיקה, איפוס סיסמה)
+  await env.LIBRARY.put('sess:' + token, JSON.stringify({ pid, at: Date.now(), exp: Date.now() + SESSION_TTL * 1000 }), { expirationTtl: SESSION_TTL });
+  // רשימת הכניסות של המשתמש, כדי שמחיקה תנתק את כל המכשירים
   const idx = ((await env.LIBRARY.get('sessidx:' + pid, 'json')) || []).slice(-19);
   await env.LIBRARY.put('sessidx:' + pid, JSON.stringify([...idx, token]), { expirationTtl: SESSION_TTL });
   return token;
 }
-async function revokeSessions(env, pid, keep = '') {
+async function revokeSessions(env, pid) {
   const idx = (await env.LIBRARY.get('sessidx:' + pid, 'json')) || [];
-  for (const t of idx) if (t !== keep) await env.LIBRARY.delete('sess:' + t);
-  if (keep && idx.includes(keep)) await env.LIBRARY.put('sessidx:' + pid, JSON.stringify([keep]), { expirationTtl: SESSION_TTL });
-  else await env.LIBRARY.delete('sessidx:' + pid);
+  for (const t of idx) await env.LIBRARY.delete('sess:' + t);
+  await env.LIBRARY.delete('sessidx:' + pid);
 }
-// מחיקת משתמש: פרטי הכניסה, כל הכניסות, ההתראות וההצעות הדו-שבועיות
+// מחיקת משתמש: ההסכמה, כל הכניסות, ההתראות וההצעות הדו-שבועיות
 async function eraseAccount(env, pid) {
-  const a = await acctOf(env, pid);
-  if (a.google) await env.LIBRARY.delete('idmap:google:' + a.google.sub);
   await revokeSessions(env, pid);
-  for (const k of ['acct:', 'push:', 'digest:', 'digest-meta:', 'fail:']) await env.LIBRARY.delete(k + pid);
+  for (const k of ['acct:', 'push:', 'digest:', 'digest-meta:']) await env.LIBRARY.delete(k + pid);
 }
-// הגבלת ניסיונות: 8 סיסמאות שגויות למשתמש, או 30 מאותה כתובת, ברבע שעה
-async function tooMany(env, pid, ip) {
-  const [a, b] = await Promise.all([env.LIBRARY.get('fail:' + pid), env.LIBRARY.get('failip:' + ip)]);
-  return parseInt(a || '0', 10) >= 8 || parseInt(b || '0', 10) >= 30;
+// הגבלת קצב ליצירת משתמשים: 8 ברבע שעה בכלל, או 4 מאותה כתובת
+async function tooManyNew(env, ip) {
+  const [a, b] = await Promise.all([env.LIBRARY.get('newuser'), env.LIBRARY.get('newuser:' + ip)]);
+  return parseInt(a || '0', 10) >= 8 || parseInt(b || '0', 10) >= 4;
 }
-async function noteFail(env, pid, ip) {
-  for (const k of ['fail:' + pid, 'failip:' + ip]) { const n = parseInt((await env.LIBRARY.get(k)) || '0', 10); await env.LIBRARY.put(k, String(n + 1), { expirationTtl: 900 }); }
+async function noteNew(env, ip) {
+  for (const k of ['newuser', 'newuser:' + ip]) { const n = parseInt((await env.LIBRARY.get(k)) || '0', 10); await env.LIBRARY.put(k, String(n + 1), { expirationTtl: 900 }); }
 }
 const acctOf = async (env, pid) => (await env.LIBRARY.get('acct:' + pid, 'json')) || {};
-async function setPassword(env, pid, pw) {
-  const acct = await acctOf(env, pid);
-  const salt = randomHex(16);
-  acct.pass = { alg: 'pbkdf2', iter: PBKDF2_ITER, salt, hash: await pbkdf2(pw, salt) };
-  await env.LIBRARY.put('acct:' + pid, JSON.stringify(acct));
+// מגרסה 47 אין סיסמאות ואין Google: מוחקים מה שנשמר מהן קודם (גיבובי סיסמה, מייל ומזהה Google)
+async function dropOldCredentials(env, pid) {
+  const a = await acctOf(env, pid);
+  if (!a.pass && !a.google) return;
+  if (a.google && a.google.sub) await env.LIBRARY.delete('idmap:google:' + a.google.sub);
+  delete a.pass; delete a.google;
+  await env.LIBRARY.put('acct:' + pid, JSON.stringify(a));
 }
-// בדיקת סיסמה: החדשה (בשרת) קודם; אחרת הישנה שנשמרה בפרופיל (גיבוב פשוט), ואז משדרגים ומוחקים אותה מהפרופיל
-async function checkPassword(env, pid, pw) {
-  const acct = await acctOf(env, pid);
-  if (acct.pass) return safeEq(await pbkdf2(pw, acct.pass.salt, acct.pass.iter), acct.pass.hash);
+export async function cleanupOldCredentials(env) {
+  if (await env.LIBRARY.get('cleanup:credentials-v47')) return;
   const cur = await loadState(env);
-  const p = cur.data && (cur.data.profiles || []).find(x => x.id === pid);
-  if (!p || !p.passHash) return false;
-  if (!safeEq(await sha256hex(`vrt|${p.passSalt || ''}|${pw}`), p.passHash)) return false;
-  await setPassword(env, pid, pw);
-  return true;
+  for (const p of ((cur.data && cur.data.profiles) || [])) await dropOldCredentials(env, p.id);
+  if (cur.data && (cur.data.profiles || []).some(p => p.passHash || p.passSalt)) {
+    const data = { ...cur.data, profiles: cur.data.profiles.map(({ passHash, passSalt, ...p }) => p) };
+    await saveState(env, cur, data);
+  }
+  await env.LIBRARY.put('cleanup:credentials-v47', '1');
 }
-// יש למשתמש סיסמה (חדשה או ישנה) או חשבון Google מקושר?
-async function hasCredential(env, pid, profile) {
-  const acct = await acctOf(env, pid);
-  return !!(acct.pass || acct.google || (profile && profile.passHash));
-}
-// Google: אימות ה-ID token (RS256) מול המפתחות הציבוריים של Google, הנמען (aud) = מזהה הלקוח שלנו
-async function googleKeys(env) {
-  if (env.__googleKeys) return env.__googleKeys;   // בדיקות בלבד
-  const c = await env.LIBRARY.get('google-jwks', 'json');
-  if (c && c.at > Date.now() - 3600000) return c.keys;
-  const r = await fetch('https://www.googleapis.com/oauth2/v3/certs');
-  if (!r.ok) throw new Error('google_keys');
-  const j = await r.json();
-  await env.LIBRARY.put('google-jwks', JSON.stringify({ at: Date.now(), keys: j.keys }), { expirationTtl: 7200 });
-  return j.keys;
-}
-const b64urlBytes = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), c => c.charCodeAt(0));
-export async function verifyGoogleToken(env, token) {
-  const clientId = env.GOOGLE_CLIENT_ID;
-  if (!clientId) throw new Error('google_not_configured');
-  const parts = String(token || '').split('.');
-  if (parts.length !== 3) throw new Error('bad_token');
-  const header = JSON.parse(new TextDecoder().decode(b64urlBytes(parts[0])));
-  const payload = JSON.parse(new TextDecoder().decode(b64urlBytes(parts[1])));
-  if (header.alg !== 'RS256') throw new Error('bad_alg');
-  const jwk = (await googleKeys(env)).find(k => k.kid === header.kid);
-  if (!jwk) throw new Error('unknown_key');
-  const key = await crypto.subtle.importKey('jwk', { kty: jwk.kty, n: jwk.n, e: jwk.e, alg: 'RS256', ext: true }, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
-  const ok = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, b64urlBytes(parts[2]), enc.encode(parts[0] + '.' + parts[1]));
-  if (!ok) throw new Error('bad_signature');
-  if (!['accounts.google.com', 'https://accounts.google.com'].includes(payload.iss)) throw new Error('bad_issuer');
-  if (payload.aud !== clientId) throw new Error('bad_audience');
-  if (!payload.exp || payload.exp * 1000 < Date.now() - 60000) throw new Error('expired');
-  if (!payload.sub || payload.email_verified === false) throw new Error('unverified');
-  return { sub: String(payload.sub), email: String(payload.email || '').toLowerCase(), name: String(payload.name || '') };
-}
-// מנהל: לפי גיבוב המייל של חשבון ה-Google (אפשר להוסיף מנהלים במשתנה ADMIN_EMAIL_SHA256, מופרדים בפסיק)
-const isAdminEmail = async (env, email) => !!email && [...ADMIN_EMAIL_HASHES, ...String(env.ADMIN_EMAIL_SHA256 || '').split(',').map(x => x.trim()).filter(Boolean)].includes(await sha256hex(email.toLowerCase()));
 async function createProfile(env, name) {
   const cur = await loadState(env);
   const data = cur.data || emptyData();
@@ -1084,12 +1037,13 @@ async function createProfile(env, name) {
   await saveState(env, cur, data);
   return { id };
 }
-const sessionReply = async (env, pid, extra, cors) => {
-  const token = await newSession(env, pid, extra);
+const sessionReply = async (env, pid, cors) => {
+  await dropOldCredentials(env, pid);
+  const token = await newSession(env, pid);
   const cur = await loadState(env);
   const p = cur.data && (cur.data.profiles || []).find(x => x.id === pid);
   const a = await acctOf(env, pid);
-  return json({ token, pid, name: p ? p.name : '', admin: !!extra.admin, email: extra.email || '', consent: (a.consent && a.consent.v) || '' }, 200, cors);
+  return json({ token, pid, name: p ? p.name : '', consent: (a.consent && a.consent.v) || '' }, 200, cors);
 };
 // הסכמה לתנאי השימוש ולמדיניות הפרטיות: נשמרת עם הגרסה והזמן (תיעוד ההסכמה)
 async function recordConsent(env, pid, v) {
@@ -1097,7 +1051,6 @@ async function recordConsent(env, pid, v) {
   a.consent = { v: String(v || '').slice(0, 20), at: Date.now() };
   await env.LIBRARY.put('acct:' + pid, JSON.stringify(a));
 }
-const normName = (n) => String(n || '').trim().toLowerCase();
 async function handleAuth(req, env, cors, path) {
   const ip = req.headers.get('CF-Connecting-IP') || 'local';
   let b = {};
@@ -1105,141 +1058,39 @@ async function handleAuth(req, env, cors, path) {
   const cur = await loadState(env);
   const data = cur.data || emptyData();
   const live = (data.profiles || []).filter(p => !(data.deleted || {})[p.id]);
-  // הפרופיל לפי מזהה (מכשיר שכבר נכנס ממנו) או לפי שם שהמשתמש הקליד
-  const findProfile = () => b.pid ? live.find(x => x.id === String(b.pid)) : live.find(x => normName(x.name) === normName(b.name));
-  if (path === '/auth/profiles') {
-    // מסך הכניסה לא מקבל את רשימת המשתמשים (פרטיות). רק איך אפשר להיכנס, ולמשתמשים שהמכשיר מכיר: אם יש להם סיסמה
-    const ids = String(new URL(req.url).searchParams.get('ids') || '').split(',').filter(Boolean).slice(0, 10);
-    const known = [];
-    for (const id of ids) { const p = live.find(x => x.id === id); if (p) { const a = await acctOf(env, p.id); known.push({ ...publicProfile(p), hasPass: !!(a.pass || p.passHash), google: !!a.google }); } }
-    return json({ profiles: known, google: env.GOOGLE_CLIENT_ID || '', count: live.length }, 200, cors);
+  // רשימת המשתמשים למסך הכניסה: שם וצבע בלבד
+  if (path === '/auth/profiles') return json({ profiles: live.map(publicProfile) }, 200, cors);
+  if (path === '/auth/enter' && req.method === 'POST') {
+    const p = live.find(x => x.id === String(b.pid || ''));
+    if (!p) return json({ error: 'bad_request' }, 400, cors);
+    return sessionReply(env, p.id, cors);
   }
-  if (path === '/auth/me') {
-    const s = await sessionOf(req, env);
-    if (!s) return json({ error: 'auth' }, 401, cors);
-    const a = await acctOf(env, s.pid);
-    return json({ pid: s.pid, admin: !!s.admin, email: s.email || '', google: a.google ? a.google.email || '-' : '', hasPass: !!a.pass, consent: (a.consent && a.consent.v) || '' }, 200, cors);
+  if (path === '/auth/register' && req.method === 'POST') {
+    if (!b.consent) return json({ error: 'consent' }, 400, cors);
+    if (await tooManyNew(env, ip)) return json({ error: 'too_many' }, 429, cors);
+    const r = await createProfile(env, b.name);
+    if (r.error) return json(r, 400, cors);
+    await noteNew(env, ip);
+    await recordConsent(env, r.id, b.consent);
+    return sessionReply(env, r.id, cors);
   }
+  const s = await sessionOf(req, env);
   if (path === '/auth/logout' && req.method === 'POST') {
-    const s = await sessionOf(req, env);
     if (s) await env.LIBRARY.delete('sess:' + s.token);
     return json({ ok: true }, 200, cors);
   }
-  if (path === '/auth/password' && req.method === 'POST') {
-    const pw = String(b.password || '');
-    const p = findProfile();
-    if (!pw) return json({ error: 'bad_request' }, 400, cors);
-    if (await tooMany(env, p ? p.id : 'name:' + normName(b.name), ip)) return json({ error: 'too_many' }, 429, cors);
-    // שם שלא קיים מקבל אותה תשובה כמו סיסמה שגויה, כדי שלא אפשר יהיה לגלות מי משתמש באפליקציה
-    if (!p) { await noteFail(env, 'name:' + normName(b.name), ip); return json({ error: 'wrong' }, 401, cors); }
-    // משתמש ותיק בלי סיסמה ובלי Google: רק המנהל קובע לו סיסמה (אחרת כל אחד יכול היה לתפוס אותו)
-    if (!(await hasCredential(env, p.id, p))) return json({ error: 'no_password' }, 403, cors);
-    if (!(await checkPassword(env, p.id, pw))) { await noteFail(env, p.id, ip); return json({ error: 'wrong' }, 401, cors); }
-    return sessionReply(env, p.id, {}, cors);
-  }
-  if (path === '/auth/register' && req.method === 'POST') {
-    const pw = String(b.password || '');
-    if (pw.length < 4) return json({ error: 'short' }, 400, cors);
-    if (await tooMany(env, 'register', ip)) return json({ error: 'too_many' }, 429, cors);
-    await noteFail(env, 'register', ip);   // גם יצירת משתמשים מוגבלת בקצב
-    if (!b.consent) return json({ error: 'consent' }, 400, cors);
-    const r = await createProfile(env, b.name);
-    if (r.error) return json(r, 400, cors);
-    await setPassword(env, r.id, pw);
-    await recordConsent(env, r.id, b.consent);
-    return sessionReply(env, r.id, {}, cors);
-  }
-  if (path === '/auth/google' && req.method === 'POST') {
-    let g;
-    try { g = await verifyGoogleToken(env, b.credential); } catch (e) { return json({ error: String(e.message || e) }, 401, cors); }
-    const admin = await isAdminEmail(env, g.email);
-    const mapped = await env.LIBRARY.get('idmap:google:' + g.sub);
-    const s = await sessionOf(req, env);
-    if (mapped && live.some(p => p.id === mapped)) {
-      if (s && s.pid !== mapped) return json({ error: 'linked_elsewhere' }, 409, cors);   // קישור מההגדרות לחשבון שכבר שייך למשתמש אחר
-      return sessionReply(env, mapped, { admin, email: g.email }, cors);
-    }
-    // מחובר כבר (מההגדרות): מקשרים את Google למשתמש הנוכחי
-    if (s && live.some(p => p.id === s.pid)) {
-      await linkGoogle(env, s.pid, g);
-      return sessionReply(env, s.pid, { admin, email: g.email }, cors);
-    }
-    // חשבון Google חדש: מקשרים למשתמש קיים (עם הסיסמה שלו) או יוצרים משתמש חדש
-    const link = randomHex(24);
-    await env.LIBRARY.put('link:' + link, JSON.stringify({ ...g, admin }), { expirationTtl: 900 });
-    return json({ link, email: g.email, name: g.name }, 200, cors);
-  }
-  if (path === '/auth/link' && req.method === 'POST') {
-    const g = await env.LIBRARY.get('link:' + String(b.link || '').replace(/[^0-9a-f]/g, ''), 'json');
-    if (!g) return json({ error: 'link_expired' }, 400, cors);
-    let pid = '';
-    if (b.create) {
-      if (!b.consent) return json({ error: 'consent' }, 400, cors);
-      const r = await createProfile(env, b.create);
-      if (r.error) return json(r, 400, cors);
-      pid = r.id;
-      await recordConsent(env, pid, b.consent);
-    } else {
-      const p = findProfile();
-      if (await tooMany(env, p ? p.id : 'name:' + normName(b.name), ip)) return json({ error: 'too_many' }, 429, cors);
-      if (!p) { await noteFail(env, 'name:' + normName(b.name), ip); return json({ error: 'wrong' }, 401, cors); }
-      pid = p.id;
-      const a = await acctOf(env, pid);
-      if (a.google && a.google.sub !== g.sub) return json({ error: 'linked_elsewhere' }, 409, cors);
-      // חיבור לספרייה קיימת תמיד דורש את הסיסמה שלה (משתמש בלי סיסמה: המנהל קובע לו קודם)
-      if (!(await hasCredential(env, pid, p))) return json({ error: 'no_password' }, 403, cors);
-      if (!(await checkPassword(env, pid, String(b.password || '')))) { await noteFail(env, pid, ip); return json({ error: 'wrong' }, 401, cors); }
-    }
-    await linkGoogle(env, pid, g);
-    await env.LIBRARY.delete('link:' + b.link);
-    return sessionReply(env, pid, { admin: !!g.admin, email: g.email }, cors);
-  }
   // מכאן: רק משתמש מחובר
-  const s = await sessionOf(req, env);
   if (!s) return json({ error: 'auth' }, 401, cors);
-  if (path === '/auth/setpass' && req.method === 'POST') {
-    const pw = String(b.password || '');
-    if (pw.length < 4) return json({ error: 'short' }, 400, cors);
-    await setPassword(env, s.pid, pw);
-    await revokeSessions(env, s.pid, s.token);   // שינוי סיסמה מנתק את שאר המכשירים
-    return json({ ok: true }, 200, cors);
+  if (path === '/auth/me') {
+    const a = await acctOf(env, s.pid);
+    return json({ pid: s.pid, consent: (a.consent && a.consent.v) || '' }, 200, cors);
   }
   if (path === '/auth/consent' && req.method === 'POST') {
     if (!b.v) return json({ error: 'bad_request' }, 400, cors);
     await recordConsent(env, s.pid, b.v);
     return json({ ok: true, consent: String(b.v).slice(0, 20) }, 200, cors);
   }
-  if (path === '/auth/unlink' && req.method === 'POST') {
-    const pid = s.admin && b.pid ? String(b.pid) : s.pid;
-    const a = await acctOf(env, pid);
-    if (a.google) { await env.LIBRARY.delete('idmap:google:' + a.google.sub); delete a.google; await env.LIBRARY.put('acct:' + pid, JSON.stringify(a)); }
-    return json({ ok: true }, 200, cors);
-  }
-  if (path === '/auth/admin' && req.method === 'POST') {
-    if (!s.admin) return json({ error: 'forbidden' }, 403, cors);
-    if (b.action === 'list') {
-      const out = [];
-      for (const p of live) { const a = await acctOf(env, p.id); out.push({ ...publicProfile(p), hasPass: !!(a.pass || p.passHash), google: a.google ? a.google.email : '' }); }
-      return json({ profiles: out }, 200, cors);
-    }
-    if (b.action === 'reset') {
-      const pid = String(b.pid || ''), pw = String(b.password || '');
-      if (!live.some(p => p.id === pid) || pw.length < 4) return json({ error: 'bad_request' }, 400, cors);
-      await setPassword(env, pid, pw);
-      await env.LIBRARY.delete('fail:' + pid);
-      await revokeSessions(env, pid);
-      return json({ ok: true }, 200, cors);
-    }
-    return json({ error: 'bad_request' }, 400, cors);
-  }
   return json({ error: 'not_found' }, 404, cors);
-}
-async function linkGoogle(env, pid, g) {
-  const a = await acctOf(env, pid);
-  if (a.google && a.google.sub !== g.sub) await env.LIBRARY.delete('idmap:google:' + a.google.sub);
-  a.google = { sub: g.sub, email: g.email };
-  await env.LIBRARY.put('acct:' + pid, JSON.stringify(a));
-  await env.LIBRARY.put('idmap:google:' + g.sub, pid);
 }
 
 // ---------- מה כל משתמש רואה בסנכרון ----------
@@ -1357,13 +1208,13 @@ async function handleSync(req, env, cors, sess) {
 
 export default {
   // Cron (wrangler.jsonc → triggers): בודק כל שעה למי הגיע הזמן לקבל את ההצעות הדו-שבועיות
-  async scheduled(event, env, ctx) { ctx.waitUntil(runDigests(env, ctx)); },
+  async scheduled(event, env, ctx) { ctx.waitUntil(cleanupOldCredentials(env).catch(() => {}).then(() => runDigests(env, ctx))); },
   async fetch(req, env, ctx) {
     const cors = corsHeaders(req);
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
     const path = new URL(req.url).pathname;
     try {
-      if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY, gbooks: !!env.GOOGLE_BOOKS_KEY, nli: !!env.NLI_API_KEY, jobs: !!env.JOBS, google: env.GOOGLE_CLIENT_ID || '', auth: 2 }, 200, cors);
+      if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY, gbooks: !!env.GOOGLE_BOOKS_KEY, nli: !!env.NLI_API_KEY, jobs: !!env.JOBS, auth: 3 }, 200, cors);
       if (path.startsWith('/auth/')) return await handleAuth(req, env, cors, path);
       // מפתח ההתראות והודעת ההתראה (ה-Service Worker מבקש אותה בלי כניסה, לפי גיבוב של כתובת ההרשמה)
       if (path === '/push/key' || path === '/push/notice') return await handleDigest(req, env, cors, path, null);

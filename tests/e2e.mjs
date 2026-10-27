@@ -4,7 +4,7 @@ import { chromium } from 'playwright';
 import { readFileSync } from 'node:fs';
 import { build } from 'esbuild';
 import assert from 'node:assert/strict';
-import worker, { sha256hex } from '../worker/worker.js';
+import worker from '../worker/worker.js';
 
 const root = new URL('..', import.meta.url).pathname;
 const nm = root + 'tests/node_modules/';
@@ -47,27 +47,14 @@ function wikidataMock(route, u) {
   if (p.get('action') === 'query' && p.get('srsearch') === 'haswbstatement:P179=Q5') return route.fulfill({ json: { query: { search: [{ title: 'Q1' }, { title: 'Q2' }, { title: 'Q3' }] } }, headers: cors });
   return route.fulfill({ json: { search: [] }, headers: cors });
 }
-// השרת האמיתי (worker.js) מטפל בכניסה ובסנכרון, עם KV בזיכרון ומפתח RSA לבדיקה במקום המפתחות של Google
+// השרת האמיתי (worker.js) מטפל בכניסה ובסנכרון, עם KV בזיכרון
 const kv = new Map();
 const KV = {
   get: async (k, t) => kv.has(k) ? (t === 'json' ? JSON.parse(kv.get(k)) : kv.get(k)) : null,
   put: async (k, v) => { kv.set(k, typeof v === 'string' ? v : JSON.stringify(v)); },
   delete: async (k) => { kv.delete(k); }
 };
-const gPair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify']);
-const WENV = { LIBRARY: KV, GOOGLE_CLIENT_ID: 'test-client.apps.googleusercontent.com', __googleKeys: [{ ...(await crypto.subtle.exportKey('jwk', gPair.publicKey)), kid: 'k1' }], ADMIN_EMAIL_SHA256: await sha256hex('admin@example.com') };
-const b64u = (x) => Buffer.from(typeof x === 'string' ? x : JSON.stringify(x)).toString('base64url');
-const gToken = async (claims) => {
-  const head = b64u({ alg: 'RS256', kid: 'k1', typ: 'JWT' });
-  const body = b64u({ iss: 'https://accounts.google.com', aud: WENV.GOOGLE_CLIENT_ID, exp: Math.floor(Date.now() / 1000) + 600, email_verified: true, ...claims });
-  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', gPair.privateKey, new TextEncoder().encode(head + '.' + body));
-  return `${head}.${body}.${Buffer.from(sig).toString('base64url')}`;
-};
-// Google Identity Services מדומה: הכפתור מחזיר את האסימון שהבדיקה קבעה (window.__gcred)
-const GIS = `window.google = { accounts: { id: {
-  initialize(o) { window.__gisCb = o.callback; },
-  renderButton(el) { el.innerHTML = ''; const b = document.createElement('button'); b.type = 'button'; b.className = 'gis-mock'; b.textContent = 'Google'; b.onclick = () => window.__gisCb({ credential: window.__gcred }); el.appendChild(b); }
-} } };`;
+const WENV = { LIBRARY: KV };
 const noAuth = [];
 const aiCalls = [], aiScript = [], errors = [], feedbacks = [], bookinfoCalls = [];
 const digestFor = new Map();
@@ -103,11 +90,10 @@ async function phone(browser, name) {
     const asset = Object.keys(ASSETS).find(k => url.endsWith(k));
     if (asset) return route.fulfill({ body: ASSETS[asset], contentType: 'application/javascript', headers: cors });
     if (url.includes('@anthropic-ai/sdk')) return route.fulfill({ body: SDK, contentType: 'application/javascript', headers: cors });
-    if (url.startsWith('https://accounts.google.com/gsi/client')) return route.fulfill({ body: GIS, contentType: 'application/javascript', headers: cors });
     const u = new URL(url);
     if (u.origin === WORKER) {
       if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
-      if (u.pathname === '/ping') return route.fulfill({ headers: cors, json: { ok: true, ai: true, sync: true, gbooks: true, nli: true, jobs: true, google: WENV.GOOGLE_CLIENT_ID, auth: 2 } });
+      if (u.pathname === '/ping') return route.fulfill({ headers: cors, json: { ok: true, ai: true, sync: true, gbooks: true, nli: true, jobs: true, auth: 3 } });
       if (u.pathname === '/sync' || u.pathname.startsWith('/auth/')) {
         const r = await worker.fetch(new Request(url, { method: req.method(), headers: req.headers(), body: ['GET', 'HEAD'].includes(req.method()) ? undefined : req.postData() }), WENV, { waitUntil() {} });
         return route.fulfill({ status: r.status, headers: { ...cors, 'content-type': 'application/json' }, body: await r.text() });
@@ -209,14 +195,8 @@ function googleMock(route, u) {
 }
 // ההגדרות מחולקות לקבוצות מקופלות; פותחים את הקבוצה לפני שעובדים בתוכה
 const group = async (p, title) => { const b = p.locator(`[data-group="${title}"] > h2 > button[aria-expanded="false"]`); if (await b.count()) await b.click(); };
-// כניסה למשתמש קיים ממסך "של מי הספרייה?" (כל משתמש עם סיסמה)
-// משתמש שכבר נכנס מהמכשיר מופיע ברשימה; אחרת מקלידים את השם (מסך הכניסה לא מציג את כל המשתמשים)
-const login = async (p, name, pw = '1234') => {
-  const byName = p.locator('button:has-text("כניסה עם שם וסיסמה")'); await byName.waitFor();
-  const li = p.locator(`main li:has-text("${name}")`);
-  if (await li.count()) await li.click(); else { await byName.click(); await p.fill('#login-name', name); }
-  await p.fill('#profile-pass', pw); await p.click('form button[type=submit]');
-};
+// כניסה למשתמש קיים ממסך "של מי הספרייה?": בוחרים את השם, בלי סיסמה
+const login = async (p, name) => { await p.click(`main li:has-text("${name}")`); };
 // יציאה: מחכים למסך הכניסה (היציאה מסנכרנת קודם, ורק אז מנתקת)
 const signOut = async (p) => { await p.click('[aria-label="החלפת משתמש"]'); await p.waitForSelector('text=של מי הספרייה?'); };
 const step = async (name, fn) => { process.stdout.write(`• ${name} … `); await fn(); console.log('ok'); };
@@ -238,12 +218,12 @@ try {
 
   await step('two phones create users and books, auto-connected, no setup', async () => {
     // משתמש חדש: רשימת הספרים המוכרים נפתחת בחלון מלא; מדלגים עליה
-    await A.fill('#new-profile', 'יובל'); await A.fill('#new-pass', '1234');
+    await A.fill('#new-profile', 'יובל');
     assert.ok(await A.locator('form button[type=submit]').isDisabled(), 'sign-up needs consent to the terms');
     await A.check('#consent'); await A.click('button:has-text("כניסה")');
     await A.locator('[role=dialog][aria-label="היכרות עם הטעם שלך"]').waitFor(); await A.waitForTimeout(600); await shot(A, 'first-entry', false);
     await A.click('button:has-text("דילוג על ההיכרות")'); await addBook(A, 'מיכאל שלי');
-    await B.fill('#new-profile', 'יעל'); await B.fill('#new-pass', '1234'); await B.check('#consent'); await B.click('button:has-text("כניסה")'); await B.click('button:has-text("דילוג על ההיכרות")'); await addBook(B, 'קפקא על החוף');
+    await B.fill('#new-profile', 'יעל'); await B.check('#consent'); await B.click('button:has-text("כניסה")'); await B.click('button:has-text("דילוג על ההיכרות")'); await addBook(B, 'קפקא על החוף');
     await syncBoth();
     // פרטיות: הספרייה של יובל לא מגיעה בכלל לטלפון של יעל (הם לא חברים)
     const seen = await B.evaluate(() => { const me = JSON.parse(localStorage.getItem('vrt-session')).pid; return Object.keys(localStorage).filter(k => k.startsWith('verified_reading_tracker_db_v1__') && !k.endsWith('__' + me)).map(k => JSON.parse(localStorage.getItem(k)).books); });
@@ -252,9 +232,10 @@ try {
     let quiet = false;
     for (let i = 0; i < 5 && !quiet; i++) { const rev0 = JSON.parse(kv.get('state')).rev; await syncBoth(); quiet = JSON.parse(kv.get('state')).rev === rev0; }
     assert.ok(quiet, 'a sync with nothing new writes nothing');
-    // מסך הכניסה מציג רק את מי שנכנס מהמכשיר הזה
-    await signOut(A); await A.locator('button:has-text("כניסה עם שם וסיסמה")').waitFor(); assert.deepEqual(await texts(A.locator('main li span.truncate')), ['יובל']);
-    await signOut(B); await B.locator('button:has-text("כניסה עם שם וסיסמה")').waitFor(); assert.deepEqual(await texts(B.locator('main li span.truncate')), ['יעל']);
+    // מסך הכניסה: כל השמות, בלי סיסמה
+    await signOut(A); await A.locator('main li >> nth=1').waitFor(); assert.deepEqual(await texts(A.locator('main li span.truncate')), ['יובל', 'יעל']);
+    await signOut(B); await B.locator('main li >> nth=1').waitFor(); assert.deepEqual(await texts(B.locator('main li span.truncate')), ['יובל', 'יעל']);
+    assert.equal(await A.locator('input[type=password]').count(), 0, 'no password anywhere');
     assert.equal(await B.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('verified_reading_tracker_db_v1')).length), 0, 'signing out removes the library from the device');
   });
   await step('a deletion on one phone reaches the other', async () => {
@@ -265,37 +246,23 @@ try {
     await login(A, 'יובל'); await syncBoth(); await B.click('nav >> text=ספרים שלי'); await A.click('nav >> text=ספרים שלי');
     await A.waitForSelector('text=הספרייה שלך מחכה לספר הראשון');
   });
-  await step('sign-in: the device remembers its user; wrong password; Google admin resets a password; Google link', async () => {
+  await step('sign-in by name: the device remembers its user; legal pages; consent to new terms', async () => {
     await A.reload(); await A.waitForSelector('nav >> text=ספרים שלי');   // נכנס ישר, בלי מסך המשתמשים
     await signOut(A); await A.reload();
     await A.waitForSelector('text=של מי הספרייה?');   // אחרי החלפה: לא נכנס לבד
-    await login(A, 'יובל', 'wrong'); await A.waitForSelector('text=הסיסמה לא נכונה');
-    await A.click('button:has-text("שכחתי סיסמה")'); await A.waitForSelector('text=לבקש מהמנהל');
-    await A.click('form button:has-text("ביטול")');
-    // המנהל נכנס עם Google (חשבון חדש → משתמש חדש) ומאפס את הסיסמה של יובל
-    await A.evaluate(c => { window.__gcred = c; }, await gToken({ sub: 'g-admin', email: 'admin@example.com', name: 'מנהלת' }));
-    await A.click('.gis-mock'); await A.waitForSelector('text=ברוכים הבאים!');
-    await A.click('button:has-text("משתמש חדש")'); assert.equal(await A.inputValue('#new-profile'), 'מנהלת');
-    await A.check('#consent'); await A.click('form button[type=submit]'); await A.click('button:has-text("דילוג על ההיכרות")');
-    await A.click('nav >> text=הגדרות'); await group(A, 'ניהול משתמשים');
-    await A.locator('li:has-text("יובל")').locator('button:has-text("איפוס סיסמה")').click();
-    await A.fill('#admin-reset-pass', 'abcd'); await A.click('form:has(#admin-reset-pass) button[type=submit]'); await A.waitForSelector('text=הסיסמה אופסה');
-    await signOut(A); await login(A, 'יובל', 'abcd'); await A.waitForSelector('nav >> text=ספרים שלי');
-    await A.click('nav >> text=הגדרות');
-    assert.equal(await A.locator('[data-group="ניהול משתמשים"]').count(), 0, 'admin panel only for the admin');
-    // מחזירים את הסיסמה, ומקשרים את יובל ל-Google
-    await group(A, 'החשבון שלי');
-    await A.fill('#change-pass', '1234'); await A.click('button:has-text("שמירת הסיסמה")'); await A.waitForSelector('text=הסיסמה נשמרה');
-    await A.evaluate(c => { window.__gcred = c; }, await gToken({ sub: 'g-yuval', email: 'yuval@example.com', name: 'Yuval' }));
-    await A.click('.gis-mock'); await A.waitForSelector('text=yuval@example.com');
-    await signOut(A); await A.click('.gis-mock'); await A.waitForSelector('nav >> text=ספרים שלי');
-    assert.equal(await A.evaluate(() => JSON.parse(localStorage.getItem('vrt-session')).name), 'יובל', 'Google signs straight into the linked user');
+    assert.equal(await A.locator('a.skip-link').count(), 0);
+    await login(A, 'יובל'); await A.waitForSelector('nav >> text=ספרים שלי');
+    assert.equal(await A.evaluate(() => JSON.parse(localStorage.getItem('vrt-session')).name), 'יובל');
     assert.equal(await A.locator('a.skip-link').count(), 1, 'skip to main content');
+    await A.click('nav >> text=הגדרות'); await group(A, 'החשבון שלי');
+    assert.equal(await A.locator('#change-pass').count(), 0, 'no password settings');
+    assert.equal(await A.locator('[data-group="ניהול משתמשים"]').count(), 0, 'no admin panel');
     // תנאים חדשים: משתמש קיים מתבקש להסכים מחדש, וההסכמה נשמרת בשרת
     const pidY = await A.evaluate(() => JSON.parse(localStorage.getItem('vrt-session')).pid);
     kv.set('acct:' + pidY, JSON.stringify({ ...JSON.parse(kv.get('acct:' + pidY)), consent: { v: 'old', at: 1 } }));
     await signOut(A);
     await A.click('button:has-text("הצהרת נגישות")'); await A.waitForSelector('[role=dialog] >> text=ת"י 5568'); await A.keyboard.press('Escape');
+    await A.click('button:has-text("מדיניות פרטיות")'); await A.waitForSelector('[role=dialog] >> text=אין סיסמאות'); await A.keyboard.press('Escape');
     await login(A, 'יובל'); await A.waitForSelector('text=עדכנו את תנאי השימוש');
     await A.check('#consent'); await A.click('button:has-text("הסכמה והמשך")'); await A.waitForSelector('nav >> text=ספרים שלי');
     assert.notEqual(JSON.parse(kv.get('acct:' + pidY)).consent.v, 'old');
@@ -798,7 +765,7 @@ try {
   await step('first entry: pick known books → verified ones added, the rest queued', async () => {
     const C = await phone(browser, 'C');
     if (!(await C.locator('#new-profile').count())) await C.click('button:has-text("הוספת משתמש")');
-    await C.fill('#new-profile', 'דנה'); await C.fill('#new-pass', '1234'); await C.check('#consent'); await C.click('button:has-text("כניסה")');
+    await C.fill('#new-profile', 'דנה'); await C.check('#consent'); await C.click('button:has-text("כניסה")');
     // קודם בוחרים סוגות: בלי הומור
     await C.waitForSelector('text=אילו סוגות להציג?'); await shot(C, 'genres', false);
     await C.click('[role=group][aria-label="סוגות להצגה"] button:has-text("הומור")');
@@ -924,7 +891,7 @@ try {
     await E.waitForSelector('text=Whose library is this?');
     assert.deepEqual(await E.evaluate(() => [document.documentElement.dir, document.documentElement.lang, document.title]), ['ltr', 'en', 'What We Read']);
     if (!(await E.locator('#new-profile').count())) await E.click('button:has-text("Add a user")');
-    await E.fill('#new-profile', 'Dana'); await E.fill('#new-pass', '1234'); await E.check('#consent'); await E.click('button:has-text("Enter")');
+    await E.fill('#new-profile', 'Dana'); await E.check('#consent'); await E.click('button:has-text("Enter")');
     // רשימת ההיכרות: אותם ספרים, בשמות באנגלית
     const dlg = E.locator('[role=dialog]');
     await dlg.locator('text=Which genres should we show?').waitFor();

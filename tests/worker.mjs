@@ -265,7 +265,7 @@ console.log('worker page verification: ok');
   assert.ok(JSON.parse(kv.get('digest-meta:new')).next >= now + 1000 + 86400000 - 5);
   console.log('worker biweekly digest: ok');
 }
-// ---------- אבטחה: כניסה, מה כל משתמש רואה, ומה מותר לו לכתוב ----------
+// ---------- כניסה בבחירת שם, מה כל משתמש רואה, ומה מותר לו לכתוב ----------
 {
   const kv = new Map();
   const LIB = {
@@ -273,27 +273,15 @@ console.log('worker page verification: ok');
     put: async (k, v) => { kv.set(k, typeof v === 'string' ? v : JSON.stringify(v)); },
     delete: async (k) => { kv.delete(k); }
   };
-  // מפתח RSA לבדיקה במקום המפתחות של Google
-  const pair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify']);
-  const pub = await crypto.subtle.exportKey('jwk', pair.publicKey);
-  const env = { LIBRARY: LIB, GOOGLE_CLIENT_ID: 'cid.apps.googleusercontent.com', __googleKeys: [{ ...pub, kid: 'k1' }], ADMIN_EMAIL_SHA256: await (await import('../worker/worker.js')).sha256hex('admin@example.com') };
-  const b64u = (x) => Buffer.from(typeof x === 'string' ? x : JSON.stringify(x)).toString('base64url');
-  const gToken = async (claims, aud = env.GOOGLE_CLIENT_ID) => {
-    const head = b64u({ alg: 'RS256', kid: 'k1', typ: 'JWT' });
-    const body = b64u({ iss: 'https://accounts.google.com', aud, exp: Math.floor(Date.now() / 1000) + 600, email_verified: true, ...claims });
-    const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', pair.privateKey, new TextEncoder().encode(head + '.' + body));
-    return `${head}.${body}.${Buffer.from(sig).toString('base64url')}`;
-  };
+  const env = { LIBRARY: LIB };
   const call = async (path, { method = 'GET', body, token } = {}) => {
     const r = await worker.fetch(new Request('https://w' + path, { method, headers: { 'content-type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined }), env, { waitUntil() {} });
     return { status: r.status, json: await r.json().catch(() => null) };
   };
-  // מצב התחלתי: A (סיסמה ישנה בפרופיל), B חבר של A (מסתיר ספר אחד ואת ההערות), C לא חבר
-  const { sha256hex } = await import('../worker/worker.js');
-  const legacy = await sha256hex('vrt|s1|1234');
+  // מצב התחלתי: A (עם גיבוב סיסמה ישן בפרופיל), B חבר של A (מסתיר ספר אחד ואת ההערות), C לא חבר
   const book = (id, title, extra = {}) => ({ id, key: 'k' + id, title, authors: ['x'], status: 'read', rating: 5, note: 'הערה פרטית', tags: [], ...extra });
   kv.set('state', JSON.stringify({ rev: 1, data: {
-    profiles: [{ id: 'A', name: 'אבי', color: 0, passHash: legacy, passSalt: 's1', updatedAt: 1 }, { id: 'B', name: 'בת', color: 1, updatedAt: 1 }, { id: 'C', name: 'כרמל', color: 2, updatedAt: 1 }],
+    profiles: [{ id: 'A', name: 'אבי', color: 0, passHash: 'h'.repeat(64), passSalt: 's1', updatedAt: 1 }, { id: 'B', name: 'בת', color: 1, updatedAt: 1 }, { id: 'C', name: 'כרמל', color: 2, updatedAt: 1 }],
     deleted: {},
     dbs: {
       A: { books: [book('a1', 'ספר של A')], settings: {}, litProfile: { text: 'פרופיל' } },
@@ -306,33 +294,37 @@ console.log('worker page verification: ok');
       { id: 'r1', type: 'rec', from: 'C', to: 'B', status: 'new', at: 1 }
     ] }
   } }));
-  // 1. בלי כניסה: הכול חסום, חוץ מ-/ping. מסך הכניסה לא מקבל את רשימת המשתמשים, רק את אלה שהמכשיר מכיר (בלי גיבובים)
+  // 1. בלי אסימון: הכול חסום, חוץ מ-/ping ורשימת השמות למסך הכניסה (בלי גיבובים ישנים)
   for (const p of ['/sync', '/bookinfo?title=x', '/digest', '/gbooks?u=x']) assert.equal((await call(p)).status, 401, p);
   assert.equal((await call('/v1/messages', { method: 'POST', body: {} })).status, 401);
   assert.equal((await call('/ping')).status, 200);
-  assert.deepEqual((await call('/auth/profiles')).json.profiles, []);
-  const list = (await call('/auth/profiles?ids=A,B,zz')).json;
-  assert.deepEqual(list.profiles.map(p => p.id), ['A', 'B']);
-  assert.ok(!JSON.stringify(list).includes(legacy) && list.profiles[0].hasPass && !list.profiles[1].hasPass);
-  // 2. סיסמה: שגויה נדחית; נכונה (הישנה) נותנת כניסה ומשודרגת ל-PBKDF2, והגיבוב הישן לא נשלח לאף אחד
-  assert.equal((await call('/auth/password', { method: 'POST', body: { pid: 'A', password: 'nope' } })).status, 401);
-  const a = (await call('/auth/password', { method: 'POST', body: { pid: 'A', password: '1234' } })).json;
-  assert.ok(/^[0-9a-f]{64}$/.test(a.token) && a.pid === 'A');
-  assert.equal(JSON.parse(kv.get('acct:A')).pass.alg, 'pbkdf2');
-  // כניסה לפי שם; שם שלא קיים נראה כמו סיסמה שגויה; משתמש בלי סיסמה לא נתפס (רק המנהל קובע לו)
-  assert.ok((await call('/auth/password', { method: 'POST', body: { name: ' אבי ', password: '1234' } })).json.token);
-  assert.equal((await call('/auth/password', { method: 'POST', body: { name: 'אין כזה', password: '1234' } })).json.error, 'wrong');
-  assert.equal((await call('/auth/password', { method: 'POST', body: { pid: 'C', password: 'grab' } })).status, 403);
-  assert.ok(!kv.has('acct:C'));
-  // 3. מה A רואה: הכול שלו; מ-B (חבר) רק ספרים משותפים, בלי המוסתר ובלי הערות, בלי פרופיל/משוב; מ-C (לא חבר) רק האהוב, בלי הערה
+  const list = (await call('/auth/profiles')).json;
+  assert.deepEqual(list.profiles.map(p => p.id), ['A', 'B', 'C']);
+  assert.ok(!JSON.stringify(list).includes('passHash') && !JSON.stringify(list).includes('hhhh'));
+  kv.set('acct:C', JSON.stringify({ pass: { hash: 'z' } }));
+  // פרטי כניסה ישנים (מגרסאות 45–46) נמחקים: בכניסה, ובניקוי החד-פעמי שרץ מה-Cron
+  kv.set('acct:A', JSON.stringify({ pass: { hash: 'x' }, google: { sub: 'g1', email: 'a@example.com' }, consent: { v: '1' } }));
+  kv.set('idmap:google:g1', 'A');
+  kv.set('acct:B', JSON.stringify({ pass: { hash: 'y' } }));
+  const { cleanupOldCredentials } = await import('../worker/worker.js');
+  await cleanupOldCredentials(env);
+  assert.deepEqual(JSON.parse(kv.get('acct:B')), {});
+  assert.deepEqual(JSON.parse(kv.get('acct:A')), { consent: { v: '1' } });
+  assert.ok(!kv.has('idmap:google:g1') && !kv.get('state').includes('passHash'));
+  // 2. כניסה בבחירת שם: אין סיסמה. מזהה שלא קיים נדחה
+  assert.equal((await call('/auth/enter', { method: 'POST', body: { pid: 'nope' } })).status, 400);
+  const a = (await call('/auth/enter', { method: 'POST', body: { pid: 'A' } })).json;
+  assert.ok(/^[0-9a-f]{64}$/.test(a.token) && a.pid === 'A' && a.name === 'אבי');
+  for (const old of ['/auth/password', '/auth/google', '/auth/admin']) assert.equal((await call(old, { method: 'POST', token: a.token, body: {} })).status, 404, old);
+  // 3. מה A רואה: הכול שלו; מ-B (חבר) רק ספרים משותפים, בלי המוסתר ובלי הערות, בלי פרופיל/משוב; C (לא חבר) לא נשלח בכלל
   const v = (await call('/sync', { token: a.token })).json;
-  assert.ok(!JSON.stringify(v).includes(legacy) && !JSON.stringify(v).includes('passSalt'));
+  assert.ok(!JSON.stringify(v).includes('passHash') && !JSON.stringify(v).includes('passSalt'));
   assert.equal(v.data.dbs.A.litProfile.text, 'פרופיל');
   assert.deepEqual(v.data.dbs.B.books.map(b => b.title), ['גלוי', 'אהוב']);
   assert.equal(v.data.dbs.B.books[0].note, '');
   assert.ok(!JSON.stringify(v.data.dbs.B).includes('סוד'));
-  // C (לא חבר): הספרייה שלו לא נשלחת בכלל. "אהובים בקהילה" מגיע כסיכום אנונימי (שניים לפחות אהבו), בלי מזהים והערות
   assert.equal(v.data.dbs.C, undefined);
+  // "אהובים בקהילה": סיכום אנונימי (שניים לפחות אהבו), בלי מזהים והערות
   assert.deepEqual(v.data.community.map(x => [x.book.title, x.ratings]), [['אהוב', [5, 5]]]);
   assert.ok(!/הערה פרטית|"c1"|"b3"/.test(JSON.stringify(v.data.community)));
   assert.deepEqual(v.data.social.items.map(x => x.id), ['f1']);   // רשומות של אחרים לא נשלחות
@@ -351,48 +343,29 @@ console.log('worker page verification: ok');
   assert.ok(!st.social.items.some(x => x.id === 'x1'));
   assert.equal(st.social.items.find(x => x.id === 'f2').status, 'accepted');
   assert.equal((await call('/sync', { method: 'PUT', token: a.token, body: { baseRev: 0, data: forged } })).status, 409);
-  // 5. Google: חשבון חדש מקושר ל-B (ל-B אין עדיין סיסמה); אחר כך נכנס ישר. aud אחר נדחה
-  const gB = await gToken({ sub: 'g-b', email: 'bat@example.com', name: 'Bat' });
-  const l = (await call('/auth/google', { method: 'POST', body: { credential: gB } })).json;
-  assert.ok(l.link && l.email === 'bat@example.com');
-  // ל-B אין סיסמה: אי אפשר לחבר אליו חשבון Google (אחרת כל אחד יכול היה לתפוס אותו)
-  assert.equal((await call('/auth/link', { method: 'POST', body: { link: l.link, pid: 'B' } })).json.error, 'no_password');
-  assert.equal((await call('/auth/google', { method: 'POST', body: { credential: await gToken({ sub: 'g-b' }, 'other-client') } })).status, 401);
-  // קישור Google ל-A דורש את הסיסמה של A
-  const l2 = (await call('/auth/google', { method: 'POST', body: { credential: await gToken({ sub: 'g-x', email: 'x@example.com' }) } })).json;
-  assert.equal((await call('/auth/link', { method: 'POST', body: { link: l2.link, pid: 'A', password: 'bad' } })).status, 401);
-  // 6. מנהל: רק חשבון ה-Google של המנהל; מאפס סיסמה למשתמש
-  assert.equal((await call('/auth/admin', { method: 'POST', token: a.token, body: { action: 'list' } })).status, 403);
-  const adm = (await call('/auth/google', { method: 'POST', body: { credential: await gToken({ sub: 'g-admin', email: 'admin@example.com' }) } })).json;
-  const ad = (await call('/auth/link', { method: 'POST', body: { link: adm.link, pid: 'A', password: '1234' } })).json;
-  assert.equal(ad.admin, true);
-  assert.equal((await call('/auth/admin', { method: 'POST', token: ad.token, body: { action: 'list' } })).json.profiles.length, 3);
-  assert.equal((await call('/auth/admin', { method: 'POST', token: ad.token, body: { action: 'reset', pid: 'C', password: 'new-pass' } })).status, 200);
-  const cTok = (await call('/auth/password', { method: 'POST', body: { pid: 'C', password: 'new-pass' } })).json.token;
-  assert.ok(cTok);
-  // אחרי שהמנהל קבע ל-B סיסמה: Google מתחבר אליו עם הסיסמה, ונכנס ישר בפעם הבאה. האיפוס לא נוגע בכניסות של אחרים
-  assert.equal((await call('/auth/admin', { method: 'POST', token: ad.token, body: { action: 'reset', pid: 'B', password: 'bpass' } })).status, 200);
-  assert.equal((await call('/auth/link', { method: 'POST', body: { link: l.link, pid: 'B', password: 'bpass' } })).json.pid, 'B');
-  assert.equal((await call('/auth/google', { method: 'POST', body: { credential: gB } })).json.pid, 'B');
-  assert.equal((await call('/sync', { token: cTok })).status, 200);
-  // קישור מההגדרות לחשבון Google שכבר שייך למשתמש אחר: נדחה, ולא נותן כניסה אליו
-  assert.equal((await call('/auth/google', { method: 'POST', token: cTok, body: { credential: gB } })).status, 409);
-  assert.equal((await call('/auth/me', { token: cTok })).json.google, '');
-  // 7. הגבלת ניסיונות, ויציאה מבטלת את מפתח הכניסה
-  for (let i = 0; i < 8; i++) await call('/auth/password', { method: 'POST', body: { pid: 'C', password: 'x' + i } });
-  assert.equal((await call('/auth/password', { method: 'POST', body: { pid: 'C', password: 'new-pass' } })).status, 429);
-  await call('/auth/logout', { method: 'POST', token: a.token });
-  assert.equal((await call('/sync', { token: a.token })).status, 401);
-  // מחיקה עצמית: הספרייה ופרטי הכניסה נמחקים
-  const before = (await call('/sync', { token: cTok })).json;
-  assert.equal((await call('/sync', { method: 'PUT', token: cTok, body: { baseRev: before.rev, data: { deleted: { C: Date.now() } } } })).status, 200);
-  assert.equal((await call('/sync', { token: cTok })).status, 401);
-  const stC = JSON.parse(kv.get('state')).data;
-  assert.ok(stC.deleted.C && !stC.dbs.C && !kv.has('acct:C') && !stC.profiles.some(p => p.name === 'כרמל'));
-  // הרשמה דורשת הסכמה לתנאים, וההסכמה נשמרת עם הגרסה
-  assert.equal((await call('/auth/register', { method: 'POST', body: { name: 'דן', password: '1234' } })).json.error, 'consent');
-  const dn = (await call('/auth/register', { method: 'POST', body: { name: 'דן', password: '1234', consent: '1' } })).json;
+  // 5. הסכמה לתנאים: הרשמה בלי הסכמה נדחית; ההסכמה נשמרת עם הגרסה; אפשר להסכים לגרסה חדשה
+  assert.equal((await call('/auth/register', { method: 'POST', body: { name: 'דן' } })).json.error, 'consent');
+  assert.equal((await call('/auth/register', { method: 'POST', body: { name: ' בת ', consent: '1' } })).json.error, 'name_taken');
+  const dn = (await call('/auth/register', { method: 'POST', body: { name: 'דן', consent: '1' } })).json;
   assert.equal(dn.consent, '1');
   assert.equal(JSON.parse(kv.get('acct:' + dn.pid)).consent.v, '1');
-  console.log('worker auth and per-user data: ok');
+  assert.equal((await call('/auth/consent', { method: 'POST', token: dn.token, body: { v: '2' } })).status, 200);
+  assert.equal((await call('/auth/me', { token: dn.token })).json.consent, '2');
+  // 6. הגבלת קצב ליצירת משתמשים מאותה כתובת
+  for (let i = 0; i < 3; i++) await call('/auth/register', { method: 'POST', body: { name: 'משתמש ' + i, consent: '1' } });
+  assert.equal((await call('/auth/register', { method: 'POST', body: { name: 'עוד אחד', consent: '1' } })).status, 429);
+  // 7. יציאה מבטלת את האסימון; מחיקה עצמית מוחקת הכול ומנתקת את כל המכשירים
+  await call('/auth/logout', { method: 'POST', token: a.token });
+  assert.equal((await call('/sync', { token: a.token })).status, 401);
+  const c1 = (await call('/auth/enter', { method: 'POST', body: { pid: 'C' } })).json.token;
+  assert.ok(!JSON.parse(kv.get('acct:C')).pass, 'old password hash dropped on entry');
+  const c2 = (await call('/auth/enter', { method: 'POST', body: { pid: 'C' } })).json.token;
+  const before = (await call('/sync', { token: c1 })).json;
+  assert.equal((await call('/sync', { method: 'PUT', token: c1, body: { baseRev: before.rev, data: { deleted: { C: Date.now() } } } })).status, 200);
+  assert.equal((await call('/sync', { token: c1 })).status, 401);
+  assert.equal((await call('/sync', { token: c2 })).status, 401);
+  const stC = JSON.parse(kv.get('state')).data;
+  assert.ok(stC.deleted.C && !stC.dbs.C && !stC.profiles.some(p => p.name === 'כרמל'));
+  assert.ok(!(await call('/auth/profiles')).json.profiles.some(p => p.id === 'C'));
+  console.log('worker sign-in by name and per-user data: ok');
 }
