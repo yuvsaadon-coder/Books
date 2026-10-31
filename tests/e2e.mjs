@@ -196,7 +196,13 @@ function googleMock(route, u) {
 // ההגדרות מחולקות לקבוצות מקופלות; פותחים את הקבוצה לפני שעובדים בתוכה
 const group = async (p, title) => { const b = p.locator(`[data-group="${title}"] > h2 > button[aria-expanded="false"]`); if (await b.count()) await b.click(); };
 // כניסה למשתמש קיים ממסך "של מי הספרייה?": בוחרים את השם, בלי סיסמה
-const login = async (p, name) => { await p.click(`main li:has-text("${name}")`); };
+const login = async (p, name, pw = '1234') => { await p.click(`main li:has-text("${name}")`); await p.fill('#profile-pass', pw); await p.click('form button[type=submit]'); };
+// משתמש חדש: שם, סיסמה, שאלת ביטחון ותשובה, והסכמה לתנאים
+const signUp = async (p, name, submit = 'כניסה') => {
+  await p.fill('#new-profile', name); await p.fill('#new-pass', '1234');
+  await p.selectOption('#sec-q', '0'); await p.fill('#sec-a', 'מיצי');
+  await p.check('#consent'); await p.click(`form button:has-text("${submit}")`);
+};
 // יציאה: מחכים למסך הכניסה (היציאה מסנכרנת קודם, ורק אז מנתקת)
 const signOut = async (p) => { await p.click('[aria-label="החלפת משתמש"]'); await p.waitForSelector('text=של מי הספרייה?'); };
 const step = async (name, fn) => { process.stdout.write(`• ${name} … `); await fn(); console.log('ok'); };
@@ -218,12 +224,12 @@ try {
 
   await step('two phones create users and books, auto-connected, no setup', async () => {
     // משתמש חדש: רשימת הספרים המוכרים נפתחת בחלון מלא; מדלגים עליה
-    await A.fill('#new-profile', 'יובל');
+    await A.fill('#new-profile', 'יובל'); await A.fill('#new-pass', '1234'); await A.selectOption('#sec-q', '0'); await A.fill('#sec-a', 'מיצי');
     assert.ok(await A.locator('form button[type=submit]').isDisabled(), 'sign-up needs consent to the terms');
     await A.check('#consent'); await A.click('button:has-text("כניסה")');
     await A.locator('[role=dialog][aria-label="היכרות עם הטעם שלך"]').waitFor(); await A.waitForTimeout(600); await shot(A, 'first-entry', false);
     await A.click('button:has-text("דילוג על ההיכרות")'); await addBook(A, 'מיכאל שלי');
-    await B.fill('#new-profile', 'יעל'); await B.check('#consent'); await B.click('button:has-text("כניסה")'); await B.click('button:has-text("דילוג על ההיכרות")'); await addBook(B, 'קפקא על החוף');
+    await signUp(B, 'יעל'); await B.click('button:has-text("דילוג על ההיכרות")'); await addBook(B, 'קפקא על החוף');
     await syncBoth();
     // פרטיות: הספרייה של יובל לא מגיעה בכלל לטלפון של יעל (הם לא חברים)
     const seen = await B.evaluate(() => { const me = JSON.parse(localStorage.getItem('vrt-session')).pid; return Object.keys(localStorage).filter(k => k.startsWith('verified_reading_tracker_db_v1__') && !k.endsWith('__' + me)).map(k => JSON.parse(localStorage.getItem(k)).books); });
@@ -235,7 +241,6 @@ try {
     // מסך הכניסה: כל השמות, בלי סיסמה
     await signOut(A); await A.locator('main li >> nth=1').waitFor(); assert.deepEqual(await texts(A.locator('main li span.truncate')), ['יובל', 'יעל']);
     await signOut(B); await B.locator('main li >> nth=1').waitFor(); assert.deepEqual(await texts(B.locator('main li span.truncate')), ['יובל', 'יעל']);
-    assert.equal(await A.locator('input[type=password]').count(), 0, 'no password anywhere');
     assert.equal(await B.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('verified_reading_tracker_db_v1')).length), 0, 'signing out removes the library from the device');
   });
   await step('a deletion on one phone reaches the other', async () => {
@@ -246,26 +251,38 @@ try {
     await login(A, 'יובל'); await syncBoth(); await B.click('nav >> text=ספרים שלי'); await A.click('nav >> text=ספרים שלי');
     await A.waitForSelector('text=הספרייה שלך מחכה לספר הראשון');
   });
-  await step('sign-in by name: the device remembers its user; legal pages; consent to new terms', async () => {
+  await step('sign-in: password, forgot password with the security question, old user without a password, legal pages, new terms', async () => {
     await A.reload(); await A.waitForSelector('nav >> text=ספרים שלי');   // נכנס ישר, בלי מסך המשתמשים
     await signOut(A); await A.reload();
     await A.waitForSelector('text=של מי הספרייה?');   // אחרי החלפה: לא נכנס לבד
     assert.equal(await A.locator('a.skip-link').count(), 0);
-    await login(A, 'יובל'); await A.waitForSelector('nav >> text=ספרים שלי');
+    await login(A, 'יובל', 'wrong'); await A.waitForSelector('text=הסיסמה לא נכונה');
+    // שכחתי סיסמה: עונים על השאלה (בכתיב אחר) ובוחרים סיסמה חדשה
+    await A.click('button:has-text("שכחתי סיסמה")'); await A.waitForSelector('label:has-text("חיית המחמד")');
+    await A.fill('#sec-answer', 'שגוי'); await A.fill('#profile-pass', 'abcd'); await A.click('form button[type=submit]'); await A.waitForSelector('text=התשובה לא נכונה');
+    await A.fill('#sec-answer', ' מיצי '); await A.click('form button[type=submit]'); await A.waitForSelector('nav >> text=ספרים שלי');
     assert.equal(await A.evaluate(() => JSON.parse(localStorage.getItem('vrt-session')).name), 'יובל');
     assert.equal(await A.locator('a.skip-link').count(), 1, 'skip to main content');
+    // מחזירים את הסיסמה מההגדרות, ומחליפים שאלה
     await A.click('nav >> text=הגדרות'); await group(A, 'החשבון שלי');
-    assert.equal(await A.locator('#change-pass').count(), 0, 'no password settings');
-    assert.equal(await A.locator('[data-group="ניהול משתמשים"]').count(), 0, 'no admin panel');
-    // תנאים חדשים: משתמש קיים מתבקש להסכים מחדש, וההסכמה נשמרת בשרת
+    await A.fill('#change-pass', '1234'); await A.click('button:has-text("שמירת הסיסמה")'); await A.waitForSelector('text=הסיסמה נשמרה');
+    await A.selectOption('#change-sec-q', '3'); await A.fill('#change-sec-a', 'הנסיך הקטן'); await A.click('button:has-text("שמירת שאלת הביטחון")'); await A.waitForSelector('text=שאלת הביטחון נשמרה');
+    // משתמש ותיק בלי סיסמה (מגרסה 47) קובע סיסמה ושאלה בכניסה
     const pidY = await A.evaluate(() => JSON.parse(localStorage.getItem('vrt-session')).pid);
+    const pidB = Object.keys(JSON.parse(kv.get('state')).data.dbs).find(p => p !== pidY);
+    const accB = JSON.parse(kv.get('acct:' + pidB)); kv.set('acct:' + pidB, JSON.stringify({ consent: accB.consent }));
+    await signOut(A); await A.click('main li:has-text("יעל")'); await A.waitForSelector('text=למשתמש הזה עוד אין סיסמה');
+    await A.fill('#profile-pass', '1234'); await A.selectOption('#sec-q', '1'); await A.fill('#sec-a', 'חיפה'); await A.click('form button[type=submit]');
+    await A.waitForSelector('nav >> text=ספרים שלי'); assert.ok(JSON.parse(kv.get('acct:' + pidB)).pw, 'password saved for the old user');
+    // תנאים חדשים: משתמש קיים מתבקש להסכים מחדש, וההסכמה נשמרת בשרת
     kv.set('acct:' + pidY, JSON.stringify({ ...JSON.parse(kv.get('acct:' + pidY)), consent: { v: 'old', at: 1 } }));
     await signOut(A);
     await A.click('button:has-text("הצהרת נגישות")'); await A.waitForSelector('[role=dialog] >> text=ת"י 5568'); await A.keyboard.press('Escape');
-    await A.click('button:has-text("מדיניות פרטיות")'); await A.waitForSelector('[role=dialog] >> text=אין סיסמאות'); await A.keyboard.press('Escape');
+    await A.click('button:has-text("מדיניות פרטיות")'); await A.waitForSelector('[role=dialog] >> text=שאלת ביטחון'); await A.keyboard.press('Escape');
     await login(A, 'יובל'); await A.waitForSelector('text=עדכנו את תנאי השימוש');
     await A.check('#consent'); await A.click('button:has-text("הסכמה והמשך")'); await A.waitForSelector('nav >> text=ספרים שלי');
     assert.notEqual(JSON.parse(kv.get('acct:' + pidY)).consent.v, 'old');
+    assert.ok(!JSON.stringify([...kv.values()]).includes('הנסיך הקטן'), 'answers are stored only as hashes');
     await A.click('nav >> text=ספרים שלי');
   });
   await step('Hebrew edition first; full synopsis on expand; translation kept', async () => {
@@ -765,7 +782,7 @@ try {
   await step('first entry: pick known books → verified ones added, the rest queued', async () => {
     const C = await phone(browser, 'C');
     if (!(await C.locator('#new-profile').count())) await C.click('button:has-text("הוספת משתמש")');
-    await C.fill('#new-profile', 'דנה'); await C.check('#consent'); await C.click('button:has-text("כניסה")');
+    await signUp(C, 'דנה');
     // קודם בוחרים סוגות: בלי הומור
     await C.waitForSelector('text=אילו סוגות להציג?'); await shot(C, 'genres', false);
     await C.click('[role=group][aria-label="סוגות להצגה"] button:has-text("הומור")');
@@ -891,7 +908,7 @@ try {
     await E.waitForSelector('text=Whose library is this?');
     assert.deepEqual(await E.evaluate(() => [document.documentElement.dir, document.documentElement.lang, document.title]), ['ltr', 'en', 'What We Read']);
     if (!(await E.locator('#new-profile').count())) await E.click('button:has-text("Add a user")');
-    await E.fill('#new-profile', 'Dana'); await E.check('#consent'); await E.click('button:has-text("Enter")');
+    await signUp(E, 'Dana', 'Enter');
     // רשימת ההיכרות: אותם ספרים, בשמות באנגלית
     const dlg = E.locator('[role=dialog]');
     await dlg.locator('text=Which genres should we show?').waitFor();

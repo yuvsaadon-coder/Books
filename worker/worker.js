@@ -953,11 +953,11 @@ async function handleDigest(req, env, cors, path, sess) {
 }
 
 // ---------- כניסה ואבטחה ----------
-// כל בקשה (חוץ מ-/ping, /auth/*, מפתח ההתראות והודעת ההתראה) דורשת מפתח כניסה (Bearer), שנוצר כשבוחרים שם במסך הכניסה (בלי סיסמה).
+// כל בקשה (חוץ מ-/ping, /auth/*, מפתח ההתראות והודעת ההתראה) דורשת מפתח כניסה (Bearer), שנוצר אחרי שם + סיסמה (או תשובה לשאלת הביטחון).
 // כל משתמש מקבל מהסנכרון רק את הספרייה שלו; מחברים – רק מה שהם בחרו לשתף; משאר המשתמשים – רק סיכום אנונימי ל"אהובים בקהילה".
 // ומה שנכתב לשרת: רק הספרייה של המשתמש עצמו, הפרופיל שלו, ורשומות חברות/המלצה שהוא צד בהן.
 const SESSION_TTL = 180 * 86400;
-// כניסה בלי סיסמה: בוחרים שם, והשרת נותן אסימון כניסה. האסימון מזהה מי כותב (כל מכשיר כותב רק לספרייה שלו), אבל לא מגן על הספרייה מפני מי שבוחר את אותו שם
+// כניסה: בוחרים שם ומקלידים סיסמה (פרטיות בסיסית בין המשתמשים), והשרת נותן אסימון כניסה. כל מכשיר כותב רק לספרייה של מי שנכנס בו
 const enc = new TextEncoder();
 const hex = (buf) => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
 export const sha256hex = async (s) => hex(await crypto.subtle.digest('SHA-256', enc.encode(s)));
@@ -994,7 +994,7 @@ async function revokeSessions(env, pid) {
 // מחיקת משתמש: ההסכמה, כל הכניסות, ההתראות וההצעות הדו-שבועיות
 async function eraseAccount(env, pid) {
   await revokeSessions(env, pid);
-  for (const k of ['acct:', 'push:', 'digest:', 'digest-meta:']) await env.LIBRARY.delete(k + pid);
+  for (const k of ['acct:', 'push:', 'digest:', 'digest-meta:', 'fail:']) await env.LIBRARY.delete(k + pid);
 }
 // הגבלת קצב ליצירת משתמשים: 8 ברבע שעה בכלל, או 4 מאותה כתובת
 async function tooManyNew(env, ip) {
@@ -1005,24 +1005,33 @@ async function noteNew(env, ip) {
   for (const k of ['newuser', 'newuser:' + ip]) { const n = parseInt((await env.LIBRARY.get(k)) || '0', 10); await env.LIBRARY.put(k, String(n + 1), { expirationTtl: 900 }); }
 }
 const acctOf = async (env, pid) => (await env.LIBRARY.get('acct:' + pid, 'json')) || {};
-// מגרסה 47 אין סיסמאות ואין Google: מוחקים מה שנשמר מהן קודם (גיבובי סיסמה, מייל ומזהה Google)
-async function dropOldCredentials(env, pid) {
-  const a = await acctOf(env, pid);
-  if (!a.pass && !a.google) return;
-  if (a.google && a.google.sub) await env.LIBRARY.delete('idmap:google:' + a.google.sub);
-  delete a.pass; delete a.google;
+// סיסמה ושאלת ביטחון (מגרסה 48): לתחושת פרטיות בין המשתמשים, לא אבטחה חזקה. נשמרות כגיבוב עם מלח (acct.pw, acct.sec)
+const SEC_QUESTIONS = 5;   // הטקסט של השאלות באפליקציה (SECURITY_QUESTIONS); בשרת רק המספר
+const PW_MIN = 4;
+const saltedHash = async (salt, v) => sha256hex(`vrt48|${salt}|${v}`);
+// תשובה לשאלת ביטחון: בלי רווחים, סימנים, ניקוד ואותיות גדולות, כדי ש"תל-אביב" ו"תל אביב" ייחשבו אותה תשובה
+export const normAnswer = (v) => String(v || '').toLowerCase().normalize('NFKD').replace(/[֑-ׇ]/g, '').replace(/[^\p{L}\p{N}]/gu, '');
+async function makeSecret(v) { const salt = randomHex(8); return { salt, hash: await saltedHash(salt, v) }; }
+const secretOk = async (sec, v) => !!sec && sec.hash === await saltedHash(sec.salt, v);
+async function saveAcct(env, pid, patch) {
+  const a = { ...(await acctOf(env, pid)), ...patch };
   await env.LIBRARY.put('acct:' + pid, JSON.stringify(a));
+  return a;
 }
-export async function cleanupOldCredentials(env) {
-  if (await env.LIBRARY.get('cleanup:credentials-v47')) return;
-  const cur = await loadState(env);
-  for (const p of ((cur.data && cur.data.profiles) || [])) await dropOldCredentials(env, p.id);
-  if (cur.data && (cur.data.profiles || []).some(p => p.passHash || p.passSalt)) {
-    const data = { ...cur.data, profiles: cur.data.profiles.map(({ passHash, passSalt, ...p }) => p) };
-    await saveState(env, cur, data);
-  }
-  await env.LIBRARY.put('cleanup:credentials-v47', '1');
+function checkNewCreds(b, needQuestion = true) {
+  if (String(b.password || '').length < PW_MIN) return 'short';
+  if (!needQuestion) return '';
+  const q = Number(b.q);
+  if (!Number.isInteger(q) || q < 0 || q >= SEC_QUESTIONS) return 'question';
+  if (normAnswer(b.answer).length < 2) return 'answer';
+  return '';
 }
+async function credsPatch(b) {
+  return { pw: await makeSecret(String(b.password)), sec: { q: Number(b.q), ...(await makeSecret(normAnswer(b.answer))) } };
+}
+// הגבלת ניסיונות שגויים (סיסמה או תשובה): 8 למשתמש ברבע שעה
+const tooManyFails = async (env, pid) => parseInt((await env.LIBRARY.get('fail:' + pid)) || '0', 10) >= 8;
+async function noteFail(env, pid) { const n = parseInt((await env.LIBRARY.get('fail:' + pid)) || '0', 10); await env.LIBRARY.put('fail:' + pid, String(n + 1), { expirationTtl: 900 }); }
 async function createProfile(env, name) {
   const cur = await loadState(env);
   const data = cur.data || emptyData();
@@ -1038,7 +1047,6 @@ async function createProfile(env, name) {
   return { id };
 }
 const sessionReply = async (env, pid, cors) => {
-  await dropOldCredentials(env, pid);
   const token = await newSession(env, pid);
   const cur = await loadState(env);
   const p = cur.data && (cur.data.profiles || []).find(x => x.id === pid);
@@ -1058,19 +1066,59 @@ async function handleAuth(req, env, cors, path) {
   const cur = await loadState(env);
   const data = cur.data || emptyData();
   const live = (data.profiles || []).filter(p => !(data.deleted || {})[p.id]);
-  // רשימת המשתמשים למסך הכניסה: שם וצבע בלבד
-  if (path === '/auth/profiles') return json({ profiles: live.map(publicProfile) }, 200, cors);
+  const findLive = () => live.find(x => x.id === String(b.pid || ''));
+  // רשימת המשתמשים למסך הכניסה: שם, צבע, ואם כבר יש לו סיסמה
+  if (path === '/auth/profiles') {
+    const out = [];
+    for (const p of live) out.push({ ...publicProfile(p), hasPass: !!(await acctOf(env, p.id)).pw });
+    return json({ profiles: out }, 200, cors);
+  }
   if (path === '/auth/enter' && req.method === 'POST') {
-    const p = live.find(x => x.id === String(b.pid || ''));
+    const p = findLive();
     if (!p) return json({ error: 'bad_request' }, 400, cors);
+    const a = await acctOf(env, p.id);
+    if (!a.pw) return json({ error: 'setup' }, 409, cors);   // משתמש ותיק בלי סיסמה: קובע סיסמה ושאלת ביטחון
+    if (await tooManyFails(env, p.id)) return json({ error: 'too_many' }, 429, cors);
+    if (!(await secretOk(a.pw, String(b.password || '')))) { await noteFail(env, p.id); return json({ error: 'wrong' }, 401, cors); }
+    return sessionReply(env, p.id, cors);
+  }
+  if (path === '/auth/setup' && req.method === 'POST') {
+    const p = findLive();
+    if (!p) return json({ error: 'bad_request' }, 400, cors);
+    if ((await acctOf(env, p.id)).pw) return json({ error: 'has_password' }, 409, cors);
+    const bad = checkNewCreds(b);
+    if (bad) return json({ error: bad }, 400, cors);
+    await saveAcct(env, p.id, await credsPatch(b));
+    return sessionReply(env, p.id, cors);
+  }
+  // שכחתי סיסמה: השאלה של המשתמש, ואז תשובה נכונה + סיסמה חדשה
+  if (path === '/auth/question' && req.method === 'POST') {
+    const p = findLive();
+    const a = p ? await acctOf(env, p.id) : {};
+    if (!p || !a.sec) return json({ error: 'no_question' }, 404, cors);
+    return json({ q: a.sec.q }, 200, cors);
+  }
+  if (path === '/auth/recover' && req.method === 'POST') {
+    const p = findLive();
+    const a = p ? await acctOf(env, p.id) : {};
+    if (!p || !a.sec) return json({ error: 'no_question' }, 404, cors);
+    if (await tooManyFails(env, p.id)) return json({ error: 'too_many' }, 429, cors);
+    if (!(await secretOk(a.sec, normAnswer(b.answer)))) { await noteFail(env, p.id); return json({ error: 'wrong_answer' }, 401, cors); }
+    const bad = checkNewCreds(b, false);
+    if (bad) return json({ error: bad }, 400, cors);
+    await saveAcct(env, p.id, { pw: await makeSecret(String(b.password)) });
+    await env.LIBRARY.delete('fail:' + p.id);
     return sessionReply(env, p.id, cors);
   }
   if (path === '/auth/register' && req.method === 'POST') {
     if (!b.consent) return json({ error: 'consent' }, 400, cors);
+    const bad = checkNewCreds(b);
+    if (bad) return json({ error: bad }, 400, cors);
     if (await tooManyNew(env, ip)) return json({ error: 'too_many' }, 429, cors);
     const r = await createProfile(env, b.name);
     if (r.error) return json(r, 400, cors);
     await noteNew(env, ip);
+    await saveAcct(env, r.id, await credsPatch(b));
     await recordConsent(env, r.id, b.consent);
     return sessionReply(env, r.id, cors);
   }
@@ -1083,7 +1131,19 @@ async function handleAuth(req, env, cors, path) {
   if (!s) return json({ error: 'auth' }, 401, cors);
   if (path === '/auth/me') {
     const a = await acctOf(env, s.pid);
-    return json({ pid: s.pid, consent: (a.consent && a.consent.v) || '' }, 200, cors);
+    return json({ pid: s.pid, consent: (a.consent && a.consent.v) || '', hasPass: !!a.pw, q: a.sec ? a.sec.q : null }, 200, cors);
+  }
+  if (path === '/auth/setpass' && req.method === 'POST') {
+    const bad = checkNewCreds(b, false);
+    if (bad) return json({ error: bad }, 400, cors);
+    await saveAcct(env, s.pid, { pw: await makeSecret(String(b.password)) });
+    return json({ ok: true }, 200, cors);
+  }
+  if (path === '/auth/setquestion' && req.method === 'POST') {
+    const bad = checkNewCreds({ ...b, password: 'xxxx' });
+    if (bad) return json({ error: bad }, 400, cors);
+    await saveAcct(env, s.pid, { sec: { q: Number(b.q), ...(await makeSecret(normAnswer(b.answer))) } });
+    return json({ ok: true }, 200, cors);
   }
   if (path === '/auth/consent' && req.method === 'POST') {
     if (!b.v) return json({ error: 'bad_request' }, 400, cors);
@@ -1208,13 +1268,13 @@ async function handleSync(req, env, cors, sess) {
 
 export default {
   // Cron (wrangler.jsonc → triggers): בודק כל שעה למי הגיע הזמן לקבל את ההצעות הדו-שבועיות
-  async scheduled(event, env, ctx) { ctx.waitUntil(cleanupOldCredentials(env).catch(() => {}).then(() => runDigests(env, ctx))); },
+  async scheduled(event, env, ctx) { ctx.waitUntil(runDigests(env, ctx)); },
   async fetch(req, env, ctx) {
     const cors = corsHeaders(req);
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
     const path = new URL(req.url).pathname;
     try {
-      if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY, gbooks: !!env.GOOGLE_BOOKS_KEY, nli: !!env.NLI_API_KEY, jobs: !!env.JOBS, auth: 3 }, 200, cors);
+      if (path === '/ping') return json({ ok: true, ai: !!env.ANTHROPIC_API_KEY, sync: !!env.LIBRARY, gbooks: !!env.GOOGLE_BOOKS_KEY, nli: !!env.NLI_API_KEY, jobs: !!env.JOBS, auth: 4 }, 200, cors);
       if (path.startsWith('/auth/')) return await handleAuth(req, env, cors, path);
       // מפתח ההתראות והודעת ההתראה (ה-Service Worker מבקש אותה בלי כניסה, לפי גיבוב של כתובת ההרשמה)
       if (path === '/push/key' || path === '/push/notice') return await handleDigest(req, env, cors, path, null);

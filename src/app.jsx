@@ -31,7 +31,7 @@ function setUiLang(lang) {
 const DEFAULT_LOCALE = IS_EN ? 'en-GB' : 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '47';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '48';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -972,7 +972,7 @@ function findInLibrary(c, books) {
 /* ============================================================
    ספרייה משפחתית: סנכרון בין מכשירים דרך השרת המשפחתי (Cloudflare)
    ============================================================ */
-// כתובת השרת (Cloudflare Worker). האפליקציה מתחברת אליו לבד; הנתונים נפתחים רק אחרי שבוחרים משתמש.
+// כתובת השרת (Cloudflare Worker). האפליקציה מתחברת אליו לבד; הנתונים נפתחים רק אחרי כניסה (שם וסיסמה).
 const CLOUD_URL = 'https://books.yuvsaadon.workers.dev';
 const cloudBase = (url) => url.trim().replace(/\/+$/, '');
 function loadCloud() {
@@ -999,7 +999,7 @@ async function discoverCloud() {
   setSyncStatus({ status: 'error', error: T('השרת לא נמצא. שלחו ל-Claude Code את כתובת ה-Worker מ-Cloudflare.') });
   return false;
 }
-/* ---------- כניסה: אסימון כניסה מהשרת (אחרי בחירת שם), נשלח בכל בקשה לשרת ---------- */
+/* ---------- כניסה: אסימון כניסה מהשרת (אחרי שם וסיסמה), נשלח בכל בקשה לשרת ---------- */
 const SESSION_KEY = 'vrt-session';
 function loadSession() { try { const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); return s && s.token && s.pid ? s : null; } catch (e) { return null; } }
 function saveSession(s) {
@@ -1358,7 +1358,7 @@ const PLURAL_FORMS = {
   'מוזמנים': ['מוזמן', 'מוזמנת'], 'ודאו': ['ודא', 'ודאי'], 'העתיקו': ['העתק', 'העתיקי'], 'תרצו': ['תרצה', 'תרצי'], 'שמרו': ['שמור', 'שמרי'], 'ייבאו': ['ייבא', 'ייבאי'], 'בחרתם': ['בחרת', 'בחרת'],
   'סיימתם': ['סיימת', 'סיימת'], 'דירגתם': ['דירגת', 'דירגת'], 'הייתם': ['היית', 'היית'], 'תגלו': ['תגלה', 'תגלי'], 'קראו': ['קרא', 'קראי'],
   'מחקו': ['מחק', 'מחקי'], 'הפעילו': ['הפעל', 'הפעילי'], 'אפשרו': ['אפשר', 'אפשרי'], 'בטלו': ['בטל', 'בטלי'], 'אתכם': ['אותך', 'אותך'], 'סימנתם': ['סימנת', 'סימנת'],
-  'התחברו': ['התחבר', 'התחברי'], 'קישרתם': ['קישרת', 'קישרת'], 'קבעו': ['קבע', 'קבעי'], 'ברוכים': ['ברוך', 'ברוכה'], 'הבאים': ['הבא', 'הבאה']
+  'התחברו': ['התחבר', 'התחברי'], 'קישרתם': ['קישרת', 'קישרת'], 'קבעו': ['קבע', 'קבעי'], 'ברוכים': ['ברוך', 'ברוכה'], 'הבאים': ['הבא', 'הבאה'], 'בקשו': ['בקש', 'בקשי']
 };
 // מילים שכתובות בזכר יחיד (למשל דוגמאות בשדות טקסט): בלשון נקבה מחליפים
 const MASC_FORMS = { 'אוהב': 'אוהבת', 'מתחבר': 'מתחברת', 'מחפש': 'מחפשת', 'תקרא': 'תקראי', 'שאתה': 'שאת', 'אתה': 'את', 'קורא': 'קוראת', 'מוכן': 'מוכנה', 'תאהב': 'תאהבי', 'קורא/ת': 'קוראת', 'ממליץ': 'ממליצה', 'ממליץ…': 'ממליצה…' };
@@ -5415,6 +5415,7 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
             className="flex-1 min-w-0 min-h-[48px] px-3 rounded-xl border border-line bg-bg text-[16px]" />
           <Btn variant="soft" type="submit" disabled={!nameDraft.trim() || nameDraft.trim() === profile.name}>שינוי שם</Btn>
         </form>
+        <AccountSecurity notify={notify} />
         <Btn variant="danger" onClick={() => { if (!confirmProfileDel) { setConfirmProfileDel(true); return; } onDeleteProfile(); }}>
           {confirmProfileDel ? T(`לחצו שוב: מחיקת "${profile.name}" וכל הספרים שלו`) : 'מחיקת המשתמש'}
         </Btn>
@@ -6234,8 +6235,9 @@ const GUIDE = [
     [L('איך מתחילים?'), L('בוחרים שם. בכניסה הראשונה בוחרים אילו סוגות להציג (למשל בלי ספרי ילדים), ואז נפתחת רשימה של ספרים מוכרים: החלקה ימינה = קראתי (ואז בוחרים דירוג), שמאלה = לא קראתי, והסימנייה = רוצה לקרוא. אפשר לדלג ולחזור אליה מהכרטיס שבראש "הספרים שלי".')],
     [L('איך מתקינים את האפליקציה על מסך הבית?'), L('באייפון: פותחים ב-Safari, לוחצים על כפתור השיתוף ובוחרים "הוספה למסך הבית". באנדרואיד: בכרום, בתפריט ⋮ בוחרים "התקנת האפליקציה", או לוחצים על ההודעה שמופיעה באפליקציה.')],
     [L('איך חוזרים לרשימת הספרים המוכרים?'), L('בהגדרות ← "המלצות" ← "רשימת 400 הספרים המוכרים": "המשך מאיפה שעצרתי" או "מההתחלה". יש גם קישור בתחתית לשונית "הוספת ספר". ספרים שכבר בספרייה לא מוצגים שוב.')],
-    [L('איך נכנסים?'), L('בוחרים את השם שלכם ממסך "של מי הספרייה?", או "הוספת משתמש" ובוחרים שם. אין סיסמה. המכשיר זוכר מי נכנס ממנו; "החלפת משתמש" מנתקת ומוחקת את הספרייה מהמכשיר (היא נשמרת בשרת).')],
-    [L('הספרייה שלי מוגנת?'), L('אין סיסמאות, ולכן כל מי שפותח את האפליקציה יכול לבחור כל שם ולהיכנס. מה שכן: כל מכשיר יכול לשנות רק את הספרייה של מי שנבחר בו, חברים רואים רק את מה שבחרתם לשתף (בלי ספרים מוסתרים), ו"אהובים בקהילה" הוא סיכום אנונימי, בלי שמות ובלי הערות.')],
+    [L('איך נכנסים?'), L('בוחרים את השם שלכם ממסך "של מי הספרייה?" ומקלידים סיסמה. משתמש חדש: "הוספת משתמש", שם, סיסמה ושאלת ביטחון. המכשיר זוכר מי נכנס ממנו; "החלפת משתמש" מנתקת ומוחקת את הספרייה מהמכשיר (היא נשמרת בשרת). משנים סיסמה ושאלת ביטחון בהגדרות ← "החשבון שלי".')],
+    [L('שכחתי סיסמה. מה עושים?'), L('במסך הכניסה בוחרים את השם, לוחצים "שכחתי סיסמה", עונים על שאלת הביטחון ובוחרים סיסמה חדשה. התשובה לא רגישה לרווחים, למקפים ולאותיות גדולות.')],
+    [L('הספרייה שלי מוגנת?'), L('הסיסמה נועדה לפרטיות בסיסית בין המשתמשים, לא להגנה חזקה: מי שיודע את התשובה לשאלת הביטחון יכול לאפס אותה. מעבר לזה, כל מכשיר יכול לשנות רק את הספרייה של מי שנכנס בו, חברים רואים רק את מה שבחרתם לשתף (בלי ספרים מוסתרים), ו"אהובים בקהילה" הוא סיכום אנונימי, בלי שמות ובלי הערות.')],
     [L('איפה מדיניות הפרטיות, תנאי השימוש והצהרת הנגישות?'), L('בהגדרות ← "מידע משפטי ונגישות", וגם בתחתית מסך הכניסה. שם כתוב מה נשמר, איפה, מי רואה את המידע, ואיך מעיינים בו, מתקנים או מוחקים אותו.')],
     [L('כמה משתמשים יכולים להשתמש בה?'), L('כל אחד במשפחה מקבל ספרייה, דירוגים והמלצות משלו. מחליפים משתמש בלחיצה על השם שבראש המסך.')],
     [L('הנתונים שלי נשמרים?'), L('הכול נשמר בטלפון ומסתנכרן אוטומטית, כך שהספרייה זמינה בכל מכשיר. הנקודה הירוקה ליד השם אומרת שהכול מסונכרן; כתומה = אין חיבור כרגע, והנתונים יסונכרנו כשיחזור.')]] },
@@ -6607,7 +6609,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
 }
 
 /* ============================================================
-   משתמשים: כניסה בבחירת שם, בלי סיסמה. כל משתמש מקבל ספרייה נפרדת.
+   משתמשים: שם וסיסמה, ושאלת ביטחון לשחזור. כל משתמש מקבל ספרייה נפרדת.
    ============================================================ */
 const AVATAR_COLORS = ['#3446B0', '#D4506C', '#14897F', '#DF8A1F', '#7A4FC2', '#2E8BD6', '#B5534A', '#4E8A3E'];
 // סמליל "מה שנקרא": ספר פתוח בלילה, עם כוכב קטן של "מה עוד נקרא" (תואם לאייקון במסך הבית)
@@ -6666,14 +6668,52 @@ function UiLangPicker() {
     </div>
   );
 }
-/* ---------- כניסה: בוחרים שם, בלי סיסמה. השרת נותן אסימון כניסה, ובלעדיו הוא לא מחזיר נתונים ---------- */
+/* ---------- כניסה: שם וסיסמה, ושאלת ביטחון לשחזור. לתחושת פרטיות בין המשתמשים, לא אבטחה חזקה (אין Google ואין מייל) ----------
+   הסיסמה והתשובה נבדקות בשרת ונשמרות שם רק כגיבוב. השרת נותן אסימון כניסה, ובלעדיו הוא לא מחזיר נתונים. */
+const PASS_MIN = 4;
+// השאלות לשחזור הסיסמה. בשרת נשמר רק המספר של השאלה (הסדר קבוע: לא משנים, רק מוסיפים בסוף)
+const SECURITY_QUESTIONS = [L('מה היה השם של חיית המחמד הראשונה שלך?'), L('באיזו עיר נולדת?'), L('מה השם של בית הספר היסודי שלך?'), L('מה הספר הראשון שאהבת?'), L('מה השם של החבר או החברה הכי טובים שלך בילדות?')];
 function authErrText(e) {
   const c = (e && e.code) || '';
-  if (c === 'too_many') return T('נוצרו הרבה משתמשים בזמן קצר. נסו שוב בעוד רבע שעה.');
+  if (c === 'wrong') return T('הסיסמה לא נכונה. נסו שוב.');
+  if (c === 'wrong_answer') return T('התשובה לא נכונה. נסו שוב.');
+  if (c === 'too_many') return T('יותר מדי ניסיונות. נסו שוב בעוד רבע שעה.');
+  if (c === 'short') return L('סיסמה של {0} תווים לפחות.', [PASS_MIN]);
+  if (c === 'question') return T('בחרו שאלת ביטחון.');
+  if (c === 'answer') return L('התשובה קצרה מדי.');
+  if (c === 'no_question') return T('למשתמש הזה אין שאלת ביטחון. בקשו ממי שיכול להיכנס אליו לשנות את הסיסמה בהגדרות.');
   if (c === 'name_taken') return L('כבר יש משתמש בשם הזה.');
   if (c === 'name') return L('צריך שם או כינוי.');
   if (c === 'consent') return L('צריך לאשר את תנאי השימוש ואת מדיניות הפרטיות.');
   return L('אין חיבור לשרת. נסו שוב.');
+}
+function PassField({ id, value, onChange, label, autoFocus, isNew }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div className="grid gap-1">
+      <label htmlFor={id} className="font-semibold text-[15px]">{label}</label>
+      <div className="relative">
+        <input id={id} type={show ? 'text' : 'password'} value={value} onChange={e => onChange(e.target.value)} autoFocus={autoFocus} autoComplete={isNew ? 'new-password' : 'current-password'} dir="ltr"
+          className="w-full min-h-[52px] ps-3 pe-12 rounded-xl border border-line bg-bg text-[17px]" />
+        <button type="button" onClick={() => setShow(!show)} aria-label={show ? 'הסתרת הסיסמה' : 'הצגת הסיסמה'} className="absolute end-1 top-1 w-11 h-11 grid place-items-center text-muted"><Icon name={show ? 'EyeOff' : 'Eye'} size={18} /></button>
+      </div>
+    </div>
+  );
+}
+// בחירת שאלת ביטחון ותשובה (לשחזור הסיסמה)
+function SecurityQuestion({ q, setQ, answer, setAnswer, idPrefix = '' }) {
+  return (
+    <div className="grid gap-1.5">
+      <label htmlFor={idPrefix + 'sec-q'} className="font-semibold text-[15px]">{L('שאלת ביטחון (לשחזור הסיסמה)')}</label>
+      <select id={idPrefix + 'sec-q'} value={q} onChange={e => setQ(Number(e.target.value))} className="w-full min-h-[52px] px-3 rounded-xl border border-line bg-bg text-[16px]">
+        <option value={-1} disabled>{L('בחירת שאלה…')}</option>
+        {SECURITY_QUESTIONS.map((t, i) => <option key={i} value={i}>{t}</option>)}
+      </select>
+      <label htmlFor={idPrefix + 'sec-a'} className="sr-only">{L('התשובה')}</label>
+      <input id={idPrefix + 'sec-a'} value={answer} onChange={e => setAnswer(e.target.value)} placeholder={L('התשובה')} autoComplete="off" maxLength={60}
+        className="w-full min-h-[52px] px-3 rounded-xl border border-line bg-bg text-[17px]" />
+    </div>
+  );
 }
 function LoginHeader() {
   return (
@@ -6692,8 +6732,8 @@ function LoginHeader() {
 /* ---------- מסמכים משפטיים: מדיניות פרטיות (חוק הגנת הפרטיות ותיקון 13), תנאי שימוש, הצהרת נגישות (ת"י 5568) ----------
    LEGAL_OWNER ו-LEGAL_EMAIL: שם האחראי על המידע ודרך ליצור קשר. כשריקים: "מפעיל האפליקציה" ו"משוב" בהגדרות.
    שינוי מהותי במסמכים → מעלים את LEGAL_VERSION, וכל משתמש יתבקש להסכים מחדש. */
-const LEGAL_VERSION = '2026-10b';
-const LEGAL_UPDATED = '2026-10-27';
+const LEGAL_VERSION = '2026-11';
+const LEGAL_UPDATED = '2026-10-31';
 const LEGAL_OWNER = '';
 const LEGAL_EMAIL = '';
 const legalOwner = () => LEGAL_OWNER || L('מפעיל האפליקציה "מה שנקרא"');
@@ -6704,7 +6744,7 @@ function legalDocs() {
     privacy: { title: L('מדיניות פרטיות'), sections: [
       [L('כללי'), [L('המדיניות מסבירה איזה מידע נאסף באפליקציה "מה שנקרא", למה, איפה הוא נשמר ומה הזכויות שלכם, לפי חוק הגנת הפרטיות, התשמ"א-1981, ותקנותיו. האחראי על המידע: {0}. פניות: {1}.', [legalOwner(), c])]],
       [L('איזה מידע נאסף'), [
-        L('פרטי חשבון: שם או כינוי שבחרתם. אין סיסמאות, ולא נאספים מייל או טלפון.'),
+        L('פרטי חשבון: שם או כינוי שבחרתם, סיסמה, ושאלת ביטחון עם התשובה שלכם. הסיסמה והתשובה נשמרות רק כגיבוב, כך שאי אפשר לקרוא אותן. לא נאספים מייל או טלפון.'),
         L('הספרייה שלכם: ספרים, דירוגים, הערות, תגיות, מתי קראתם, "רוצה לקרוא", ספרים שדחיתם, בקשות המלצה, היסטוריית ההמלצות, הפרופיל הספרותי שנבנה מהם וההגדרות.'),
         L('חברים: בקשות חברות, והמלצות ששלחתם או קיבלתם.'),
         L('משוב ששלחתם (עם השם שלכם). אם הפעלתם התראות: כתובת ההרשמה של הדפדפן להתראות.'),
@@ -6713,7 +6753,7 @@ function legalDocs() {
       [L('האם חובה למסור את המידע?'), [L('אין חובה חוקית. המסירה היא מרצונכם ובהסכמתכם, אבל בלי חשבון אי אפשר להשתמש באפליקציה, ובלי ספרים אי אפשר לקבל המלצות. ההערות על ספרים הן רשות: מה שתכתבו בהן, כולל דעות, נשמר כמו שהוא – כתבו רק מה שנוח לכם.')]],
       [L('למה משתמשים במידע'), [L('כדי לשמור ולסנכרן את הספרייה בין המכשירים שלכם; כדי ללמוד את הטעם שלכם ולהמליץ על ספרים, כולל ההצעות הדו-שבועיות; כדי להציג לחברים את מה שבחרתם לשתף; כדי לשפר את האפליקציה לפי משוב; וכדי לאבטח את החשבון. המידע לא נמכר, לא משמש לפרסום ולא נמסר לאף אחד לשום מטרה אחרת.')]],
       [L('מי רואה את המידע'), [
-        L('חשוב: אין סיסמאות. כל מי שפותח את האפליקציה רואה את רשימת השמות, ויכול לבחור כל שם ולהיכנס לספרייה שלו. לכן אל תכתבו באפליקציה מידע שלא הייתם רוצים שאחרים יראו.'),
+        L('חשוב: הסיסמה היא לפרטיות בסיסית בין המשתמשים, לא הגנה חזקה. רשימת השמות גלויה במסך הכניסה, ומי שיודע את התשובה לשאלת הביטחון שלכם יכול לאפס את הסיסמה. לכן אל תכתבו באפליקציה מידע רגיש.'),
         L('חברים שאישרתם: רק מה שבחרתם בהגדרות ← "פרטיות וחברים", בלי ספרים שסימנתם "הסתרה מחברים".'),
         L('שאר המשתמשים: השם והצבע שלכם. "אהובים בקהילה" הוא סיכום אנונימי של ספרים ששני משתמשים לפחות דירגו 4 ומעלה, בלי שמות ובלי הערות; אפשר לצאת ממנו בהגדרות.')]],
       [L('ספקי שירות והעברת מידע לחו"ל'), [
@@ -6729,13 +6769,13 @@ function legalDocs() {
         L('עיון במידע (סעיף 13 לחוק): הגדרות ← "הנתונים שלי" ← "מה האפליקציה יודעת עליי", וייצוא מלא של הספרייה.'),
         L('תיקון ומחיקה (סעיף 14 לחוק): אפשר לערוך או למחוק כל ספר, הערה או פריט, או למחוק את המשתמש כולו.'),
         L('לכל בקשה אחרת, או אם משהו לא נענה: {0}. אפשר גם לפנות לרשות להגנת הפרטיות.', [c])]],
-      [L('אבטחת מידע'), [L('הכניסה היא בבחירת שם, בלי סיסמה, ולכן היא לא מגינה על הספרייה ממי שבוחר את השם שלכם. כל התקשורת מוצפנת (HTTPS), כל מכשיר יכול לשנות רק את הספרייה של המשתמש שנבחר בו, וספריות של משתמשים אחרים לא נשלחות אליו, חוץ ממה שחברים שיתפו. אם גיליתם בעיה, ספרו לנו.')]],
+      [L('אבטחת מידע'), [L('הסיסמה והתשובה לשאלת הביטחון נבדקות בשרת ונשמרות רק כגיבוב, ניסיונות שגויים מוגבלים, כל התקשורת מוצפנת (HTTPS), כל מכשיר יכול לשנות רק את הספרייה של מי שנכנס בו, וספריות של משתמשים אחרים לא נשלחות אליו, חוץ ממה שחברים שיתפו. זו לא אבטחה חזקה; אם גיליתם בעיה, ספרו לנו.')]],
       [L('קטינים'), [L('האפליקציה מיועדת לגיל 16 ומעלה. מתחת לגיל 16 – רק בהסכמת הורה.')]],
       [L('שינויים במדיניות'), [L('שינוי מהותי במדיניות יוצג באפליקציה, והיא תבקש את הסכמתכם מחדש.')]]
     ] },
     terms: { title: L('תנאי שימוש'), sections: [
       [L('השירות'), [L('"מה שנקרא" היא אפליקציה חינמית לשימוש אישי: ניהול ספרים שקראתם וקבלת המלצות. השימוש בה מותנה בתנאים האלה ובמדיניות הפרטיות.')]],
-      [L('גיל וחשבון'), [L('השימוש מגיל 16, או בהסכמת הורה. משתמש אחד לכל אדם, בלי להתחזות למישהו אחר. אין סיסמאות, ולכן השתמשו רק בספרייה שלכם: אסור להיכנס לספרייה של מישהו אחר או לשנות אותה בלי רשותו.')]],
+      [L('גיל וחשבון'), [L('השימוש מגיל 16, או בהסכמת הורה. משתמש אחד לכל אדם, בלי להתחזות למישהו אחר. שמרו על הסיסמה ועל התשובה לשאלת הביטחון, ואל תיכנסו לספרייה של מישהו אחר או תשנו אותה בלי רשותו.')]],
       [L('המלצות ותוכן שנוצר בבינה מלאכותית'), [L('ההמלצות, הפרופיל הספרותי, סיכומי הביקורות והתרגומים נוצרים אוטומטית בעזרת בינה מלאכותית (Claude של Anthropic). האפליקציה בודקת שכל ספר מומלץ קיים במאגרים אמיתיים, אבל התוכן עלול לכלול טעויות. זו המלצה בלבד, ולא ייעוץ מכל סוג.')]],
       [L('מידע מצדדים שלישיים'), [L('פרטי ספרים, כריכות, תקצירים, זמינות וקישורים מגיעים מ-Google Books, הספרייה הלאומית, Open Library, Wikidata ואתרי חנויות והוצאות, ומוצגים עם ציון המקור. לא מובטח שהם מדויקים או עדכניים. קנייה באתר חיצוני היא בינכם לבין האתר. לאפליקציה אין קשר מסחרי לחנויות, והיא לא מקבלת עמלות.')]],
       [L('זכויות יוצרים'), [L('הכריכות, התקצירים והציטוטים שייכים לבעלי הזכויות בהם. הם מוצגים בהיקף מצומצם, לזיהוי הספר ולמידע, עם ציון המקור. בעל זכויות שמבקש להסיר תוכן: {0}, והתוכן יוסר בהקדם.', [c])]],
@@ -6824,30 +6864,79 @@ function ConsentScreen() {
   );
 }
 
-function ProfileList({ profiles, onPick, busy }) {
+function ProfileList({ profiles, onPick }) {
   return (
     <ul className="grid gap-2 mb-4">
       {profiles.map(p => (
         <li key={p.id}>
-          <button type="button" disabled={busy} onClick={() => onPick(p.id)}
-            className="w-full min-h-[64px] flex items-center gap-3 px-3 rounded-xl bg-surface border border-line text-start active:bg-surface2 disabled:opacity-60">
+          <button type="button" onClick={() => onPick(p.id)}
+            className="w-full min-h-[64px] flex items-center gap-3 px-3 rounded-xl bg-surface border border-line text-start active:bg-surface2">
             <Avatar profile={p} size={44} />
             <span className="flex-1 min-w-0 block font-semibold text-[17px] truncate">{p.name}</span>
-            <Icon name="ChevronLeft" size={20} className="text-muted" />
+            <Icon name={p.hasPass ? 'Lock' : 'ChevronLeft'} size={20} className="text-muted" />
           </button>
         </li>
       ))}
     </ul>
   );
 }
+// כניסה למשתמש: סיסמה; "שכחתי סיסמה" עם שאלת הביטחון; ומשתמש ותיק בלי סיסמה קובע אחת
+function ProfileLogin({ profile, onCancel }) {
+  const [mode, setMode] = useState(profile.hasPass ? 'login' : 'setup');   // login | setup | forgot
+  const [pw, setPw] = useState(''), [q, setQ] = useState(-1), [answer, setAnswer] = useState(''), [err, setErr] = useState(''), [busy, setBusy] = useState(false);
+  const [askQ, setAskQ] = useState(null);   // השאלה של המשתמש, במצב "שכחתי"
+  const go = async (path, body) => {
+    setErr(''); setBusy(true);
+    try { adoptSession(await authPost(path, { pid: profile.id, ...body })); }
+    catch (e) {
+      if (e.code === 'setup') { setMode('setup'); setPw(''); }
+      else setErr(authErrText(e));
+      setBusy(false);
+    }
+  };
+  const forgot = async () => {
+    setErr(''); setPw(''); setAnswer('');
+    try { setAskQ((await authPost('/auth/question', { pid: profile.id })).q); setMode('forgot'); }
+    catch (e) { setErr(authErrText(e)); }
+  };
+  const submit = (e) => {
+    e.preventDefault();
+    if (mode === 'login') return go('/auth/enter', { password: pw });
+    if (pw.length < PASS_MIN) { setErr(L('סיסמה של {0} תווים לפחות.', [PASS_MIN])); return; }
+    if (mode === 'setup') return go('/auth/setup', { password: pw, q, answer });
+    return go('/auth/recover', { answer, password: pw });
+  };
+  const ready = mode === 'login' ? !!pw : mode === 'setup' ? pw && q >= 0 && answer.trim() : pw && answer.trim();
+  return (
+    <form className="grid gap-2.5 bg-surface border border-line rounded-xl p-3" onSubmit={submit}>
+      <div className="flex items-center gap-2.5"><Avatar profile={profile} size={36} /><span className="font-semibold text-[17px] flex-1 truncate">{profile.name}</span></div>
+      {mode === 'setup' && <p className="text-[14px] m-0">{T('למשתמש הזה עוד אין סיסמה. בחרו סיסמה ושאלת ביטחון, כדי שאפשר יהיה לשחזר אותה.')}</p>}
+      {mode === 'forgot' && (
+        <div className="grid gap-1">
+          <label htmlFor="sec-answer" className="font-semibold text-[15px]">{SECURITY_QUESTIONS[askQ] || ''}</label>
+          <input id="sec-answer" value={answer} onChange={e => setAnswer(e.target.value)} autoFocus autoComplete="off" className="w-full min-h-[52px] px-3 rounded-xl border border-line bg-bg text-[17px]" />
+        </div>
+      )}
+      <PassField id="profile-pass" label={mode === 'login' ? 'סיסמה' : 'סיסמה חדשה'} value={pw} onChange={setPw} autoFocus={mode !== 'forgot'} isNew={mode !== 'login'} />
+      {mode === 'setup' && <SecurityQuestion q={q} setQ={setQ} answer={answer} setAnswer={setAnswer} />}
+      {err && <p className="text-[13px] text-danger m-0" role="alert">{err}</p>}
+      <div className="grid grid-cols-2 gap-2">
+        <Btn type="submit" disabled={busy || !ready}><Icon name="LogIn" size={20} />כניסה</Btn>
+        <Btn variant="ghost" onClick={mode === 'forgot' ? () => { setMode('login'); setErr(''); setPw(''); } : onCancel}>ביטול</Btn>
+      </div>
+      {mode === 'login' && <button type="button" className="text-accent font-semibold text-[14px] min-h-[40px] justify-self-start" onClick={forgot}>שכחתי סיסמה</button>}
+    </form>
+  );
+}
 function NewProfileForm({ profiles, onCancel }) {
-  const [name, setName] = useState(''), [ok, setOk] = useState(false), [err, setErr] = useState(''), [busy, setBusy] = useState(false);
+  const [name, setName] = useState(''), [pw, setPw] = useState(''), [q, setQ] = useState(-1), [answer, setAnswer] = useState(''), [ok, setOk] = useState(false), [err, setErr] = useState(''), [busy, setBusy] = useState(false);
   const taken = profiles.some(p => norm(p.name) === norm(name));
   const submit = async (e) => {
     e.preventDefault(); setErr('');
     if (!name.trim() || taken || !ok) return;
+    if (pw.length < PASS_MIN) { setErr(L('סיסמה של {0} תווים לפחות.', [PASS_MIN])); return; }
     setBusy(true);
-    try { adoptSession(await authPost('/auth/register', { name: name.trim(), consent: LEGAL_VERSION })); }
+    try { adoptSession(await authPost('/auth/register', { name: name.trim(), password: pw, q, answer, consent: LEGAL_VERSION })); }
     catch (er) { setErr(authErrText(er)); setBusy(false); }
   };
   return (
@@ -6856,10 +6945,12 @@ function NewProfileForm({ profiles, onCancel }) {
       <input id="new-profile" value={name} onChange={e => setName(e.target.value)} maxLength={24} autoFocus placeholder="שם או כינוי"
         className="w-full min-h-[52px] px-3 rounded-xl border border-line bg-bg text-[17px]" />
       {taken && <p className="text-[13px] text-danger m-0">כבר יש משתמש בשם הזה.</p>}
+      <PassField id="new-pass" label="סיסמה" value={pw} onChange={setPw} isNew />
+      <SecurityQuestion q={q} setQ={setQ} answer={answer} setAnswer={setAnswer} />
       <ConsentCheck checked={ok} onChange={setOk} />
       {err && <p className="text-[13px] text-danger m-0" role="alert">{err}</p>}
       <div className={onCancel ? 'grid grid-cols-2 gap-2' : 'grid'}>
-        <Btn type="submit" disabled={busy || !name.trim() || taken || !ok}><Icon name="Check" size={20} />כניסה</Btn>
+        <Btn type="submit" disabled={busy || !name.trim() || taken || !ok || !pw || q < 0 || !answer.trim()}><Icon name="Check" size={20} />כניסה</Btn>
         {onCancel && <Btn variant="ghost" onClick={onCancel}>ביטול</Btn>}
       </div>
     </form>
@@ -6869,17 +6960,13 @@ function LoginScreen() {
   const [profiles, setProfiles] = useState(null);
   const [loadErr, setLoadErr] = useState(false);
   const [adding, setAdding] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
+  const [sel, setSel] = useState(null);
   const load = () => {
     setLoadErr(false);
     fetchJSON(loadCloud().url + '/auth/profiles?t=' + Date.now(), 15000).then(j => { setProfiles(j.profiles || []); if (!(j.profiles || []).length) setAdding(true); }).catch(() => setLoadErr(true));
   };
   useEffect(load, []);
-  const enter = async (pid) => {
-    setErr(''); setBusy(true);
-    try { adoptSession(await authPost('/auth/enter', { pid })); } catch (e) { setErr(authErrText(e)); setBusy(false); }
-  };
+  const selected = (profiles || []).find(p => p.id === sel);
   let body;
   if (loadErr) body = (
     <div className="grid gap-3">
@@ -6891,8 +6978,9 @@ function LoginScreen() {
   else body = (
     <>
       <h1 className="font-display font-medium text-[26px] leading-snug mb-5">של מי הספרייה?</h1>
-      {profiles.length > 0 && <ProfileList profiles={profiles} onPick={enter} busy={busy} />}
-      {adding ? <NewProfileForm profiles={profiles} onCancel={profiles.length ? () => setAdding(false) : null} />
+      {selected ? <div className="mb-4"><ProfileLogin key={selected.id} profile={selected} onCancel={() => setSel(null)} /></div>
+        : profiles.length > 0 && <ProfileList profiles={profiles} onPick={(id) => { setSel(id); setAdding(false); }} />}
+      {selected ? null : adding ? <NewProfileForm profiles={profiles} onCancel={profiles.length ? () => setAdding(false) : null} />
         : <Btn variant="ghost" className="w-full" onClick={() => setAdding(true)}><Icon name="UserPlus" size={20} />הוספת משתמש</Btn>}
     </>
   );
@@ -6900,10 +6988,37 @@ function LoginScreen() {
     <div className="min-h-screen bg-bg text-ink font-body">
       <main className="mx-auto max-w-md px-4 pt-10 pb-10 safe-top fade-in">
         <LoginHeader />
-        {err && <div className="mb-3"><Notice tone="warn">{err}</Notice></div>}
         {body}
         <LegalLinks className="mt-8" />
       </main>
+    </div>
+  );
+}
+// הגדרות ← החשבון שלי: שינוי סיסמה ושאלת הביטחון
+function AccountSecurity({ notify }) {
+  const [me, setMe] = useState(null);
+  const [pw, setPw] = useState(''), [q, setQ] = useState(-1), [answer, setAnswer] = useState(''), [err, setErr] = useState('');
+  useEffect(() => { fetchJSON(loadCloud().url + '/auth/me?t=' + Date.now(), 12000).then(j => { setMe(j); if (Number.isInteger(j.q)) setQ(j.q); }).catch(() => {}); }, []);
+  const savePw = async (e) => {
+    e.preventDefault(); setErr('');
+    if (pw.length < PASS_MIN) { setErr(L('סיסמה של {0} תווים לפחות.', [PASS_MIN])); return; }
+    try { await authPost('/auth/setpass', { password: pw }); setPw(''); notify('הסיסמה נשמרה'); } catch (er) { setErr(authErrText(er)); }
+  };
+  const saveQ = async (e) => {
+    e.preventDefault(); setErr('');
+    try { await authPost('/auth/setquestion', { q, answer }); setAnswer(''); notify(L('שאלת הביטחון נשמרה')); setMe(m => ({ ...(m || {}), q })); } catch (er) { setErr(authErrText(er)); }
+  };
+  return (
+    <div className="grid gap-3">
+      <form className="grid gap-2" onSubmit={savePw}>
+        <PassField id="change-pass" label={me && !me.hasPass ? 'קביעת סיסמה' : 'שינוי סיסמה'} value={pw} onChange={setPw} isNew />
+        <Btn variant="soft" type="submit" disabled={!pw}><Icon name="KeyRound" size={18} />שמירת הסיסמה</Btn>
+      </form>
+      <form className="grid gap-2" onSubmit={saveQ}>
+        <SecurityQuestion q={q} setQ={setQ} answer={answer} setAnswer={setAnswer} idPrefix="change-" />
+        <Btn variant="soft" type="submit" disabled={q < 0 || !answer.trim()}><Icon name="ShieldQuestion" size={18} />{L('שמירת שאלת הביטחון')}</Btn>
+      </form>
+      {err && <p className="text-[13px] text-danger m-0" role="alert">{err}</p>}
     </div>
   );
 }

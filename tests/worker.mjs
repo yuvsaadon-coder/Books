@@ -265,7 +265,7 @@ console.log('worker page verification: ok');
   assert.ok(JSON.parse(kv.get('digest-meta:new')).next >= now + 1000 + 86400000 - 5);
   console.log('worker biweekly digest: ok');
 }
-// ---------- כניסה בבחירת שם, מה כל משתמש רואה, ומה מותר לו לכתוב ----------
+// ---------- כניסה (סיסמה ושאלת ביטחון), מה כל משתמש רואה, ומה מותר לו לכתוב ----------
 {
   const kv = new Map();
   const LIB = {
@@ -301,21 +301,35 @@ console.log('worker page verification: ok');
   const list = (await call('/auth/profiles')).json;
   assert.deepEqual(list.profiles.map(p => p.id), ['A', 'B', 'C']);
   assert.ok(!JSON.stringify(list).includes('passHash') && !JSON.stringify(list).includes('hhhh'));
-  kv.set('acct:C', JSON.stringify({ pass: { hash: 'z' } }));
-  // פרטי כניסה ישנים (מגרסאות 45–46) נמחקים: בכניסה, ובניקוי החד-פעמי שרץ מה-Cron
-  kv.set('acct:A', JSON.stringify({ pass: { hash: 'x' }, google: { sub: 'g1', email: 'a@example.com' }, consent: { v: '1' } }));
-  kv.set('idmap:google:g1', 'A');
-  kv.set('acct:B', JSON.stringify({ pass: { hash: 'y' } }));
-  const { cleanupOldCredentials } = await import('../worker/worker.js');
-  await cleanupOldCredentials(env);
-  assert.deepEqual(JSON.parse(kv.get('acct:B')), {});
-  assert.deepEqual(JSON.parse(kv.get('acct:A')), { consent: { v: '1' } });
-  assert.ok(!kv.has('idmap:google:g1') && !kv.get('state').includes('passHash'));
-  // 2. כניסה בבחירת שם: אין סיסמה. מזהה שלא קיים נדחה
-  assert.equal((await call('/auth/enter', { method: 'POST', body: { pid: 'nope' } })).status, 400);
-  const a = (await call('/auth/enter', { method: 'POST', body: { pid: 'A' } })).json;
+  assert.ok(list.profiles.every(p => p.hasPass === false));
+  // 2. משתמש ותיק בלי סיסמה: הכניסה מבקשת לקבוע סיסמה ושאלת ביטחון; אחר כך נכנסים עם הסיסמה
+  assert.equal((await call('/auth/enter', { method: 'POST', body: { pid: 'nope', password: 'x' } })).status, 400);
+  assert.equal((await call('/auth/enter', { method: 'POST', body: { pid: 'A' } })).json.error, 'setup');
+  assert.equal((await call('/auth/setup', { method: 'POST', body: { pid: 'A', password: '12', q: 1, answer: 'חיפה' } })).json.error, 'short');
+  assert.equal((await call('/auth/setup', { method: 'POST', body: { pid: 'A', password: '1234', q: 9, answer: 'חיפה' } })).json.error, 'question');
+  assert.ok((await call('/auth/setup', { method: 'POST', body: { pid: 'A', password: '1234', q: 1, answer: 'תל-אביב' } })).json.token);
+  assert.equal((await call('/auth/setup', { method: 'POST', body: { pid: 'A', password: 'grab', q: 1, answer: 'x' } })).json.error, 'has_password');
+  assert.ok(!kv.get('acct:A').includes('1234') && !kv.get('acct:A').includes('תל'), 'only hashes are stored');
+  assert.equal((await call('/auth/enter', { method: 'POST', body: { pid: 'A', password: 'nope' } })).json.error, 'wrong');
+  const a = (await call('/auth/enter', { method: 'POST', body: { pid: 'A', password: '1234' } })).json;
   assert.ok(/^[0-9a-f]{64}$/.test(a.token) && a.pid === 'A' && a.name === 'אבי');
-  for (const old of ['/auth/password', '/auth/google', '/auth/admin']) assert.equal((await call(old, { method: 'POST', token: a.token, body: {} })).status, 404, old);
+  assert.equal((await call('/auth/profiles')).json.profiles.find(p => p.id === 'A').hasPass, true);
+  // שכחתי סיסמה: השאלה, תשובה שגויה נדחית, תשובה נכונה (גם בכתיב אחר) מאפסת
+  assert.equal((await call('/auth/question', { method: 'POST', body: { pid: 'A' } })).json.q, 1);
+  assert.equal((await call('/auth/question', { method: 'POST', body: { pid: 'B' } })).status, 404);
+  assert.equal((await call('/auth/recover', { method: 'POST', body: { pid: 'A', answer: 'חיפה', password: 'abcd' } })).json.error, 'wrong_answer');
+  assert.ok((await call('/auth/recover', { method: 'POST', body: { pid: 'A', answer: ' תל אביב ', password: 'abcd' } })).json.token);
+  assert.equal((await call('/auth/enter', { method: 'POST', body: { pid: 'A', password: '1234' } })).status, 401);
+  assert.ok((await call('/auth/enter', { method: 'POST', body: { pid: 'A', password: 'abcd' } })).json.token);
+  // מההגדרות: שינוי סיסמה ושאלה
+  assert.equal((await call('/auth/setpass', { method: 'POST', token: a.token, body: { password: '1234' } })).status, 200);
+  assert.equal((await call('/auth/setquestion', { method: 'POST', token: a.token, body: { q: 3, answer: 'הנסיך הקטן' } })).status, 200);
+  assert.deepEqual([(await call('/auth/me', { token: a.token })).json.q, (await call('/auth/me', { token: a.token })).json.hasPass], [3, true]);
+  // הגבלת ניסיונות: 8 שגויים ברבע שעה
+  for (let i = 0; i < 8; i++) await call('/auth/enter', { method: 'POST', body: { pid: 'A', password: 'x' + i } });
+  assert.equal((await call('/auth/enter', { method: 'POST', body: { pid: 'A', password: '1234' } })).status, 429);
+  kv.delete('fail:A');
+  for (const old of ['/auth/password', '/auth/google', '/auth/admin', '/auth/link']) assert.equal((await call(old, { method: 'POST', token: a.token, body: {} })).status, 404, old);
   // 3. מה A רואה: הכול שלו; מ-B (חבר) רק ספרים משותפים, בלי המוסתר ובלי הערות, בלי פרופיל/משוב; C (לא חבר) לא נשלח בכלל
   const v = (await call('/sync', { token: a.token })).json;
   assert.ok(!JSON.stringify(v).includes('passHash') && !JSON.stringify(v).includes('passSalt'));
@@ -344,22 +358,23 @@ console.log('worker page verification: ok');
   assert.equal(st.social.items.find(x => x.id === 'f2').status, 'accepted');
   assert.equal((await call('/sync', { method: 'PUT', token: a.token, body: { baseRev: 0, data: forged } })).status, 409);
   // 5. הסכמה לתנאים: הרשמה בלי הסכמה נדחית; ההסכמה נשמרת עם הגרסה; אפשר להסכים לגרסה חדשה
-  assert.equal((await call('/auth/register', { method: 'POST', body: { name: 'דן' } })).json.error, 'consent');
-  assert.equal((await call('/auth/register', { method: 'POST', body: { name: ' בת ', consent: '1' } })).json.error, 'name_taken');
-  const dn = (await call('/auth/register', { method: 'POST', body: { name: 'דן', consent: '1' } })).json;
+  const cred = { password: '1234', q: 0, answer: 'מיצי' };
+  assert.equal((await call('/auth/register', { method: 'POST', body: { name: 'דן', ...cred } })).json.error, 'consent');
+  assert.equal((await call('/auth/register', { method: 'POST', body: { name: 'דן', consent: '1', password: '1234' } })).json.error, 'question');
+  assert.equal((await call('/auth/register', { method: 'POST', body: { name: ' בת ', consent: '1', ...cred } })).json.error, 'name_taken');
+  const dn = (await call('/auth/register', { method: 'POST', body: { name: 'דן', consent: '1', ...cred } })).json;
   assert.equal(dn.consent, '1');
   assert.equal(JSON.parse(kv.get('acct:' + dn.pid)).consent.v, '1');
   assert.equal((await call('/auth/consent', { method: 'POST', token: dn.token, body: { v: '2' } })).status, 200);
   assert.equal((await call('/auth/me', { token: dn.token })).json.consent, '2');
   // 6. הגבלת קצב ליצירת משתמשים מאותה כתובת
-  for (let i = 0; i < 3; i++) await call('/auth/register', { method: 'POST', body: { name: 'משתמש ' + i, consent: '1' } });
-  assert.equal((await call('/auth/register', { method: 'POST', body: { name: 'עוד אחד', consent: '1' } })).status, 429);
+  for (let i = 0; i < 3; i++) await call('/auth/register', { method: 'POST', body: { name: 'משתמש ' + i, consent: '1', ...cred } });
+  assert.equal((await call('/auth/register', { method: 'POST', body: { name: 'עוד אחד', consent: '1', ...cred } })).status, 429);
   // 7. יציאה מבטלת את האסימון; מחיקה עצמית מוחקת הכול ומנתקת את כל המכשירים
   await call('/auth/logout', { method: 'POST', token: a.token });
   assert.equal((await call('/sync', { token: a.token })).status, 401);
-  const c1 = (await call('/auth/enter', { method: 'POST', body: { pid: 'C' } })).json.token;
-  assert.ok(!JSON.parse(kv.get('acct:C')).pass, 'old password hash dropped on entry');
-  const c2 = (await call('/auth/enter', { method: 'POST', body: { pid: 'C' } })).json.token;
+  const c1 = (await call('/auth/setup', { method: 'POST', body: { pid: 'C', ...cred } })).json.token;
+  const c2 = (await call('/auth/enter', { method: 'POST', body: { pid: 'C', password: '1234' } })).json.token;
   const before = (await call('/sync', { token: c1 })).json;
   assert.equal((await call('/sync', { method: 'PUT', token: c1, body: { baseRev: before.rev, data: { deleted: { C: Date.now() } } } })).status, 200);
   assert.equal((await call('/sync', { token: c1 })).status, 401);
@@ -367,5 +382,5 @@ console.log('worker page verification: ok');
   const stC = JSON.parse(kv.get('state')).data;
   assert.ok(stC.deleted.C && !stC.dbs.C && !stC.profiles.some(p => p.name === 'כרמל'));
   assert.ok(!(await call('/auth/profiles')).json.profiles.some(p => p.id === 'C'));
-  console.log('worker sign-in by name and per-user data: ok');
+  console.log('worker sign-in (password + security question) and per-user data: ok');
 }
