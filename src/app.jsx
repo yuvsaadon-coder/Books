@@ -31,7 +31,7 @@ function setUiLang(lang) {
 const DEFAULT_LOCALE = IS_EN ? 'en-GB' : 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '48';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '49';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -211,8 +211,8 @@ function normGoogle(item) {
     ebookLink: (item.saleInfo && item.saleInfo.buyLink) || (item.accessInfo && item.accessInfo.webReaderLink) || ''
   };
 }
-async function googleSearch(q, { lang, max = 12 } = {}) {
-  const data = await googleFetch(googleUrl('', { q, langRestrict: lang, maxResults: max, printType: 'books', orderBy: 'relevance' }));
+async function googleSearch(q, { lang, max = 12, newest = false } = {}) {
+  const data = await googleFetch(googleUrl('', { q, langRestrict: lang, maxResults: max, printType: 'books', orderBy: newest ? 'newest' : 'relevance' }));
   return (data.items || []).map(normGoogle).filter(b => b.title);
 }
 async function googleById(id) {
@@ -1701,19 +1701,179 @@ const REC_TOOL = {
 };
 REC_TOOL.input_schema.properties.recommendations.items.required.push('candidate', 'country');
 
+/* ---------- מקורות נוספים למועמדים ----------
+   1. חיפוש לפי הבקשה: Haiku הופך את הבקשה החופשית ל-3–5 שאילתות קטלוג, והתוצאות מ-Google Books נכנסות למועמדים.
+      כך המועמדים מתאימים למה שביקשו עכשיו, ולא רק לטעם מהעבר.
+   2. "שכנים" ספרותיים (Wikidata): סופרים שהשפיעו על סופר אהוב או הושפעו ממנו (P737), אותה תנועה ספרותית (P135),
+      וסופרים שזכו באותו פרס (P166). רק אנשים שהמקצוע שלהם כתיבה (P106). נשמר במכשיר ל-30 יום. */
+const SEARCH_PLAN_TOOL = {
+  name: 'submit_search_plan', description: 'Return catalogue searches for this request.',
+  input_schema: { type: 'object', additionalProperties: false, required: ['queries'], properties: {
+    queries: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['q', 'label'], properties: {
+      q: { type: 'string', description: 'a short Google Books query: subject keywords, a theme, a setting or period, or intitle:/inauthor: for a book or author the request names' },
+      label: { type: 'string', description: `2 to 5 words in ${OUT_LANG}: what this search looks for` } } } } } }
+};
+async function aiSearchPlan({ request, focus, lang }) {
+  const prefs = focusSummary(focus || {});
+  const { input } = await aiRun({
+    fast: true, web: false,
+    system: 'You turn a reader\'s book request into catalogue searches. Return 3 to 5 short Google Books queries that would surface real, published books matching THIS request: its themes, setting, period, mood, or the books and authors it compares to. Use Hebrew keywords when the books should be Hebrew editions, English keywords otherwise. Do not search for generic bestsellers.',
+    prompt: `REQUEST: ${request}${prefs.length ? `\nPREFERENCES: ${prefs.join('; ')}` : ''}\nBOOK LANGUAGE: ${lang === 'he' ? 'Hebrew editions only' : lang === 'en' ? 'English' : 'Hebrew or English'}`,
+    submitTool: SEARCH_PLAN_TOOL
+  });
+  return (input.queries || []).filter(x => x && x.q && x.q.trim()).slice(0, 5).map(x => ({ q: x.q.trim().slice(0, 120), label: String(x.label || '').trim().slice(0, 60) }));
+}
+const WD_WRITERS = new Set(['Q36180', 'Q6625963', 'Q49757', 'Q4853732', 'Q18844224', 'Q214917', 'Q11774202']);
+const NEIGHBORS_KEY = 'vrt-neighbors';
+async function authorNeighborsRaw(name) {
+  const he = hasHebrew(name);
+  const sr = await wdApi({ action: 'wbsearchentities', search: name, language: he ? 'he' : 'en', uselang: he ? 'he' : 'en', type: 'item', limit: 6 });
+  const ids = (sr.search || []).map(x => x.id).filter(Boolean);
+  if (!ids.length) return [];
+  const e = await wdApi({ action: 'wbgetentities', ids: ids.join('|'), props: 'labels|claims', languages: 'he|en' });
+  const me = ids.map(id => (e.entities || {})[id]).find(x => x && wdClaims(x, 'P106').some(v => WD_WRITERS.has(v.id)) && authorMatches([wdLabel(x, 'he'), wdLabel(x, 'en')].filter(Boolean), name));
+  if (!me) return [];
+  const rel = [];   // { qid, kind, via }
+  wdClaims(me, 'P737').slice(0, 6).forEach(v => v.id && rel.push({ qid: v.id, kind: 'influence', via: '' }));
+  const search = (s, n) => wdApi({ action: 'query', list: 'search', srsearch: s, srlimit: String(n), srnamespace: '0' }).then(q => ((q.query && q.query.search) || []).map(x => x.title).filter(x => /^Q\d+$/.test(x))).catch(() => []);
+  const movement = wdClaims(me, 'P135').map(v => v.id).filter(Boolean)[0];
+  const awards = wdClaims(me, 'P166').map(v => v.id).filter(Boolean).slice(0, 2);
+  const [influenced, inMovement, ...laureates] = await Promise.all([
+    search(`haswbstatement:P737=${me.id}`, 8), movement ? search(`haswbstatement:P135=${movement}`, 10) : [], ...awards.map(a => search(`haswbstatement:P166=${a}`, 12))
+  ]);
+  influenced.forEach(q => rel.push({ qid: q, kind: 'influence', via: '' }));
+  inMovement.forEach(q => rel.push({ qid: q, kind: 'movement', via: movement }));
+  laureates.forEach((list, i) => list.forEach(q => rel.push({ qid: q, kind: 'award', via: awards[i] })));
+  const qids = uniq(rel.map(r => r.qid).filter(q => q !== me.id)).slice(0, 45);
+  if (!qids.length) return [];
+  const vias = uniq(rel.map(r => r.via).filter(Boolean)).slice(0, 5);
+  const ents = await wdApi({ action: 'wbgetentities', ids: [...qids, ...vias].join('|'), props: 'labels|claims', languages: 'he|en' });
+  const seen = new Set();
+  return rel.map(r => {
+    const x = (ents.entities || {})[r.qid];
+    if (!x || seen.has(r.qid) || r.qid === me.id || !wdClaims(x, 'P106').some(v => WD_WRITERS.has(v.id))) return null;
+    seen.add(r.qid);
+    const v = r.via ? (ents.entities || {})[r.via] : null;
+    return { he: wdLabel(x, 'he'), en: wdLabel(x, 'en'), kind: r.kind, viaHe: v ? wdLabel(v, 'he') : '', viaEn: v ? wdLabel(v, 'en') : '' };
+  }).filter(x => x && (x.he || x.en)).slice(0, 12);
+}
+async function authorNeighbors(name) {
+  let cache = {};
+  try { cache = JSON.parse(localStorage.getItem(NEIGHBORS_KEY) || '{}') || {}; } catch (e) { cache = {}; }
+  const k = norm(name);
+  if (cache[k] && cache[k].at > Date.now() - 30 * 86400000) return cache[k].list;
+  const list = await authorNeighborsRaw(name);
+  cache[k] = { at: Date.now(), list };
+  const keys = Object.keys(cache).sort((a, b) => cache[b].at - cache[a].at).slice(0, 60);
+  try { localStorage.setItem(NEIGHBORS_KEY, JSON.stringify(Object.fromEntries(keys.map(x => [x, cache[x]])))); } catch (e) { /* */ }
+  return list;
+}
+const neighborWhy = (n, author) => n.kind === 'award' ? L('זכה/תה באותו פרס כמו {0}: {1}', [author, (IS_EN ? n.viaEn : n.viaHe) || n.viaEn || n.viaHe])
+  : n.kind === 'movement' ? L('מאותה תנועה ספרותית כמו {0}', [author]) : L('קשר של השפעה ספרותית עם {0}', [author]);
+
+/* ---------- 5. ללמוד ממה שקרה להמלצות (בלי לבקש כלום מהמשתמש) ----------
+   לכל ספר שהומלץ בשיחות קודמות: נשמר ב"רוצה לקרוא", התחילו, סיימו (ובאיזה דירוג), או שהוצג ולא נגעו בו שבועיים.
+   סיום עם דירוג גבוה = כן חזק; נשמר או התחילו = עניין; התעלמות = לא קל. נכנס לדירוג המועמדים, לדירוג הסופי ולמודל. */
+const OUTCOME_IGNORE_MS = 14 * 86400000;
+function recOutcomes(db, now = Date.now()) {
+  const voted = new Set(Object.keys(db.recVotes || {}));
+  const rejected = new Set((db.rejections || []).map(x => normTitle(x.title || '')));
+  const seen = new Set(), out = [];
+  (db.history || []).filter(h => !(h.answers && (h.answers.gift || h.answers.mine))).forEach(h => (h.recs || []).forEach(r => {
+    const k = r.key || dedupeKey(r);
+    if (!r.title || seen.has(k)) return;
+    seen.add(k);
+    const lib = findInLibrary(r, db.books);
+    let kind = '';
+    if (lib) {
+      const s = statusOf(lib);
+      kind = isRated(lib) ? 'finished' : s === 'reading' ? 'started' : s === 'partial' ? 'stopped' : 'saved';
+      out.push({ book: r, kind, rating: Number(lib.rating) || 0, at: h.at });
+    } else if (!voted.has(recVoteKey(r)) && !rejected.has(normTitle(r.title)) && (h.at || 0) < now - OUTCOME_IGNORE_MS) out.push({ book: r, kind: 'ignored', rating: 0, at: h.at });
+  }));
+  return out.sort((a, b) => (b.at || 0) - (a.at || 0)).slice(0, 80);
+}
+const outcomeValue = (o) => o.kind === 'finished' ? (o.rating - 3) * 0.6 : o.kind === 'started' ? 0.4 : o.kind === 'saved' ? 0.25 : o.kind === 'stopped' ? (o.rating ? (o.rating - 3) * 0.4 : -0.3) : -0.1;
+// כמה כל ז'אנר "עבד" בהמלצות קודמות (סכום, בגבולות ±1)
+function outcomeGenreWeights(db) {
+  const m = new Map();
+  recOutcomes(db).forEach(o => { const [g] = classifyBook(o.book); if (g) m.set(g, (m.get(g) || 0) + outcomeValue(o)); });
+  m.forEach((v, k) => m.set(k, Math.max(-1, Math.min(1, v))));
+  return m;
+}
+function outcomesForPrompt(db, n = 30) {
+  const list = recOutcomes(db).slice(0, n);
+  if (!list.length) return '';
+  const t = (o) => `${o.book.title}${(o.book.authors || [])[0] ? ` — ${o.book.authors[0]}` : ''}`;
+  const group = (kind, label, f = () => true) => { const g = list.filter(o => o.kind === kind && f(o)); return g.length ? `${label}: ${g.map(o => t(o) + (o.rating ? ` (${o.rating}★)` : '')).join('; ')}` : ''; };
+  return [group('finished', 'finished and loved', o => o.rating >= 4), group('finished', 'finished, liked less', o => o.rating < 4), group('started', 'started reading'), group('saved', 'saved to read'),
+    group('stopped', 'stopped partway'), group('ignored', 'shown but ignored (mild signal)')].filter(Boolean).join('\n');
+}
+
+/* ---------- 4. דירוג סופי אחרי האימות ----------
+   ציון = הסדר של המודל (השיפוט הספרותי, הכי חשוב) + התאמה לטעם (ז'אנר, סופר, מדינה, ומה שעבד בהמלצות קודמות)
+   + מהדורה עברית כשמבקשים עברית. אחר כך גיוון: ספר אחד לכל סופר, ולא יותר משניים מאותו ז'אנר.
+   משבצת אחת "מחוץ לאזור הנוחות": ספר טוב מז'אנר שהקורא כמעט לא קורא, כשיש מספיק הצעות. */
+function tasteProfileFor(db) {
+  const books = tasteBooks(db.books);
+  const genre = new Map(), author = new Map(), country = new Map();
+  books.forEach(b => {
+    const w = tasteWeight(b);
+    const [g] = classifyBook(b); if (g) genre.set(g, (genre.get(g) || 0) + w);
+    (b.authors || []).slice(0, 1).forEach(a => author.set(norm(a), (author.get(norm(a)) || 0) + w));
+    if (b.country) country.set(b.country, (country.get(b.country) || 0) + Math.max(0, w));
+  });
+  const maxG = Math.max(1, ...[...genre.values()].map(Math.abs)), totalC = [...country.values()].reduce((a, x) => a + x, 0) || 1;
+  const recentAuthors = new Set(books.filter(b => b.readAt && b.readAt > Date.now() - 60 * 86400000).flatMap(b => (b.authors || []).slice(0, 1).map(norm)));
+  return { genre: (g) => g ? (genre.get(g) || 0) / maxG : 0, author: (a) => author.get(norm(a)) || 0, country: (c) => c ? (country.get(c) || 0) / totalC : 0, recentAuthors, known: (g) => genre.has(g), outcomes: outcomeGenreWeights(db) };
+}
+function rankRecs(list, db, { want = 5, lang = 'he', gift = false } = {}) {
+  if (!list.length) return [];
+  const tp = gift ? null : tasteProfileFor(db);
+  const n = list.length;
+  const scored = list.map((r, i) => {
+    const [g] = classifyBook(r);
+    const a = (r.authors || [])[0] || '';
+    let s = 2 * (1 - i / n);   // הסדר של המודל
+    if (tp) {
+      s += 0.8 * tp.genre(g) + Math.min(0.4, 0.15 * tp.author(a)) + 0.4 * tp.country(r.country) + 0.5 * (tp.outcomes.get(g) || 0);
+      if (tp.recentAuthors.has(norm(a))) s -= 0.4;   // אותו סופר שנקרא ממש לאחרונה: פחות חידוש
+    }
+    if (lang !== 'en' && isHebrewEdition(r)) s += 0.3;
+    if (r.fromCandidate) s += 0.15;
+    return { r, s, g, a: norm(a) };
+  }).sort((x, y) => y.s - x.s);
+  const picked = [], authors = new Set(), genres = new Map();
+  const fits = (x) => !authors.has(x.a) && (genres.get(x.g) || 0) < 2;
+  const take = (x, extra = {}) => { picked.push({ ...x.r, ...extra }); authors.add(x.a); if (x.g) genres.set(x.g, (genres.get(x.g) || 0) + 1); };
+  const slots = tp && n > want && want >= 4 ? want - 1 : want;
+  scored.forEach(x => { if (picked.length < slots && fits(x)) take(x); });
+  if (slots < want) {
+    // משבצת גילוי: ז'אנר שהקורא לא קורא (או כמעט), מההצעות שנשארו, לפי הסדר של המודל
+    const rest = list.map(r => scored.find(x => x.r === r)).filter(x => !picked.some(p => p.key === x.r.key) && !authors.has(x.a));
+    const ex = rest.find(x => x.g && !tp.known(x.g)) || rest.find(x => x.g && tp.genre(x.g) <= 0.1);
+    if (ex) take(ex, { explore: true });
+  }
+  scored.forEach(x => { if (picked.length < want && !picked.some(p => p.key === x.r.key) && !authors.has(x.a)) take(x); });
+  return picked;
+}
+
 /* ---------- שכבה אלגוריתמית לפני ה-AI ----------
    לפני שפונים ל-Claude, האפליקציה אוספת בעצמה 30 ספרים אמיתיים (כבר מאומתים) שמתאימים לקורא, ומדרגת אותם לפי אותות:
-   1. ספרים אחרים של סופרים שדירגת גבוה (Google Books, עברית קודם)
-   2. מה שחברים אהבו (4★+) או רוצים לקרוא
+   1. ספרים אחרים של סופרים שדירגת גבוה (Google Books, עברית קודם), כולל החדשים שלהם
+   2. מה שחברים אהבו (4★+) או רוצים לקרוא, ו"אהובים בקהילה" (סיכום אנונימי)
    3. ספרים מרשימת 400 הספרים המוכרים, מהז'אנרים שאתה הכי אוהב (לפי הקטלוג הפנימי)
    4. התאמה למיקוד שנבחר (ז'אנר, תקופה), מהדורה עברית/ישראלית
-   Claude בוחר מהם ומסביר, ויכול להוסיף עד 2 ספרים משלו. ספר שנבחר מהרשימה לא צריך בדיקה נוספת. */
-async function buildCandidates(db, focus = {}, limit = 30, lang = 'he') {
+   5. חיפוש לפי הבקשה עצמה (aiSearchPlan), ו"שכנים" ספרותיים של הסופרים האהובים (Wikidata)
+   6. מה שעבד בהמלצות קודמות (recOutcomes) מחזק או מחליש ז'אנרים
+   Claude בוחר מהם ומסביר, ויכול להוסיף עד 4 ספרים משלו. ספר שנבחר מהרשימה לא צריך בדיקה נוספת. */
+async function buildCandidates(db, focus = {}, limit = 30, lang = 'he', { request = '', gift = false } = {}) {
   const heOnly = lang === 'he';
   const books = db.books;
   const owned = (b) => !!findInLibrary(b, books);
-  const rej = new Set(rejectedKeys(db).map(x => normTitle(x)));
-  const neg = new Set(books.filter(b => isRated(b) && b.rating <= 2).flatMap(b => (b.authors || []).map(a => norm(a))));
+  // במצב מתנה הטעם שלי לא קובע: לא מסננים לפי מה שאני דחיתי או לא אהבתי
+  const rej = new Set(gift ? [] : rejectedKeys(db).map(x => normTitle(x)));
+  const neg = new Set(gift ? [] : books.filter(b => isRated(b) && b.rating <= 2).flatMap(b => (b.authors || []).map(a => norm(a))));
   const out = new Map();
   const add = (item, score, signal) => {
     const title = item.book ? item.book.title : item.seed[0];
@@ -1728,6 +1888,15 @@ async function buildCandidates(db, focus = {}, limit = 30, lang = 'he') {
   };
   const eraOk = (y) => { const n = parseInt(y, 10); if (!n || !focus.era) return 0; const now = new Date().getFullYear();
     return focus.era === 'new' ? (n >= now - 5 ? 1.5 : -2) : focus.era === 'modern' ? (n >= 1950 && n <= 2000 ? 1 : -1) : (n < 1950 ? 1 : -1); };
+  const gLang = (name) => heOnly || hasHebrew(name || '') ? 'iw' : undefined;
+  // 0. חיפוש לפי הבקשה (גם במצב מתנה): השאילתות של Haiku → Google Books
+  const reqJob = request.trim().length >= 3 && aiAvailable() && googleAvailable()
+    ? withTimeout(aiSearchPlan({ request, focus, lang }), 9000).then(plan => Promise.all(plan.map(({ q, label }) =>
+      googleSearch(q, { lang: heOnly ? 'iw' : undefined, max: 8, newest: focus.era === 'new' }).catch(() => []).then(list =>
+        list.filter(c => c.title && (c.authors || []).length && !owned(c)).slice(0, 5).forEach(c =>
+          add({ book: c }, 2.5 + (isHebrewEdition(c) ? 0.5 : 0) + eraOk(c.year), L('מתאים לבקשה: {0}', [label || q]))))))).catch(() => {})
+    : Promise.resolve();
+  if (gift) { await withTimeout(reqJob, 12000).catch(() => {}); return [...out.values()].sort((a, b) => b.score - a.score).slice(0, limit); }
   // 1. סופרים אהובים
   const aScore = new Map();
   tasteBooks(books).filter(b => tasteWeight(b) > 0.25).forEach(b => (b.authors || []).slice(0, 1).forEach(a => aScore.set(a, (aScore.get(a) || 0) + tasteWeight(b))));
@@ -1737,16 +1906,40 @@ async function buildCandidates(db, focus = {}, limit = 30, lang = 'he') {
     list.filter(c => (c.authors || []).some(x => norm(x).includes(sur)) && !owned(c) && c.title).slice(0, 6).forEach(c =>
       add({ book: c }, 2 + w * 0.5 + (isHebrewEdition(c) ? 1 : 0) + (isIsraeliRecord(c) ? 0.5 : 0) + eraOk(c.year), L('סופר/ת שאהבת: {0}', [a])));
   }));
+  // הספרים החדשים של שלושת הסופרים האהובים ביותר
+  topAuthors.slice(0, 3).forEach(([a, w]) => jobs.push((googleAvailable() ? googleSearch(`inauthor:"${a}"`, { lang: gLang(a), max: 6, newest: true }) : Promise.resolve([])).catch(() => []).then(list => {
+    const sur = norm(a).split(' ').pop(), year = new Date().getFullYear();
+    list.filter(c => (c.authors || []).some(x => norm(x).includes(sur)) && !owned(c) && c.title && parseInt(c.year, 10) >= year - 3).slice(0, 2).forEach(c =>
+      add({ book: c }, 1.8 + w * 0.4 + (isHebrewEdition(c) ? 0.5 : 0) + eraOk(c.year), L('ספר חדש של {0} ({1})', [a, c.year])));
+  })));
+  // "שכנים" ספרותיים של שני הסופרים האהובים ביותר (Wikidata): השפעה, תנועה ספרותית, אותו פרס
+  const loved = new Set(topAuthors.map(([a]) => norm(a)));
+  topAuthors.slice(0, 2).forEach(([a, w]) => jobs.push(withTimeout(authorNeighbors(a), 7000).catch(() => []).then(list => Promise.all(list
+    .filter(nb => !loved.has(norm(nb.he)) && !loved.has(norm(nb.en)) && !neg.has(norm(nb.he)) && !neg.has(norm(nb.en))).slice(0, 3).map(nb => {
+      const name = (heOnly || hasHebrew(a)) && nb.he ? nb.he : nb.en || nb.he;
+      return (googleAvailable() ? googleSearch(`inauthor:"${name}"`, { lang: gLang(name), max: 6 }) : Promise.resolve([])).catch(() => []).then(books2 => {
+        const sur = norm(name).split(' ').pop();
+        books2.filter(c => (c.authors || []).some(x => norm(x).includes(sur)) && !owned(c) && c.title).slice(0, 2).forEach(c =>
+          add({ book: c }, 1.4 + w * 0.3 + (isHebrewEdition(c) ? 0.5 : 0) + eraOk(c.year), neighborWhy(nb, a)));
+      });
+    })))));
+  jobs.push(reqJob);
   // 2. חברים
   try {
     const s = loadSocial(); const rel = friendsOf(s.items, ACTIVE.id);
     const fr = [...rel.entries()].filter(([, x]) => x.status === 'accepted').map(([p]) => p);
     lovedBy(fr, books).slice(0, 15).forEach(x => add({ book: x.book }, 1.5 + x.fans.length + (x.fans[0] ? (x.fans[0].rating - 4) : 0) + eraOk(x.book.year), x.fans.length ? L('חברים אהבו ({0})', [x.fans.length]) : L('חברים רוצים לקרוא')));
   } catch (e) { /* בלי חברים */ }
+  // "אהובים בקהילה": סיכום אנונימי מהשרת (שני משתמשים לפחות דירגו 4+)
+  loadCommunity().filter(x => x && x.book && Array.isArray(x.ratings) && !owned(x.book)).slice(0, 10).forEach(x => {
+    const avg = x.ratings.reduce((a, r) => a + r, 0) / x.ratings.length;
+    add({ book: x.book }, 1 + (avg - 4) + 0.3 * x.ratings.length + eraOk(x.book.year), L('אהוב בקהילה ({0})', [x.ratings.length]));
+  });
   // 3. ז'אנרים אהובים מתוך רשימת הספרים המוכרים (+ ז'אנר שנבחר במיקוד)
   // ז'אנרים לפי סכום המשקלים (ספר אהוב מאתמול שווה יותר מספר אהוב מלפני 15 שנה)
   const gwm = new Map();
   tasteBooks(books).forEach(b => { const [t] = classifyBook(b); if (GENRE_OF_TAG[t]) gwm.set(t, (gwm.get(t) || 0) + tasteWeight(b)); });
+  outcomeGenreWeights(db).forEach((v, t) => { if (GENRE_OF_TAG[t]) gwm.set(t, (gwm.get(t) || 0) + v); });   // מה שעבד בהמלצות קודמות
   const gs = [...gwm.entries()].map(([tag, w]) => ({ tag, w }));
   const focusG = new Set(focus.genre || []);
   const topG = [...gs.filter(x => x.w > 0.6), ...[...focusG].map(t => ({ tag: t, w: 2 }))];
@@ -1756,7 +1949,7 @@ async function buildCandidates(db, focus = {}, limit = 30, lang = 'he') {
     g.books.filter(b => !owned({ title: b[0], authors: [b[1]] }) && !(b[2] && owned({ title: b[2], authors: [b[1]] })))
       .slice(0, 8).forEach(b => add({ seed: b, genre: tag }, 1 + w + (focusG.has(tag) ? 2 : 0), focusG.has(tag) ? L("הז'אנר שביקשת: {0}", [L(g.genre)]) : T(`ז'אנר שאתה אוהב: ${L(g.genre)}`)));
   });
-  await withTimeout(Promise.all(jobs), 8000).catch(() => {});
+  await withTimeout(Promise.all(jobs), 12000).catch(() => {});
   return [...out.values()].sort((a, b) => b.score - a.score).slice(0, limit);
 }
 const candidateLine = (c, i) => `${i + 1}. ${c.title} — ${c.author || '?'}${c.book && c.book.year ? ` (${c.book.year})` : ''} | ${c.signals.join('; ')}`;
@@ -1795,7 +1988,9 @@ async function aiBuildProfile(db) {
   const note = db.profileNote ? `\nREADER'S OWN NOTE ABOUT THEIR TASTE: ${db.profileNote}` : '';
   const fbs = (db.feedback || []).filter(x => !p || (x.at || 0) > p.at).slice(0, 20).map(x => `"${x.text}"${x.request ? ` (when asking for: ${x.request})` : ''}`).join('; ');
   const votes = votesForPrompt(db, p ? p.at : 0, 40);
-  const vb = votes ? `\nRECOMMENDATIONS THE READER MARKED (their verdict on books suggested to them, with optional reasons):\n${votes}\nLearn from these what kind of suggestion works for this reader and what doesn't.` : '';
+  const outc = outcomesForPrompt(db, 40);
+  const vb = (votes ? `\nRECOMMENDATIONS THE READER MARKED (their verdict on books suggested to them, with optional reasons):\n${votes}\nLearn from these what kind of suggestion works for this reader and what doesn't.` : '')
+    + (outc ? `\nWHAT THE READER DID WITH EARLIER SUGGESTIONS (implicit; finished and loved = strong yes, saved or started = interest, ignored = mild no):\n${outc}` : '');
   const fb = vb + (fbs ? `\nFEEDBACK THE READER GAVE ON RECOMMENDATIONS: ${fbs}\nTreat feedback carefully: a single remark may reflect a passing mood or a specific request. Turn it into a lasting trait only if it repeats or matches their ratings; otherwise record it as a situational preference (e.g. "sometimes wants lighter books").` : '');
   const prompt = p && p.text
     ? `CURRENT PROFILE:\n${p.text}${note}${fb}\n\n${readingTimeline(db.books)}\n\nCHANGES SINCE IT WAS WRITTEN (title (published) — author | rating | when read | tags | notes | w):\n${libraryForPrompt(changedSince(db, p.at), 60) || '(none)'}${wish ? `\nWISHLIST NOW: ${wish}` : ''}${rej ? `\nREJECTED RECOMMENDATIONS WITH REASONS: ${rej}` : ''}\n\nUpdate the profile: keep what still holds, add what the changes show.`
@@ -1809,11 +2004,11 @@ async function aiBuildProfile(db) {
 
 function recRequest(opts) {
   // מצב מתנה: בלי הטעם, ההיסטוריה והשלילות של המשתמש; רק הבקשה והתשובות על מקבל המתנה
-  if (opts.gift) return recRequestBase({ ...opts, books: [], history: [], profile: null, profileNote: '', rejections: [], friendsLoved: [], feedback: [], recVotes: '', genreMix: '', candidates: [], dismissed: [], giftFor: true });
+  if (opts.gift) return recRequestBase({ ...opts, books: [], history: [], profile: null, profileNote: '', rejections: [], friendsLoved: [], feedback: [], recVotes: '', outcomes: '', genreMix: '', dismissed: [], giftFor: true });
   return recRequestBase(opts);
 }
-function recRequestBase({ books, request, focus, qa, lang, exclude, dismissed, history, want, profile, profileNote, rejections = [], friendsLoved = [], feedback = [], genreMix = '', candidates = [], giftFor = false, recVotes = '' }) {
-  const candBlock = candidates.length ? `\n\nCANDIDATES (real books already found in the catalogues for this reader, with the signals that surfaced them). Prefer choosing from these by number when they fit the request; you may add up to 2 books of your own (candidate 0):\n${candidates.map(candidateLine).join('\n')}` : '';
+function recRequestBase({ books, request, focus, qa, lang, exclude, dismissed, history, want, profile, profileNote, rejections = [], friendsLoved = [], feedback = [], genreMix = '', candidates = [], giftFor = false, recVotes = '', outcomes = '' }) {
+  const candBlock = candidates.length ? `\n\nCANDIDATES (real books already found in the catalogues for this reader, with the signals that surfaced them; "matches the request" means a catalogue search for this very request found it). Prefer choosing from these by number when they fit the request; you may add up to 4 books of your own (candidate 0):\n${candidates.map(candidateLine).join('\n')}` : '';
   const langText = { he: 'Hebrew only. Recommend ONLY books that have a published Hebrew edition (original Hebrew or translated to Hebrew), and give its exact Hebrew title in title_he. Books without a Hebrew edition are dropped automatically, so do not suggest them', en: 'English only. Recommend books that have a published English edition (original English or translated into English), and give its English title in title_original', both: 'Hebrew or English editions', any: 'any language', auto: 'Hebrew or English' }[lang] || 'Hebrew or English';
   const excludeTitles = uniq([...books.map(b => b.title), ...exclude, ...(history || []).flatMap(h => (h.recs || []).map(r => r.title))]).slice(0, 300);
   const prefs = focusSummary(focus);
@@ -1825,7 +2020,8 @@ function recRequestBase({ books, request, focus, qa, lang, exclude, dismissed, h
     : `READER'S LIBRARY (title (published) — author | rating 1-5 | when read | tags | notes | w):\n${libraryForPrompt(read) || '(empty)'}`;
   const wishBlock = wish.length ? `\nWISHLIST (they already plan to read these; do not recommend them, but they show current interests): ${wish.slice(0, 40).map(b => b.title).join('; ')}` : '';
   const rejBlock = rejections.length ? `\nREJECTED RECOMMENDATIONS (do not recommend; learn from the reasons): ${rejections.slice(0, 30).map(x => `${x.title}${x.note ? ` (${x.note})` : ''}`).join('; ')}` : '';
-  const voteBlock = recVotes ? `\nEARLIER SUGGESTIONS THE READER MARKED (good = more like this; not good = avoid what they share, and read the reasons):\n${recVotes}` : '';
+  const voteBlock = (recVotes ? `\nEARLIER SUGGESTIONS THE READER MARKED (good = more like this; not good = avoid what they share, and read the reasons):\n${recVotes}` : '')
+    + (outcomes ? `\nHOW EARLIER SUGGESTIONS TURNED OUT (what the reader did, without being asked; finished and loved = strong yes, saved or started = interest, ignored = mild no):\n${outcomes}` : '');
   const fbBlock = feedback.length ? `\nRECENT FEEDBACK ON EARLIER SUGGESTIONS (may be a passing mood; weigh it for this request): ${feedback.slice(0, 5).map(x => `"${x.text}"`).join('; ')}` : '';
   const cMix = giftFor ? '' : countryMixText(books);
   const mixBlock = (genreMix ? `\nGENRE MIX OF WHAT THEY READ: ${genreMix}` : '') + (cMix ? `\nCOUNTRIES OF WHAT THEY READ (by author): ${cMix}. Consider where the reader likes their books to come from; a book from a new country can be a good surprise when it fits the taste.` : '') + (giftFor ? '' : (() => { const t = readingTimeline(books); return t ? '\n' + t : ''; })());
@@ -1843,7 +2039,7 @@ function recRequestBase({ books, request, focus, qa, lang, exclude, dismissed, h
       '`why` must connect the book to specific books and notes from the reader\'s library, to their answers, and to how critics describe it, in 2–4 sentences.',
       `Language: ${langText}. ` + HEBREW_OUT + addressRule(addressOf())
     ].join('\n'),
-    prompt: `${readerBlock}${profileNote ? `\nREADER'S NOTE ABOUT THEIR TASTE: ${profileNote}` : ''}${mixBlock}${wishBlock}${rejBlock}${voteBlock}${fbBlock}${friendsBlock}\n\nALREADY READ, OWNED OR SEEN (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 450).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history.slice(0, profile ? 3 : 6), books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs.length ? `\nPREFERENCES: ${prefs.join('; ')}` : ''}${qa && qa.length ? `\nFOLLOW-UP ANSWERS:\n${qa.map(x => `- ${x.q} → ${x.a}`).join('\n')}` : ''}${candBlock}\n\nRecommend ${want + (lang === 'he' ? 4 : 2)} books.`
+    prompt: `${readerBlock}${profileNote ? `\nREADER'S NOTE ABOUT THEIR TASTE: ${profileNote}` : ''}${mixBlock}${wishBlock}${rejBlock}${voteBlock}${fbBlock}${friendsBlock}\n\nALREADY READ, OWNED OR SEEN (do not recommend): ${[...excludeTitles, ...dismissed.filter(x => !x.includes(':') && !x.includes('|'))].slice(0, 450).join('; ') || 'none'}${history && history.length ? `\n\nEARLIER RECOMMENDATION CONVERSATIONS (learn from them; do not repeat these books):\n${historyForPrompt(history.slice(0, profile ? 3 : 6), books)}` : ''}\n\nREQUEST: ${request || '(no specific request — recommend what fits this reader best)'}${prefs.length ? `\nPREFERENCES: ${prefs.join('; ')}` : ''}${qa && qa.length ? `\nFOLLOW-UP ANSWERS:\n${qa.map(x => `- ${x.q} → ${x.a}`).join('\n')}` : ''}${candBlock}\n\nRecommend ${want + (lang === 'he' ? 7 : 5)} books, best first. Every suggestion is checked and then ranked for variety, so give a varied list (different authors; not all from one genre).`
   };
 }
 
@@ -1883,16 +2079,15 @@ const loadPending = () => { try { return JSON.parse(localStorage.getItem(PENDING
 const savePending = (p) => { try { p ? localStorage.setItem(PENDING_KEY(), JSON.stringify(p)) : localStorage.removeItem(PENDING_KEY()); } catch (e) { /* */ } };
 
 // שלב 1: המודל מציע (בשרת אם אפשר). שלב 2: כל הצעה נבדקת במאגרים ובחנויות, ומקבלת זמינות, קישור ותקציר מהמקור
-async function aiRecommend(opts) {
-  const { books, onProgress } = opts;
-  const { system, prompt } = recRequest(opts);
-  onProgress && onProgress(`שולח ל-Claude את הספרייה שלך (${books.length} ספרים), הבקשה והתשובות. זה לוקח בדרך כלל דקה או שתיים.`);
-  let res = null;
+// מריץ את מודל ההמלצה: בשרת אם אפשר (ממשיך גם כשהמסך כבוי), אחרת ישירות מהטלפון
+async function runRecModel({ system, prompt, onProgress, pendingCtx }) {
   if (jobsAvailable()) {
     try {
       const id = await startJob({ system, prompt, submitTool: REC_TOOL, effort: 'low' });
-      savePending({ id, at: Date.now(), ctx: { ...(opts.ctx || {}), candidates: (opts.candidates || []).map(slimCandidate) } });
-      res = await pollJob(id, onProgress);
+      if (pendingCtx) savePending({ id, at: Date.now(), ctx: pendingCtx });
+      const res = await pollJob(id, onProgress);
+      savePending(null);
+      return res;
     } catch (e) {
       // שגיאת רשת בשליחה, או שהשרת לא התחיל: ממשיכים ישירות (כל עוד האפליקציה פתוחה)
       savePending(null);   // שגיאה: לא "ממשיכים" את אותה עבודה בכל כניסה ללשונית
@@ -1900,34 +2095,59 @@ async function aiRecommend(opts) {
       onProgress && onProgress('ההמלצה ברקע לא התחילה, ממשיך ישירות מהטלפון. כדאי להשאיר את האפליקציה פתוחה עד שזה מסתיים.');
     }
   }
-  if (!res) res = await aiRun({ effort: 'low', web: false, onProgress, system, prompt, submitTool: REC_TOOL });
-  savePending(null);
-  return finishRecs({ ...opts, ...res });
+  return aiRun({ effort: 'low', web: false, onProgress, system, prompt, submitTool: REC_TOOL });
+}
+// שלב 1: המודל מציע (בשרת אם אפשר). שלב 2: כל הצעה נבדקת במאגרים ובחנויות, ואם חסר – סבב השלמה. שלב 3: דירוג וגיוון
+async function aiRecommend(opts) {
+  const { books, onProgress } = opts;
+  const { system, prompt } = recRequest(opts);
+  onProgress && onProgress(`שולח ל-Claude את הספרייה שלך (${books.length} ספרים), הבקשה והתשובות. זה לוקח בדרך כלל דקה או שתיים.`);
+  const res = await runRecModel({ system, prompt, onProgress, pendingCtx: { ...(opts.ctx || {}), candidates: (opts.candidates || []).map(slimCandidate) } });
+  const extra = ({ failed, accepted, need }) => runRecModel({ system, onProgress, prompt: `${prompt}\n\nFIRST ROUND RESULT: these suggestions were checked against the catalogues and could not be used (not found${opts.lang === 'he' ? ', no Hebrew edition' : ''}, or already in the library). Do not suggest them again: ${failed.join('; ')}${accepted.length ? `\nAlready accepted in this round (do not repeat): ${accepted.join('; ')}` : ''}\n\nRecommend ${need + 5} more books, different from all of the above. Prefer books you are sure exist${opts.lang === 'he' ? ' in Hebrew' : ''}, and the CANDIDATES.` });
+  return finishRecs({ ...opts, ...res, extra });
 }
 async function resumeRecommend(pending, opts) {
   const res = await pollJob(pending.id, opts.onProgress);
   savePending(null);
   return finishRecs({ ...opts, candidates: (pending.ctx && pending.ctx.candidates) || [], ...res });
 }
-async function finishRecs({ input, cost, books, exclude, want = 5, onProgress, candidates = [], lang = 'he' }) {
+// אימות כל ההצעות במקביל. מחזיר את מה שאומת (לפי הסדר של המודל) ואת השמות שנפסלו
+async function verifyAll({ input, books, exclude, candidates = [], lang = 'he', skip = [] }) {
   const heOnly = lang === 'he';
-  onProgress && onProgress(`Claude הציע ${input.recommendations.length} ספרים. בודק כל אחד מול הספרייה הלאומית, Google Books והחנויות…`);
   // ספר שנבחר מרשימת המועמדים כבר אומת; השאר נבדקים במקביל, כל אחד עם תקרת זמן
   const fromCand = (r) => { const c = candidates[(r.candidate || 0) - 1]; return c ? c : null; };
-  const checked = await Promise.all(input.recommendations.map(r => {
+  const list = (input.recommendations || []).slice(0, 16);
+  const checked = await Promise.all(list.map(r => {
     const c = fromCand(r);
     if (c && c.book && (!heOnly || isHebrewOrIsraeli(c.book))) return Promise.resolve(c.book);
     const q = c && c.seed ? { ...r, title_he: c.seed[0], title_original: c.seed[2] || r.title_original, author: c.seed[1] } : r;
     return withTimeout(verifyRec(q, heOnly), 15000).catch(() => null);
   }));
-  const recs = [];
-  let rejected = 0;
-  input.recommendations.forEach((r, i) => {
+  const ok = [], failed = [];
+  list.forEach((r, i) => {
     const c = checked[i];
-    if (recs.length >= want) return;
-    if (!c || (heOnly && !isHebrewOrIsraeli(c)) || findInLibrary(c, books) || exclude.includes(c.key) || recs.some(x => x.key === c.key)) { rejected++; return; }
-    recs.push({ ...c, country: c.country || r.country || '', original: r.title_original && r.title_original !== c.title ? r.title_original : (c.subtitle || ''), reasons: [r.why], genres: r.genres, verifiedAt: Date.now(), verifiedVia: c.verifiedVia || (c.source === 'google' ? 'Google Books' : 'Open Library') });
+    if (!c || (heOnly && !isHebrewOrIsraeli(c)) || findInLibrary(c, books) || exclude.includes(c.key) || skip.includes(c.key) || ok.some(x => x.key === c.key)) { failed.push(r.title_he || r.title_original); return; }
+    ok.push({ ...c, country: c.country || r.country || '', original: r.title_original && r.title_original !== c.title ? r.title_original : (c.subtitle || ''), reasons: [r.why], genres: r.genres, fromCandidate: !!fromCand(r), verifiedAt: Date.now(), verifiedVia: c.verifiedVia || (c.source === 'google' ? 'Google Books' : 'Open Library') });
   });
+  return { ok, failed: failed.filter(Boolean) };
+}
+async function finishRecs({ input, cost, books, exclude, want = 5, onProgress, candidates = [], lang = 'he', db, gift = false, extra = null }) {
+  const heOnly = lang === 'he';
+  onProgress && onProgress(`Claude הציע ${input.recommendations.length} ספרים. בודק כל אחד מול הספרייה הלאומית, Google Books והחנויות…`);
+  const first = await verifyAll({ input, books, exclude, candidates, lang });
+  let pool = first.ok, rejected = first.failed.length;
+  // השלמה: אם פחות מ-want עברו את האימות, סבב קצר נוסף עם מה שנפסל ("לא נמצא, אל תחזור עליו")
+  if (pool.length < want && first.failed.length && extra) {
+    onProgress && onProgress(L('רק {0} ספרים עברו את האימות. מבקש מ-Claude עוד הצעות…', [pool.length]));
+    try {
+      const res2 = await extra({ failed: first.failed, accepted: pool.map(x => x.title), need: want - pool.length });
+      cost += res2.cost || 0;
+      const second = await verifyAll({ input: res2.input, books, exclude, candidates, lang, skip: pool.map(x => x.key) });
+      pool = [...pool, ...second.ok.filter(x => !pool.some(p => p.key === x.key))];
+      rejected += second.failed.length;
+    } catch (e) { /* ההשלמה נכשלה: נשארים עם מה שיש */ }
+  }
+  const recs = rankRecs(pool, db || { books, history: [], recVotes: {}, rejections: [] }, { want, lang, gift });
   // הזמינות והתקציר מהחנויות נטענים אחר כך בכל כרטיס, כדי שההמלצות יופיעו מיד
   onProgress && onProgress(`אומתו ${recs.length} ספרים${rejected ? `; ${rejected} נפסלו (לא נמצאו במאגרים${heOnly ? ', אין מהדורה עברית' : ''}, או כבר אצלך)` : ''}. עלות משוערת: $${cost.toFixed(2)}`);
   return { recs, interpretation: input.interpretation, cost };
@@ -4393,6 +4613,7 @@ function RecCard({ r, onRead, onWant, onDismiss, inLib, onEnrich, voteSlot = nul
         </div>
       </div>
       <div className="mt-3 rounded-xl bg-accentSoft border border-line p-2.5">
+        {r.explore && <div className="text-[13px] font-semibold mb-1 flex items-center gap-1"><Icon name="Compass" size={14} />{L('מחוץ לאזור הנוחות: ספר מסוג שכמעט לא מופיע בספרייה שלך')}</div>}
         <div className="text-[13px] font-semibold text-accent mb-1 flex items-center gap-1"><Icon name="Sparkles" size={14} />למה זה מתאים לך</div>
         <ul className="text-[14px] grid gap-0.5 list-disc ps-5">{r.reasons.map((x, i) => <li key={i}>{x}</li>)}</ul>
       </div>
@@ -4650,7 +4871,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
     language: r.language, isbns: (r.isbns || []).slice(0, 3), link: r.link, publisher: r.publisher || '', reasons: r.reasons || [],
     verifiedAt: r.verifiedAt, verifiedVia: r.verifiedVia || '', ebook: !!r.ebook, ebookLink: r.ebookLink || '', olEbook: !!r.olEbook,
     sources: r.sources || [], aiFormats: r.aiFormats || null, genres: r.genres || [], descSource: r.descSource || '', descriptionHe: (r.descriptionHe || '').slice(0, 1500),
-    offers: (r.offers || []).slice(0, 8), availability: r.availability || null, reviews: r.reviews || null, original: r.original || '', country: r.country || '', detailsAt: r.detailsAt || 0
+    offers: (r.offers || []).slice(0, 8), availability: r.availability || null, reviews: r.reviews || null, original: r.original || '', country: r.country || '', detailsAt: r.detailsAt || 0, explore: !!r.explore
   });
   const saveSession = (ans, usedLang, allRecs) => {
     if (!st.session.id) st.session = { id: uid(), at: Date.now() };
@@ -4702,14 +4923,14 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
     recSet(st, { running: true, questions: [], qa });
     try {
       // השכבה האלגוריתמית: המועמדים נאספו כבר בזמן שאלות ההמשך
-      const candidates = await (st.candP || (st.candP = buildCandidates(db, ans.focus || {}, 30, lang))).catch(() => []);
-      if (candidates.length) progress(`נמצאו ${candidates.length} ספרים מתאימים במאגרים (לפי סופרים שאהבת, חברים וז'אנרים). Claude בוחר מתוכם.`);
+      const candidates = await (st.candP || (st.candP = buildCandidates(db, ans.focus || {}, 30, lang, { request: ans.request || '', gift: !!ans.gift }))).catch(() => []);
+      if (candidates.length) progress(`נמצאו ${candidates.length} ספרים מתאימים במאגרים (לפי הבקשה, סופרים שאהבת, חברים וז'אנרים). Claude בוחר מתוכם.`);
       const gift = !!ans.gift;
       const { recs: r, interpretation } = await aiRecommend({
         candidates, gift,
         books: db.books, request: ans.request, focus: ans.focus, qa, lang, exclude: excludeNow(),
         dismissed: db.dismissed, history: db.history, want: 5, onProgress: progress, ctx: { ans, qa },
-        profile: db.litProfile, profileNote: db.profileNote, rejections: activeRejections(db).concat((db.rejections || []).filter(x => x.note && x.until && x.until <= Date.now())), friendsLoved: friendsLovedTitles(db.books), feedback: db.feedback || [], genreMix: genreMixText(db.books), recVotes: votesForPrompt(db)
+        profile: db.litProfile, profileNote: db.profileNote, rejections: activeRejections(db).concat((db.rejections || []).filter(x => x.note && x.until && x.until <= Date.now())), friendsLoved: friendsLovedTitles(db.books), feedback: db.feedback || [], genreMix: genreMixText(db.books), recVotes: votesForPrompt(db), outcomes: outcomesForPrompt(db), db
       });
       applyRecs(ans, r, interpretation);
     } catch (e) { progress(e.message); }
@@ -4737,7 +4958,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
     const ans = { mode: 'ai', request, focus: st.focus, gift };
     const sum = focusSummary(st.focus);
     recSet(st, { answers: ans, step: QUESTIONS.length, running: true, qa: [] });
-    st.candP = gift ? Promise.resolve([]) : buildCandidates(db, st.focus || {}, 30, lang);   // רץ במקביל לשאלות ההמשך (במתנה: בלי הטעם שלי)
+    st.candP = buildCandidates(db, st.focus || {}, 30, lang, { request, gift });   // רץ במקביל לשאלות ההמשך (במתנה: רק לפי הבקשה, בלי הטעם שלי)
     pushLog({ from: 'me', text: [gift ? L('🎁 מתנה: {0}', [request || L('ספר טוב')]) : request || L('תמליץ לי על הספר הבא'), ...sum].join(' · ') });
     let qs = [];
     try { qs = await aiClarify({ books: gift ? [] : db.books, request, focus: st.focus, profile: gift ? null : db.litProfile, gift }); } catch (e) { qs = []; }
@@ -4784,7 +5005,7 @@ function DiscoverTab({ db, update, onPick, notify, onOpenDigest }) {
     const ans = (p.ctx && p.ctx.ans) || { mode: 'ai', request: '' };
     recSet(st, { running: true, resuming: true, answers: ans, step: QUESTIONS.length });
     progress('ממשיך את ההמלצה שהתחילה קודם…');
-    resumeRecommend(p, { books: db.books, exclude: excludeNow(), want: 5, onProgress: progress, lang })
+    resumeRecommend(p, { books: db.books, exclude: excludeNow(), want: 5, onProgress: progress, lang, db })
       .then(({ recs: r, interpretation }) => applyRecs(ans, r, interpretation))
       .catch(e => { savePending(null); progress(e.message); })
       .finally(() => recSet(st, { running: false, resuming: false }));
@@ -6257,6 +6478,7 @@ const GUIDE = [
     [L('למה ספר לא נמצא?'), L('כל ספר נבדק מול Google Books, הספרייה הלאומית, Open Library והחנויות. אפשר לנסות את השם המלא, איות אחר, את השם בשפת המקור, ISBN מהכריכה האחורית, או "זיהוי חכם".')],
     [L('אפשר לייבא מ-Goodreads או StoryGraph?'), L('כן: הגדרות ← "ייצוא וייבוא" ← "ייבוא מקובץ CSV". כל ספר נבדק, ומה שלא אומת מחכה ברשימה בלשונית ההוספה.')]] },
   { id: 'recs', title: L('המלצות'), icon: 'Sparkles', intro: L('Claude קורא את הפרופיל הספרותי שלך וממליץ, וכל המלצה נבדקת מול המאגרים והחנויות לפני שהיא מוצגת.'), qa: [
+    [L('איך נבחרות ההמלצות?'), L('לפני ש-Claude חושב, האפליקציה מחפשת בעצמה ספרים אמיתיים: לפי מה שביקשתם עכשיו, ספרים נוספים (וחדשים) של סופרים שאהבתם, סופרים קרובים אליהם (השפעה ספרותית, אותה תנועה, אותו פרס), מה שחברים והקהילה אהבו, וז\'אנרים שאתם אוהבים. Claude בוחר מתוכם ומוסיף משלו, כל ספר נבדק במאגרים, ואם חסרים – הוא מתבקש להשלים. בסוף ההמלצות מדורגות לפי הטעם שלכם ומה שעבד בהמלצות קודמות, ספר אחד לכל סופר, ולפעמים ספר אחד "מחוץ לאזור הנוחות".')],
     [L('איך מקבלים המלצה?'), L('בלשונית "גלה ספר חדש" כותבים מה בא לך, בוחרים מיקוד (מצב רוח, ז\'אנר, תקופה ועוד) ולוחצים "המלצה חכמה". Claude ישאל 2–4 שאלות קצרות לדיוק (אפשר לדלג או להחליף שאלה).')],
     [L('כמה זמן זה לוקח?'), L('בדרך כלל דקה-שתיים. אפשר לצאת מהאפליקציה: ההמלצה ממשיכה בשרת, ואפשר לקבל התראה כשהיא מוכנה.')],
     [L('למה אפשר לסמוך על ההמלצות?'), L('כל ספר שהמודל מציע נבדק מול הספרייה הלאומית, Google Books והחנויות; ספר שלא נמצא נפסל. בכל המלצה מופיעים זמינות (מודפס, דיגיטלי, קולי), קישורים לרכישה וביקורות מאתרים מוכרים.')],

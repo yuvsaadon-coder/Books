@@ -28,7 +28,8 @@ const BOOKS = [
   vol('en1', 'Norwegian Wood', ['Haruki Murakami'], '9780375704024', { language: 'en', description: LONGEN + '...' }),
   vol('en2', 'The Remains of the Day', ['Kazuo Ishiguro'], '9780679731726', { language: 'en', description: 'A butler looks back.' }),
   vol('hp1', 'הארי פוטר ואבן החכמים', ["ג'.ק. רולינג"], '9789650000101'), vol('hp2', 'הארי פוטר וחדר הסודות', ["ג'.ק. רולינג"], '9789650000102'),
-  vol('old1', 'מגדלור בערפל', ['נעמה ברקאי'], '9789650000103')
+  vol('old1', 'מגדלור בערפל', ['נעמה ברקאי'], '9789650000103'),
+  vol('lh1', 'אור על המים', ['תמר גל'], '9789650000211'), vol('rf1', 'גשם של אפריל', ['דן ארז'], '9789650000228'), vol('rf2', 'שלג של מאי', ['דן ארז'], '9789650000235')
 ];
 // Wikidata מדומה: סדרה של שני ספרים, וסרט באותה סדרה (שלא אמור להיכנס)
 const wdItem = (id, he, en, claims) => ({ id, labels: { he: { value: he }, en: { value: en } }, claims });
@@ -56,6 +57,7 @@ const KV = {
 };
 const WENV = { LIBRARY: KV };
 const noAuth = [];
+const searchPlans = [], planCalls = [];
 const aiCalls = [], aiScript = [], errors = [], feedbacks = [], bookinfoCalls = [];
 const digestFor = new Map();
 let stallNext = false;
@@ -148,6 +150,11 @@ async function phone(browser, name) {
         const reqBody = JSON.parse(req.postData());
         // בניית הפרופיל הספרותי רצה ברקע: עונים עליה לבד, בלי לצרוך את התסריט של הבדיקה
         // זיהוי מדינת הסופר רץ ברקע: עונים לבד
+        // תוכנית החיפוש לפי הבקשה (Haiku): עונים מהתור searchPlans, ובלעדיו בלי שאילתות
+        if ((reqBody.tools || []).some(t => t.name === 'submit_search_plan')) {
+          planCalls.push(reqBody);
+          return route.fulfill({ headers: { ...cors, 'content-type': 'text/event-stream' }, body: sse([{ type: 'tool_use', id: 'sp1', name: 'submit_search_plan', input: { queries: searchPlans.shift() || [] } }], 'tool_use') });
+        }
         if ((reqBody.tools || []).some(t => t.name === 'submit_countries')) {
           countryCalls.push(reqBody);
           const C = { 'עמוס עוז': 'ישראל', 'עגנון': 'ישראל', 'הרוקי מורקמי': 'יפן', 'Haruki Murakami': 'יפן', 'ארנסט המינגוויי': 'ארצות הברית' };
@@ -899,6 +906,47 @@ try {
     assert.equal(await A.locator('main li:has-text("מגדלור בערפל") [aria-label="לא נלקח בחשבון בהמלצות"]').count(), 0);
     // המשקלים נשלחים למודל
     assert.ok(jobBodies.some(j => /\| w=[+-]\d\.\d/.test(j.messages[0].content) && j.system.includes('half-life 3 years')), 'weights in the recommendation prompt');
+  });
+  await step('recommendation engine: search by the request, refill when books fail verification, one book per author, learning from what happened', async () => {
+    const fmt = { print: 'yes', ebook: 'unknown', audiobook: 'unknown', notes: '' };
+    const rec = (he, author, extra = {}) => ({ title_he: he, title_original: '', author, isbn: '', why: 'מתאים', synopsis_he: '', genres: [], formats: fmt, sources: [], candidate: 0, country: '', ...extra });
+    // 1. הבקשה הופכת לשאילתת חיפוש, והתוצאה נכנסת למועמדים עם האות "מתאים לבקשה"
+    searchPlans.push([{ q: 'אור על המים', label: 'סיפור על הים' }]);
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 'eq1', name: 'submit_questions', input: { questions: [] } }], stop: 'tool_use' });
+    // 2. בסבב הראשון שתי הצעות לא קיימות → סבב השלמה; בהשלמה שני ספרים של אותו סופר → רק אחד מוצג
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 'er1', name: 'submit_recommendations', input: { interpretation: 'מחפש לפי הבקשה.', recommendations: [
+      rec('ספר שלא קיים בכלל', 'אף אחד'), rec('עוד ספר מומצא', 'מישהו'), rec('אור על המים', 'תמר גל')] } }], stop: 'tool_use' });
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 'er2', name: 'submit_recommendations', input: { interpretation: 'השלמה.', recommendations: [
+      rec('גשם של אפריל', 'דן ארז'), rec('שלג של מאי', 'דן ארז')] } }], stop: 'tool_use' });
+    const plansBefore = planCalls.length, jobsBefore = jobBodies.length;
+    await A.click('nav >> text=גלה ספר חדש');
+    if (await A.locator('button:has-text("שאלון חדש")').count()) await A.click('button:has-text("שאלון חדש")');
+    await A.click('button[role=tab]:has-text("מכל הספרים")');
+    await A.fill('#ai-request', 'סיפור שקט על הים'); await A.click('button:has-text("המלצה חכמה")');
+    await A.waitForSelector('text=מחפש לפי הבקשה.', { timeout: 30000 });
+    await A.waitForSelector('section li:has-text("גשם של אפריל")', { timeout: 30000 });
+    assert.equal(planCalls.length, plansBefore + 1, 'one search-plan call');
+    assert.ok(planCalls.at(-1).messages[0].content.includes('סיפור שקט על הים'));
+    const main = jobBodies[jobsBefore].messages[0].content;
+    assert.ok(/\d+\. אור על המים — תמר גל.*מתאים לבקשה: סיפור על הים/.test(main), 'request search result is a candidate');
+    assert.equal(jobBodies.length, jobsBefore + 2, 'a refill round ran');
+    const refill = jobBodies.at(-1).messages[0].content;
+    assert.ok(refill.includes('FIRST ROUND RESULT') && refill.includes('ספר שלא קיים בכלל') && refill.includes('Already accepted in this round (do not repeat): אור על המים'));
+    await A.waitForSelector('section li:has-text("אור על המים")');
+    assert.equal(await A.locator('section li:has-text("שלג של מאי")').count(), 0, 'one book per author');
+    // 3. מה שקרה להמלצה (נשמרה ב"רוצה לקרוא") מגיע להמלצה הבאה, בלי לשאול את המשתמש
+    await A.locator('section li:has-text("אור על המים")').first().locator('button:has-text("רוצה לקרוא")').first().click();
+    await A.click('[role=dialog] button:has-text("הוספה לרשימת")');
+    await A.click('[role=dialog][aria-label="בחרת ספר"] button:has-text("יופי")'); await A.waitForTimeout(500);
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 'eq2', name: 'submit_questions', input: { questions: [] } }], stop: 'tool_use' });
+    aiScript.push({ blocks: [{ type: 'tool_use', id: 'er3', name: 'submit_recommendations', input: { interpretation: 'לומד ממה שקרה.', recommendations: [] } }], stop: 'tool_use' });
+    await A.click('nav >> text=גלה ספר חדש');
+    if (await A.locator('button:has-text("שאלון חדש")').count()) await A.click('button:has-text("שאלון חדש")');
+    await A.fill('#ai-request', 'עוד משהו'); await A.click('button:has-text("המלצה חכמה")');
+    await A.waitForSelector('text=לומד ממה שקרה.', { timeout: 30000 });
+    const next = jobBodies.at(-1).messages[0].content;
+    assert.ok(next.includes('HOW EARLIER SUGGESTIONS TURNED OUT') && /saved to read: [^\n]*אור על המים/.test(next), 'outcomes reach the model');
+    assert.equal(aiScript.length, 0);
   });
   await step('English interface: chosen on first entry, left-to-right, English everywhere, the model writes in English, back to Hebrew', async () => {
     const E = await phone(browser, 'E');

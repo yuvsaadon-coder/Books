@@ -499,7 +499,7 @@ export const EN = {
   "לא נמצאו ספרים שעברו את כל שלבי האימות. נסו לשנות תשובה (למשל אורך או שפה), או להוסיף עוד ספרים מדורגים.": "No books passed every verification step. Try changing an answer (such as length or language), or add more rated books.",
   "אירעה שגיאת רשת בזמן החיפוש. בדקו חיבור לאינטרנט ונסו שוב.": "A network error occurred during the search. Check your internet connection and try again.",
   "לא נשארו המלצות שעברו את האימות. נסו לנסח את הבקשה אחרת.": "No recommendations passed verification. Try phrasing the request differently.",
-  "נמצאו {0} ספרים מתאימים במאגרים (לפי סופרים שאהבת, חברים וז'אנרים). Claude בוחר מתוכם.": "Found {0} suitable books in the catalogues (by authors you loved, friends and genres). Claude is choosing among them.",
+  "נמצאו {0} ספרים מתאימים במאגרים (לפי הבקשה, סופרים שאהבת, חברים וז'אנרים). Claude בוחר מתוכם.": "Found {0} suitable books in the catalogues (by your request, authors you loved, friends and genres). Claude is choosing among them.",
   "🎁 מתנה: {0}": "🎁 Gift: {0}",
   "ספר טוב": "a good book",
   "תמליץ לי על הספר הבא": "Recommend my next book",
@@ -1328,5 +1328,15 @@ export const EN = {
   "שמירת הסיסמה": "Save password",
   "שמירת שאלת הביטחון": "Save security question",
   "מה היה הכינוי שלך?": "What was your nickname?",
-  "באיזה בית חולים נולדת?": "In which hospital were you born?"
+  "באיזה בית חולים נולדת?": "In which hospital were you born?",
+  "זכה/תה באותו פרס כמו {0}: {1}": "Won the same award as {0}: {1}",
+  "מאותה תנועה ספרותית כמו {0}": "Same literary movement as {0}",
+  "קשר של השפעה ספרותית עם {0}": "Literary influence link with {0}",
+  "מתאים לבקשה: {0}": "Matches your request: {0}",
+  "ספר חדש של {0} ({1})": "New book by {0} ({1})",
+  "אהוב בקהילה ({0})": "Community favourite ({0})",
+  "רק {0} ספרים עברו את האימות. מבקש מ-Claude עוד הצעות…": "Only {0} books passed verification. Asking Claude for more suggestions…",
+  "מחוץ לאזור הנוחות: ספר מסוג שכמעט לא מופיע בספרייה שלך": "Outside your comfort zone: a kind of book that hardly appears in your library",
+  "איך נבחרות ההמלצות?": "How are recommendations chosen?",
+  "לפני ש-Claude חושב, האפליקציה מחפשת בעצמה ספרים אמיתיים: לפי מה שביקשתם עכשיו, ספרים נוספים (וחדשים) של סופרים שאהבתם, סופרים קרובים אליהם (השפעה ספרותית, אותה תנועה, אותו פרס), מה שחברים והקהילה אהבו, וז'אנרים שאתם אוהבים. Claude בוחר מתוכם ומוסיף משלו, כל ספר נבדק במאגרים, ואם חסרים – הוא מתבקש להשלים. בסוף ההמלצות מדורגות לפי הטעם שלכם ומה שעבד בהמלצות קודמות, ספר אחד לכל סופר, ולפעמים ספר אחד \"מחוץ לאזור הנוחות\".": "Before Claude thinks, the app itself looks for real books: by what you asked for right now, more (and new) books by authors you loved, authors close to them (literary influence, the same movement, the same award), what friends and the community loved, and genres you like. Claude chooses among them and adds its own, every book is checked in the catalogues, and if some are missing it's asked to fill the gap. Finally the recommendations are ranked by your taste and by what worked in earlier recommendations, one book per author, and sometimes one book \"outside your comfort zone\"."
 };
