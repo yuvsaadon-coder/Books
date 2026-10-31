@@ -1300,8 +1300,6 @@ export const EN = {
   "שכחתי סיסמה. מה עושים?": "I forgot my password. What now?",
   "במסך הכניסה בוחרים את השם, לוחצים \"שכחתי סיסמה\", עונים על שאלת הביטחון ובוחרים סיסמה חדשה. התשובה לא רגישה לרווחים, למקפים ולאותיות גדולות.": "On the sign-in screen pick your name, tap \"Forgot password\", answer your security question and choose a new password. The answer ignores spaces, hyphens and capital letters.",
   "הסיסמה נועדה לפרטיות בסיסית בין המשתמשים, לא להגנה חזקה: מי שיודע את התשובה לשאלת הביטחון יכול לאפס אותה. מעבר לזה, כל מכשיר יכול לשנות רק את הספרייה של מי שנכנס בו, חברים רואים רק את מה שבחרתם לשתף (בלי ספרים מוסתרים), ו\"אהובים בקהילה\" הוא סיכום אנונימי, בלי שמות ובלי הערות.": "The password is for basic privacy between users, not strong protection: anyone who knows the answer to your security question can reset it. Beyond that, each device can change only the library of the person signed in on it, friends see only what you chose to share (no hidden books), and \"Community favourites\" is an anonymous summary, without names or notes.",
-  "מה היה השם של חיית המחמד הראשונה שלך?": "What was the name of your first pet?",
-  "באיזו עיר נולדת?": "In what city were you born?",
   "מה השם של בית הספר היסודי שלך?": "What was the name of your primary school?",
   "מה הספר הראשון שאהבת?": "What was the first book you loved?",
   "מה השם של החבר או החברה הכי טובים שלך בילדות?": "What was the name of your best childhood friend?",
@@ -1328,5 +1326,7 @@ export const EN = {
   "קביעת סיסמה": "Set a password",
   "שינוי סיסמה": "Change password",
   "שמירת הסיסמה": "Save password",
-  "שמירת שאלת הביטחון": "Save security question"
+  "שמירת שאלת הביטחון": "Save security question",
+  "מה היה הכינוי שלך?": "What was your nickname?",
+  "באיזה בית חולים נולדת?": "In which hospital were you born?"
 };

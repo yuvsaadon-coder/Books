@@ -123,7 +123,7 @@
 
 ## בדיקות
 - מתקינים פעם אחת: `npm install` בשורש, ו-`cd tests && npm install`.
-- מריצים: `cd tests && CHROMIUM_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome npm test`.
+- מריצים: `cd tests && CHROMIUM_PATH=/opt/pw-browsers/chromium-1243/chrome-linux64/chrome npm test`.
 - מה נבדק:
   - `starter.mjs` — רשימת הפתיחה: גודל, איזון ז'אנרים, כפילויות.
   - `worker.mjs` — בדיקות יחידה לשרת.

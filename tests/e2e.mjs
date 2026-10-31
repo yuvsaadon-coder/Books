@@ -258,7 +258,7 @@ try {
     assert.equal(await A.locator('a.skip-link').count(), 0);
     await login(A, 'יובל', 'wrong'); await A.waitForSelector('text=הסיסמה לא נכונה');
     // שכחתי סיסמה: עונים על השאלה (בכתיב אחר) ובוחרים סיסמה חדשה
-    await A.click('button:has-text("שכחתי סיסמה")'); await A.waitForSelector('label:has-text("חיית המחמד")');
+    await A.click('button:has-text("שכחתי סיסמה")'); await A.waitForSelector('label:has-text("בית הספר היסודי")');
     await A.fill('#sec-answer', 'שגוי'); await A.fill('#profile-pass', 'abcd'); await A.click('form button[type=submit]'); await A.waitForSelector('text=התשובה לא נכונה');
     await A.fill('#sec-answer', ' מיצי '); await A.click('form button[type=submit]'); await A.waitForSelector('nav >> text=ספרים שלי');
     assert.equal(await A.evaluate(() => JSON.parse(localStorage.getItem('vrt-session')).name), 'יובל');
