@@ -11,8 +11,9 @@
   // בזמן הבנייה: העברת ANTHROPIC_API_KEY מ-Build secrets לסודות של השרת
   "build": { "command": "sh worker/sync-secrets.sh" },
   // עבודות רקע: המלצה ממשיכה לרוץ בשרת גם כשהטלפון כבוי (Durable Object עם אחסון SQLite, זמין גם בתוכנית החינמית)
-  "durable_objects": { "bindings": [{ "name": "JOBS", "class_name": "AiJob" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AiJob"] }],
+  // Store: אחסון עקבי לסנכרון, לסיסמאות ולמונים (KV מחזיר לפעמים עותק ישן). מופע אחד בשם main
+  "durable_objects": { "bindings": [{ "name": "JOBS", "class_name": "AiJob" }, { "name": "STORE", "class_name": "Store" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AiJob"] }, { "tag": "v2", "new_sqlite_classes": ["Store"] }],
   // ההצעות הדו-שבועיות: בדיקה כל שעה למי הגיע הזמן
   "triggers": { "crons": ["17 * * * *"] },
   "kv_namespaces": [

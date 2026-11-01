@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { build } from 'esbuild';
 import assert from 'node:assert/strict';
 import worker from '../worker/worker.js';
+import { staleKV, storeNamespace } from './fakes.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
 const nm = root + 'tests/node_modules/';
@@ -50,12 +51,12 @@ function wikidataMock(route, u) {
 }
 // השרת האמיתי (worker.js) מטפל בכניסה ובסנכרון, עם KV בזיכרון
 const kv = new Map();
-const KV = {
-  get: async (k, t) => kv.has(k) ? (t === 'json' ? JSON.parse(kv.get(k)) : kv.get(k)) : null,
-  put: async (k, v) => { kv.set(k, typeof v === 'string' ? v : JSON.stringify(v)); },
-  delete: async (k) => { kv.delete(k); }
-};
-const WENV = { LIBRARY: KV };
+// KV "עקבי בסופו של דבר" (כל מפתח מוחזר מהמטמון של הקריאה הראשונה), ו-Store (Durable Object) בזיכרון, כמו בשרת האמיתי
+const KV = staleKV(kv, 1e9);
+const STORE = storeNamespace();
+const WENV = { LIBRARY: KV, STORE };
+STORE.bind(WENV);
+const mem = STORE.storage.m;
 const noAuth = [];
 const searchPlans = [], planCalls = [];
 const aiCalls = [], aiScript = [], errors = [], feedbacks = [], bookinfoCalls = [];
@@ -282,24 +283,27 @@ try {
     // משתמש ותיק בלי סיסמה (מגרסה 47) קובע סיסמה ושאלה בכניסה
     const pidY = await A.evaluate(() => JSON.parse(localStorage.getItem('vrt-session')).pid);
     const pidB = Object.keys(JSON.parse(kv.get('state')).data.dbs).find(p => p !== pidY);
-    kv.delete('pw:' + pidB); kv.delete('sec:' + pidB);
+    mem.delete('pw:' + pidB); mem.delete('sec:' + pidB); mem.set('consent:' + pidB, { v: 'old', at: 1 });
     await signOut(A); await A.click('main li:has-text("יעל")'); await A.waitForSelector('text=למשתמש הזה עוד אין סיסמה');
     await A.fill('#profile-pass', '1234'); await A.selectOption('#sec-q', '1'); await A.fill('#sec-a', 'חיפה'); await A.click('form button[type=submit]');
-    await A.waitForSelector('nav >> text=ספרים שלי'); assert.ok(kv.get('pw:' + pidB), 'password saved for the old user');
+    // בדיוק התרחיש של גרסה 48: קביעת סיסמה, ומיד אחריה אישור התנאים המעודכנים; אחר כך יציאה וכניסה עם הסיסמה
+    await A.waitForSelector('text=עדכנו את תנאי השימוש'); await A.check('#consent'); await A.click('button:has-text("הסכמה והמשך")');
+    await A.waitForSelector('nav >> text=ספרים שלי'); assert.ok(mem.get('pw:' + pidB), 'password saved for the old user');
+    await signOut(A); await login(A, 'יעל'); await A.waitForSelector('nav >> text=ספרים שלי');
     // תנאים חדשים: משתמש קיים מתבקש להסכים מחדש, וההסכמה נשמרת בשרת
-    kv.set('consent:' + pidY, JSON.stringify({ v: 'old', at: 1 }));
+    mem.set('consent:' + pidY, { v: 'old', at: 1 });
     await signOut(A);
     await A.click('button:has-text("הצהרת נגישות")'); await A.waitForSelector('[role=dialog] >> text=ת"י 5568'); await A.keyboard.press('Escape');
     await A.click('button:has-text("מדיניות פרטיות")'); await A.waitForSelector('[role=dialog] >> text=שאלת ביטחון'); await A.keyboard.press('Escape');
     await login(A, 'יובל'); await A.waitForSelector('text=עדכנו את תנאי השימוש');
     await A.check('#consent'); await A.click('button:has-text("הסכמה והמשך")'); await A.waitForSelector('nav >> text=ספרים שלי');
-    assert.notEqual(JSON.parse(kv.get('consent:' + pidY)).v, 'old');
+    assert.notEqual(mem.get('consent:' + pidY).v, 'old');
     // אחרי אישור התנאים הסיסמה עדיין עובדת (הבאג של גרסה 48), והמכשיר זוכר את המשתמש גם אחרי טעינה מחדש
     await A.reload(); await A.waitForSelector('nav >> text=ספרים שלי');
     assert.equal(await A.locator('[aria-label="החלפת משתמש"]').count(), 0, 'no switch-user button in the header');
     await A.click('[aria-label="החשבון שלי"]'); await A.waitForSelector('button:has-text("התנתקות מהמכשיר")');
     await signOut(A); await login(A, 'יובל'); await A.waitForSelector('nav >> text=ספרים שלי');
-    assert.ok(!JSON.stringify([...kv.values()]).includes('הנסיך הקטן'), 'answers are stored only as hashes');
+    assert.ok(!JSON.stringify([...kv.values(), ...mem.values()]).includes('הנסיך הקטן'), 'answers are stored only as hashes');
     await A.click('nav >> text=ספרים שלי');
   });
   await step('Hebrew edition first; full synopsis on expand; translation kept', async () => {

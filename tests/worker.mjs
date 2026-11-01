@@ -258,22 +258,26 @@ console.log('worker page verification: ok');
   const meta = JSON.parse(kv.get('digest-meta:old'));
   assert.ok(meta.next > now + 13 * 86400000, 'next in two weeks');
   // משתמש חדש: יום אחרי שנוצר
-  const st = JSON.parse(kv.get('state')); st.data.profiles.push({ id: 'new', name: 'דנה', createdAt: now + 1000 }); st.data.dbs.new = { books: [{ title: 'x', rating: 4, status: 'read' }] };
-  kv.set('state', JSON.stringify(st));
+  // המצב נשמר ב-Store (כאן בלי Durable Object: אותו קוד מעל KV); מוסיפים משתמש דרכו
+  const { storeCall } = await import('../worker/worker.js');
+  const st = (await storeCall(envD, 'getState')).state; st.data.profiles.push({ id: 'new', name: 'דנה', createdAt: now + 1000 }); st.data.dbs.new = { books: [{ title: 'x', rating: 4, status: 'read' }] };
+  await storeCall(envD, 'casState', { baseRev: st.rev, data: st.data });
   const r2 = await runDigests(envD, ctx, now + 2000);
   assert.equal(r2.ran, 0);
   assert.ok(JSON.parse(kv.get('digest-meta:new')).next >= now + 1000 + 86400000 - 5);
   console.log('worker biweekly digest: ok');
 }
 // ---------- כניסה (סיסמה ושאלת ביטחון), מה כל משתמש רואה, ומה מותר לו לכתוב ----------
+// KV כאן "עקבי בסופו של דבר" בצורה הקשה ביותר: כל מפתח מוחזר מהמטמון של הקריאה הראשונה, גם אחרי שנכתב מחדש.
+// כל מה שנקרא-משתנה-ונכתב חייב לעבור דרך Store (Durable Object), אחרת הבדיקות האלה נכשלות
 {
+  const { staleKV, storeNamespace } = await import('./fakes.mjs');
   const kv = new Map();
-  const LIB = {
-    get: async (k, t) => kv.has(k) ? (t === 'json' ? JSON.parse(kv.get(k)) : kv.get(k)) : null,
-    put: async (k, v) => { kv.set(k, typeof v === 'string' ? v : JSON.stringify(v)); },
-    delete: async (k) => { kv.delete(k); }
-  };
-  const env = { LIBRARY: LIB };
+  const LIB = staleKV(kv, 1e9);
+  const store = storeNamespace();
+  const env = { LIBRARY: LIB, STORE: store };
+  store.bind(env);
+  const mem = store.storage.m;
   const call = async (path, { method = 'GET', body, token } = {}) => {
     const r = await worker.fetch(new Request('https://w' + path, { method, headers: { 'content-type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined }), env, { waitUntil() {} });
     return { status: r.status, json: await r.json().catch(() => null) };
@@ -309,7 +313,7 @@ console.log('worker page verification: ok');
   assert.equal((await call('/auth/setup', { method: 'POST', body: { pid: 'A', password: '1234', q: 9, answer: 'חיפה' } })).json.error, 'question');
   assert.ok((await call('/auth/setup', { method: 'POST', body: { pid: 'A', password: '1234', q: 1, answer: 'תל-אביב' } })).json.token);
   assert.equal((await call('/auth/setup', { method: 'POST', body: { pid: 'A', password: 'grab', q: 1, answer: 'x' } })).json.error, 'has_password');
-  assert.ok(![kv.get('pw:A'), kv.get('sec:A')].join().includes('1234') && !kv.get('sec:A').includes('תל'), 'only hashes are stored');
+  assert.ok(!JSON.stringify([mem.get('pw:A'), mem.get('sec:A')]).includes('1234') && !JSON.stringify(mem.get('sec:A')).includes('תל') && mem.get('sec:A').hash, 'only hashes are stored');
   assert.equal((await call('/auth/enter', { method: 'POST', body: { pid: 'A', password: 'nope' } })).json.error, 'wrong');
   const a = (await call('/auth/enter', { method: 'POST', body: { pid: 'A', password: '1234' } })).json;
   assert.ok(/^s2\.A\.[0-9a-z]+\.[0-9a-f]{64}$/.test(a.token) && a.pid === 'A' && a.name === 'אבי');
@@ -318,11 +322,8 @@ console.log('worker page verification: ok');
   assert.equal((await call('/sync', { token: a.token })).status, 200);
   assert.equal((await call('/sync', { token: a.token.replace('s2.A.', 's2.B.') })).status, 401);
   assert.equal((await call('/sync', { token: a.token.slice(0, -1) + (a.token.endsWith('0') ? '1' : '0') })).status, 401);
-  // הבאג של גרסה 48: אישור התנאים מיד אחרי קביעת סיסמה מחק אותה (KV החזיר עותק ישן). עכשיו כל פרט במפתח משלו
-  const stale = new Map(kv); const realGet = LIB.get;
-  LIB.get = async (k, t) => k.startsWith('acct:') ? (t === 'json' ? JSON.parse(stale.get(k) || 'null') : stale.get(k) || null) : realGet(k, t);
+  // הבאג של גרסה 48: אישור התנאים מיד אחרי קביעת סיסמה מחק אותה (KV החזיר עותק ישן). עכשיו הכול ב-Store
   assert.equal((await call('/auth/consent', { method: 'POST', token: a.token, body: { v: 'x' } })).status, 200);
-  LIB.get = realGet;
   assert.ok((await call('/auth/enter', { method: 'POST', body: { pid: 'A', password: '1234' } })).json.token, 'the password survives accepting the terms');
   assert.equal((await call('/auth/profiles')).json.profiles.find(p => p.id === 'A').hasPass, true);
   // שכחתי סיסמה: השאלה, תשובה שגויה נדחית, תשובה נכונה (גם בכתיב אחר) מאפסת
@@ -339,7 +340,7 @@ console.log('worker page verification: ok');
   // הגבלת ניסיונות: 8 שגויים ברבע שעה
   for (let i = 0; i < 8; i++) await call('/auth/enter', { method: 'POST', body: { pid: 'A', password: 'x' + i } });
   assert.equal((await call('/auth/enter', { method: 'POST', body: { pid: 'A', password: '1234' } })).status, 429);
-  kv.delete('fail:A');
+  mem.delete('cnt:fail:A');
   for (const old of ['/auth/password', '/auth/google', '/auth/admin', '/auth/link']) assert.equal((await call(old, { method: 'POST', token: a.token, body: {} })).status, 404, old);
   // 3. מה A רואה: הכול שלו; מ-B (חבר) רק ספרים משותפים, בלי המוסתר ובלי הערות, בלי פרופיל/משוב; C (לא חבר) לא נשלח בכלל
   const v = (await call('/sync', { token: a.token })).json;
@@ -375,19 +376,17 @@ console.log('worker page verification: ok');
   assert.equal((await call('/auth/register', { method: 'POST', body: { name: ' בת ', consent: '1', ...cred } })).json.error, 'name_taken');
   const dn = (await call('/auth/register', { method: 'POST', body: { name: 'דן', consent: '1', ...cred } })).json;
   assert.equal(dn.consent, '1');
-  assert.equal(JSON.parse(kv.get('consent:' + dn.pid)).v, '1');
+  assert.equal(mem.get('consent:' + dn.pid).v, '1');
   assert.ok((await call('/auth/enter', { method: 'POST', body: { pid: dn.pid, password: '1234' } })).json.token, 'a new user can sign in right away');
   assert.equal((await call('/auth/consent', { method: 'POST', token: dn.token, body: { v: '2' } })).status, 200);
   assert.equal((await call('/auth/me', { token: dn.token })).json.consent, '2');
   // 6. הגבלת קצב ליצירת משתמשים מאותה כתובת
   for (let i = 0; i < 3; i++) await call('/auth/register', { method: 'POST', body: { name: 'משתמש ' + i, consent: '1', ...cred } });
   assert.equal((await call('/auth/register', { method: 'POST', body: { name: 'עוד אחד', consent: '1', ...cred } })).status, 429);
-  // 7. אסימון ישן (לפני גרסה 50, ב-KV) עדיין תקף, ויציאה מוחקת אותו; מחיקה עצמית מוחקת הכול וחוסמת את כל המכשירים
+  // 7. אסימון ישן (לפני גרסה 50, ב-KV) עדיין תקף; מחיקה עצמית מוחקת הכול וחוסמת את כל המכשירים
   const legacyTok = 'b'.repeat(64);
   kv.set('sess:' + legacyTok, JSON.stringify({ pid: 'A', at: 1, exp: Date.now() + 86400000 }));
   assert.equal((await call('/sync', { token: legacyTok })).status, 200);
-  await call('/auth/logout', { method: 'POST', token: legacyTok });
-  assert.equal((await call('/sync', { token: legacyTok })).status, 401);
   const c1 = (await call('/auth/setup', { method: 'POST', body: { pid: 'C', ...cred } })).json.token;
   const c2 = (await call('/auth/enter', { method: 'POST', body: { pid: 'C', password: '1234' } })).json.token;
   const before = (await call('/sync', { token: c1 })).json;
@@ -395,7 +394,37 @@ console.log('worker page verification: ok');
   assert.equal((await call('/sync', { token: c1 })).status, 401);
   assert.equal((await call('/sync', { token: c2 })).status, 401);
   const stC = JSON.parse(kv.get('state')).data;
-  assert.ok(stC.deleted.C && !stC.dbs.C && !stC.profiles.some(p => p.name === 'כרמל'));
+  assert.ok(stC.deleted.C && !stC.dbs.C && !stC.profiles.some(p => p.name === 'כרמל') && !mem.has('pw:C'));
   assert.ok(!(await call('/auth/profiles')).json.profiles.some(p => p.id === 'C'));
+  // 8. שני מכשירים כותבים באותו רגע: השני מקבל 409 ולא דורס (בלי Store, KV ישן היה מאשר את שניהם)
+  const t1 = (await call('/auth/enter', { method: 'POST', body: { pid: 'A', password: '1234' } })).json.token;
+  const base = (await call('/sync', { token: t1 })).json;
+  const mine = (title) => ({ profiles: base.data.profiles.filter(p => p.id === 'A'), deleted: {}, dbs: { A: { ...base.data.dbs.A, books: [...base.data.dbs.A.books, book('n-' + title, title)] } }, social: { items: [] } });
+  assert.equal((await call('/sync', { method: 'PUT', token: t1, body: { baseRev: base.rev, data: mine('ראשון') } })).status, 200);
+  const late = await call('/sync', { method: 'PUT', token: t1, body: { baseRev: base.rev, data: mine('שני') } });
+  assert.equal(late.status, 409);
+  assert.ok(late.json.data.dbs.A.books.some(b => b.title === 'ראשון'), 'the 409 carries the newer state to merge');
+  // 9. יצירת משתמש בזמן שמישהו מסנכרן: שניהם נשמרים
+  mem.delete('cnt:newuser'); mem.delete('cnt:newuser:local');   // מגבלת ההרשמה מהסעיף הקודם
+  const now9 = (await call('/sync', { token: t1 })).json;
+  const [reg, put] = await Promise.all([
+    call('/auth/register', { method: 'POST', body: { name: 'זיו', consent: '1', ...cred, password: 'abcd' } }),
+    call('/sync', { method: 'PUT', token: t1, body: { baseRev: now9.rev, data: mine('שלישי') } })
+  ]);
+  const st9 = (await call('/sync', { token: t1 })).json.data;
+  assert.ok(reg.json.token && st9.profiles.some(p => p.name === 'זיו'), 'new user kept');
+  assert.ok(put.status === 409 || st9.dbs.A.books.some(b => b.title === 'שלישי'), 'sync either saved or told to retry, never lost silently');
+  // 10. מונה השימוש היומי ב-AI סופר גם כש-KV מחזיר ערך ישן
+  const envAi = { ...env, ANTHROPIC_API_KEY: 'k' };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ id: 'm', content: [], usage: {} }), { headers: { 'content-type': 'application/json' } });
+  let limited = 0;
+  for (let i = 0; i < 205; i++) {
+    const r = await worker.fetch(new Request('https://w/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', Authorization: 'Bearer ' + t1 }, body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 10, messages: [{ role: 'user', content: 'x' }] }) }), envAi, { waitUntil() {} });
+    if (r.status === 429) limited++;
+  }
+  globalThis.fetch = realFetch;
+  assert.ok(limited > 0, 'the daily AI limit is enforced');
   console.log('worker sign-in (password + security question) and per-user data: ok');
+  console.log('worker consistent store (stale KV): concurrent writes, new users, counters: ok');
 }

@@ -68,9 +68,7 @@ async function handleAI(req, env, cors) {
   if (!env.ANTHROPIC_API_KEY) return json({ type: 'error', error: { type: 'not_configured', message: 'ANTHROPIC_API_KEY is not set' } }, 503, cors);
   const day = new Date().toISOString().slice(0, 10);
   const counterKey = 'ai-count:' + day;
-  const used = parseInt((await env.LIBRARY.get(counterKey)) || '0', 10);
-  if (used >= DAILY_AI_LIMIT) return json({ type: 'error', error: { type: 'daily_limit', message: 'Daily AI limit reached' } }, 429, cors);
-  await env.LIBRARY.put(counterKey, String(used + 1), { expirationTtl: 60 * 60 * 48 });
+  if ((await bump(env, counterKey, 60 * 60 * 48, DAILY_AI_LIMIT)).over) return json({ type: 'error', error: { type: 'daily_limit', message: 'Daily AI limit reached' } }, 429, cors)
 
   let body;
   try { body = await req.json(); } catch (e) { return json({ type: 'error', error: { type: 'invalid_request_error', message: 'bad json' } }, 400, cors); }
@@ -312,9 +310,7 @@ async function storeSearchViaClaude(env, q, sites = STORE_SITES) {
   if (!env.ANTHROPIC_API_KEY) return [];
   const day = new Date().toISOString().slice(0, 10);
   const counterKey = 'store-count:' + day;
-  const used = parseInt((await env.LIBRARY.get(counterKey)) || '0', 10);
-  if (used >= STORE_DAILY_LIMIT) return [];
-  await env.LIBRARY.put(counterKey, String(used + 1), { expirationTtl: 60 * 60 * 48 });
+  if ((await bump(env, counterKey, 60 * 60 * 48, STORE_DAILY_LIMIT)).over) return []
   let blocked = (await env.LIBRARY.get('blocked-domains', 'json')) || [];
   let msg = null;
   for (let attempt = 0; attempt < 2 && !msg; attempt++) {
@@ -431,8 +427,8 @@ export async function handleFeedback(req, env, cors) {
   const text = String(b.text || '').trim().slice(0, 2000);
   if (!text) return json({ error: 'empty' }, 400, cors);
   const item = { at: Date.now(), text, name: String(b.name || '').slice(0, 40), screen: String(b.screen || '').slice(0, 40), version: String(b.version || '').slice(0, 10) };
-  const list = (await env.LIBRARY.get('app-feedback', 'json')) || [];
-  await env.LIBRARY.put('app-feedback', JSON.stringify([item, ...list].slice(0, 300)));
+  // הרשימה מתעדכנת ב-Store (שני משובים באותו רגע לא מוחקים זה את זה), ועותק נכתב ל-KV תחת app-feedback לקריאה מלוח הבקרה
+  await storeCall(env, 'listOp', { key: 'app-feedback', legacy: 'app-feedback', mirror: 'app-feedback', op: 'feedback-add', arg: { item } });
   return json({ ok: true }, 200, cors);
 }
 async function handleReviews(req, env, cors, ctx) {
@@ -444,9 +440,7 @@ async function handleReviews(req, env, cors, ctx) {
   const cached = await env.LIBRARY.get(key, 'json');
   if (cached) return json({ ...cached, cached: true }, 200, cors);
   const day = new Date().toISOString().slice(0, 10), counterKey = 'store-count:' + day;
-  const used = parseInt((await env.LIBRARY.get(counterKey)) || '0', 10);
-  if (used >= STORE_DAILY_LIMIT) return json({ reviews: [], rating: null, limited: true }, 200, cors);
-  await env.LIBRARY.put(counterKey, String(used + 1), { expirationTtl: 60 * 60 * 48 });
+  if ((await bump(env, counterKey, 60 * 60 * 48, STORE_DAILY_LIMIT)).over) return json({ reviews: [], rating: null, limited: true }, 200, cors)
   let out;
   try { out = { ...(await findReviews(env, { title, author, original, lang })), checked_at: Date.now() }; }
   catch (e) { return json({ reviews: [], rating: null, error: String(e.message || e) }, 200, cors); }
@@ -535,9 +529,7 @@ async function handleJobs(req, env, cors, path, sess) {
     if (!env.ANTHROPIC_API_KEY) return json({ error: 'not_configured' }, 503, cors);
     const day = new Date().toISOString().slice(0, 10);
     const counterKey = 'ai-count:' + day;
-    const used = parseInt((await env.LIBRARY.get(counterKey)) || '0', 10);
-    if (used >= DAILY_AI_LIMIT) return json({ error: 'daily_limit' }, 429, cors);
-    await env.LIBRARY.put(counterKey, String(used + 1), { expirationTtl: 60 * 60 * 48 });
+    if ((await bump(env, counterKey, 60 * 60 * 48, DAILY_AI_LIMIT)).over) return json({ error: 'daily_limit' }, 429, cors)
     let body;
     try { body = await req.json(); } catch (e) { return json({ error: 'bad_json' }, 400, cors); }
     const job = {
@@ -724,9 +716,7 @@ const PAGE_TOOL = {
 export async function claudeBookPage(env, { title, author, isbn }) {
   if (!env.ANTHROPIC_API_KEY) return null;
   const day = new Date().toISOString().slice(0, 10), counterKey = 'store-count:' + day;
-  const used = parseInt((await env.LIBRARY.get(counterKey)) || '0', 10);
-  if (used >= STORE_DAILY_LIMIT) return null;
-  await env.LIBRARY.put(counterKey, String(used + 1), { expirationTtl: 60 * 60 * 48 });
+  if ((await bump(env, counterKey, 60 * 60 * 48, STORE_DAILY_LIMIT)).over) return null
   let blocked = (await env.LIBRARY.get('blocked-domains', 'json')) || [];
   const messages = [{ role: 'user', content: `Book: "${title}"${author ? ` by ${author}` : ''}${isbn ? `, ISBN ${isbn}` : ''}.
 1. Search the Israeli bookstores and publishers for this exact book's own page (a product page of this book, not a list or another book).
@@ -793,14 +783,18 @@ async function handleBookInfo(req, env, cors, ctx) {
 // Claude מציע 14 ספרים (בלי מה שהמשתמש קרא, רוצה לקרוא, שלל, או שכבר הוצע לו), כל אחד נבדק במאגרים ובחנויות, ונשמרים 10.
 const DIGEST_EVERY = 14 * 86400000, DIGEST_FIRST_DELAY = 86400000, DIGEST_PER_RUN = 3, DIGEST_SIZE = 10;
 const b64u = (buf) => { const bytes = typeof buf === 'string' ? new TextEncoder().encode(buf) : new Uint8Array(buf); let s = ''; bytes.forEach(b => { s += String.fromCharCode(b); }); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
+// מפתחות ההתראות: נוצרים פעם אחת ב-Store, כדי שכל השרתים יחתמו באותו מפתח (מפתח קיים ב-KV עובר אליו)
 async function vapidKeys(env) {
+  const have = await storeGet(env, 'vapid');
+  if (have) return have;
   let v = await env.LIBRARY.get('vapid', 'json');
   if (!v) {
     const kp = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
     v = { pub: b64u(await crypto.subtle.exportKey('raw', kp.publicKey)), jwk: await crypto.subtle.exportKey('jwk', kp.privateKey) };
-    await env.LIBRARY.put('vapid', JSON.stringify(v));
   }
-  return v;
+  const chosen = (await storeCall(env, 'getOrCreate', { key: 'vapid', value: v })).value;
+  await env.LIBRARY.put('vapid', JSON.stringify(chosen));
+  return chosen;
 }
 // Web Push בלי תוכן (לא צריך הצפנת תוכן): רק כותרת VAPID חתומה. ה-Service Worker מציג את ההודעה
 export async function vapidAuth(env, endpoint) {
@@ -816,17 +810,21 @@ export async function endpointKey(endpoint) {
   const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(endpoint));
   return [...new Uint8Array(h)].slice(0, 16).map(b => b.toString(16).padStart(2, '0')).join('');
 }
+const pushList = async (env, pid) => (await storeGet(env, 'push:' + pid)) || (await env.LIBRARY.get('push:' + pid, 'json')) || [];
 async function pushTo(env, pid, notice = { title: 'מה שנקרא', body: '10 ספרים חדשים שאולי יעניינו אותך', url: './?view=digest' }) {
-  const subs = (await env.LIBRARY.get('push:' + pid, 'json')) || [];
+  const subs = await pushList(env, pid);
   const keep = [];
   for (const sub of subs) {
     try {
-      await env.LIBRARY.put('notice:' + await endpointKey(sub.endpoint), JSON.stringify({ ...notice, at: Date.now() }), { expirationTtl: 7 * 86400 });
+      // ה-Service Worker קורא את ההודעה שניות אחרי שנכתבה: ב-Store (KV היה עלול להחזיר את ההודעה הקודמת)
+      await storeCall(env, 'putKey', { key: 'notice:' + await endpointKey(sub.endpoint), value: { ...notice, at: Date.now() } });
       const r = await fetch(sub.endpoint, { method: 'POST', headers: { Authorization: await vapidAuth(env, sub.endpoint), TTL: '86400', Urgency: 'normal', 'Content-Length': '0' } });
       if (r.status !== 404 && r.status !== 410) keep.push(sub);
     } catch (e) { keep.push(sub); }
   }
-  if (keep.length !== subs.length) await env.LIBRARY.put('push:' + pid, JSON.stringify(keep));
+  // מסירים רק את ההרשמות שפג תוקפן (ולא דורסים הרשמה שנוספה בינתיים)
+  const gone = subs.filter(x => !keep.includes(x)).map(x => x.endpoint);
+  if (gone.length) await storeCall(env, 'listOp', { key: 'push:' + pid, legacy: 'push:' + pid, op: 'push-remove', arg: { endpoints: gone } });
   return subs.length;
 }
 const DIGEST_TOOL = {
@@ -894,7 +892,7 @@ export async function generateDigest(env, ctx, pid, db) {
 }
 export async function runDigests(env, ctx, now = Date.now()) {
   if (!env.LIBRARY || !env.ANTHROPIC_API_KEY) return { ran: 0 };
-  const state = await env.LIBRARY.get('state', 'json');
+  const state = await loadState(env);
   const data = state && state.data;
   if (!data || !Array.isArray(data.profiles)) return { ran: 0 };
   let init = parseInt((await env.LIBRARY.get('digest-init')) || '0', 10);
@@ -932,15 +930,14 @@ async function handleDigest(req, env, cors, path, sess) {
   if (path === '/push/key') return json({ key: (await vapidKeys(env)).pub }, 200, cors);
   if (path === '/push/notice') {
     const k = (u.searchParams.get('e') || '').replace(/[^0-9a-f]/g, '').slice(0, 32);
-    const n = k ? await env.LIBRARY.get('notice:' + k, 'json') : null;
+    const n = k ? await storeGet(env, 'notice:' + k) : null;
     return json(n || { title: 'מה שנקרא', body: 'יש לך עדכון חדש', url: './' }, 200, cors);
   }
   if (path === '/push/subscribe' && req.method === 'POST') {
     let b; try { b = await req.json(); } catch (e) { return json({ error: 'bad_json' }, 400, cors); }
     const pid = sess.pid, sub = b.sub;
     if (!pid || !sub || typeof sub.endpoint !== 'string' || !/^https:\/\//.test(sub.endpoint)) return json({ error: 'bad_request' }, 400, cors);
-    const list = ((await env.LIBRARY.get('push:' + pid, 'json')) || []).filter(x => x.endpoint !== sub.endpoint);
-    await env.LIBRARY.put('push:' + pid, JSON.stringify([{ endpoint: sub.endpoint }, ...list].slice(0, 5)));
+    await storeCall(env, 'listOp', { key: 'push:' + pid, legacy: 'push:' + pid, op: 'push-add', arg: { endpoint: sub.endpoint } });
     return json({ ok: true }, 200, cors);
   }
   if (path === '/digest') {
@@ -951,6 +948,129 @@ async function handleDigest(req, env, cors, path, sess) {
   }
   return json({ error: 'not_found' }, 404, cors);
 }
+
+/* ---------- אחסון עקבי (Durable Object בשם Store) ----------
+   KV של Cloudflare "עקבי בסופו של דבר": קריאה יכולה להחזיר עותק ישן מהמטמון עד דקה אחרי כתיבה (גם "לא קיים").
+   לכן כל מה שנקרא, משתנה ונכתב בחזרה, וכל מה שנקרא מיד אחרי שנכתב, נשמר כאן: הסנכרון של כל המשתמשים (state),
+   הסיסמאות, שאלות הביטחון וההסכמות, מפתח החתימה של הכניסה, מפתחות ההתראות, רשימות ההתראות והמשוב.
+   ה-Durable Object מריץ בקשה אחת בכל פעם, והאחסון שלו עקבי: מה שנכתב נקרא מיד, ושינוי מתבצע בשלמותו או לא בכלל.
+   KV נשאר למטמונים, למונים ולגיבויים (ו-state נכתב גם ל-KV כעותק, לגיבוי ולחזרה לגרסה קודמת).
+   בלי STORE (בדיקות ישנות) אותו קוד רץ על KV ישירות (KvStorage). */
+const STATE_CHUNK = 400000;   // תווים לחלק (מגבלת ערך ב-Durable Object היא 2MB)
+const LIST_OPS = {
+  'push-add': (list, { endpoint }) => [{ endpoint }, ...list.filter(x => x.endpoint !== endpoint)].slice(0, 5),
+  'push-remove': (list, { endpoints }) => list.filter(x => !endpoints.includes(x.endpoint)),
+  'feedback-add': (list, { item }) => [item, ...list].slice(0, 300)
+};
+// מתאם: אותו ממשק כמו האחסון של Durable Object (get/put/delete של מפתח אחד או רבים), מעל KV
+class KvStorage {
+  constructor(kv) { this.kv = kv; }
+  async get(k) {
+    if (Array.isArray(k)) { const m = new Map(); for (const x of k) { const v = await this.get(x); if (v !== undefined) m.set(x, v); } return m; }
+    const v = await this.kv.get('store:' + k, 'json');
+    return v === null ? undefined : v;
+  }
+  async put(k, v) { if (typeof k === 'object') { for (const [a, b] of Object.entries(k)) await this.kv.put('store:' + a, JSON.stringify(b)); return; } await this.kv.put('store:' + k, JSON.stringify(v)); }
+  async delete(k) { for (const x of [].concat(k)) await this.kv.delete('store:' + x); }
+}
+class StoreCore {
+  constructor(storage, env) { this.s = storage; this.env = env; this.mirror = Promise.resolve(); }
+  // כתיבה ל-KV לפי הסדר (עותק בלבד; אף אחד לא קורא ממנו כדי לשנות)
+  mirrorKv(fn) { this.mirror = this.mirror.then(fn).catch(() => {}); return this.mirror; }
+  async readState() {
+    const meta = await this.s.get('state:meta');
+    if (!meta || (meta.migratedAt && Date.now() - meta.migratedAt < 10 * 60000)) {
+      // פעם ראשונה: מעבירים את המצב מ-KV (שם הוא נשמר עד גרסה 51). בעשר הדקות הראשונות בודקים שוב,
+      // למקרה ששרת בגרסה הקודמת (בזמן ההחלפה) כתב ל-KV אחרי המעבר: מאמצים מצב עם מספר גרסה גבוה יותר
+      const old = this.env.LIBRARY ? await this.env.LIBRARY.get('state', 'json') : null;
+      if (!meta) {
+        const st = old || { rev: 0, data: null };
+        await this.writeState(st, 0, Date.now());
+        return st;
+      }
+      if (old && old.rev > meta.rev) { await this.writeState(old, meta.n, meta.migratedAt); return old; }
+    }
+    const keys = Array.from({ length: meta.n }, (_, i) => 'state:' + i);
+    const parts = await this.s.get(keys);
+    return JSON.parse(keys.map(k => parts.get(k) || '').join(''));
+  }
+  async writeState(st, prevN, migratedAt) {
+    const text = JSON.stringify(st);
+    const n = Math.max(1, Math.ceil(text.length / STATE_CHUNK));
+    if (migratedAt === undefined) { const m = await this.s.get('state:meta'); migratedAt = m && m.migratedAt; }
+    const obj = { 'state:meta': { n, rev: st.rev, at: Date.now(), ...(migratedAt ? { migratedAt } : {}) } };
+    for (let i = 0; i < n; i++) obj['state:' + i] = text.slice(i * STATE_CHUNK, (i + 1) * STATE_CHUNK);
+    await this.s.put(obj);   // כל החלקים יחד: או הכול או כלום
+    if (prevN > n) await this.s.delete(Array.from({ length: prevN - n }, (_, i) => 'state:' + (n + i)));
+  }
+  async getState() { return { state: await this.readState() }; }
+  // כתיבה רק אם אף אחד לא כתב בינתיים (rev זהה); אחרת מחזירים את המצב העדכני
+  async casState({ baseRev, data }) {
+    const cur = await this.readState();
+    if (cur.rev !== baseRev) return { conflict: true, state: cur };
+    const meta = await this.s.get('state:meta');
+    const next = { rev: cur.rev + 1, at: Date.now(), data };
+    await this.writeState(next, meta ? meta.n : 0);
+    if (this.env.LIBRARY) await this.mirrorKv(async () => {
+      await this.env.LIBRARY.put('state', JSON.stringify(next));
+      await this.env.LIBRARY.put('backup:' + new Date().toISOString().slice(0, 10), JSON.stringify(next), { expirationTtl: 60 * 60 * 24 * 30 });
+    });
+    return { rev: next.rev, state: next };
+  }
+  // מונה עם חלון זמן (מגבלות שימוש וניסיונות): עולה במקום אחד, כך שאף בקשה לא "מפספסת" את הספירה
+  async incr({ key, ttlMs, limit }) {
+    const cur = await this.s.get('cnt:' + key), now = Date.now();
+    const alive = cur && cur.exp > now;
+    const n = alive ? cur.n : 0;
+    if (limit != null && n >= limit) return { n, over: true };
+    await this.s.put('cnt:' + key, { n: n + 1, exp: alive ? cur.exp : now + ttlMs });
+    return { n: n + 1, over: false };
+  }
+  async count({ key }) { const cur = await this.s.get('cnt:' + key); return { n: cur && cur.exp > Date.now() ? cur.n : 0 }; }
+  async getKeys({ keys }) { const m = await this.s.get(keys); return { values: Object.fromEntries(keys.map(k => [k, m.has(k) ? m.get(k) : null])) }; }
+  async putKey({ key, value }) { await this.s.put(key, value); return { ok: true }; }
+  async deleteKeys({ keys }) { await this.s.delete(keys); return { ok: true }; }
+  // יוצר רק אם עוד לא קיים (מפתח החתימה, מפתחות ההתראות): כולם מקבלים אותו ערך
+  async getOrCreate({ key, value }) {
+    const cur = await this.s.get(key);
+    if (cur !== undefined) return { value: cur };
+    await this.s.put(key, value);
+    return { value };
+  }
+  // שינוי של רשימה במקום אחד (בלי קריאה ישנה). legacy: מאיפה לייבא בפעם הראשונה; mirror: עותק ב-KV
+  async listOp({ key, op, arg, legacy, mirror }) {
+    let list = await this.s.get(key);
+    if (list === undefined) list = (legacy && this.env.LIBRARY ? await this.env.LIBRARY.get(legacy, 'json') : null) || [];
+    const next = LIST_OPS[op](Array.isArray(list) ? list : [], arg || {});
+    await this.s.put(key, next);
+    if (mirror && this.env.LIBRARY) await this.mirrorKv(() => this.env.LIBRARY.put(mirror, JSON.stringify(next)));
+    return { value: next };
+  }
+}
+export class Store {
+  constructor(state, env) { this.core = new StoreCore(state.storage, env); }
+  async fetch(req) {
+    const { op, ...args } = await req.json();
+    if (!['getState', 'casState', 'getKeys', 'putKey', 'deleteKeys', 'getOrCreate', 'listOp', 'incr', 'count'].includes(op)) return Response.json({ error: 'bad_op' }, { status: 400 });
+    try { return Response.json(await this.core[op](args)); }
+    catch (e) { return Response.json({ error: String((e && e.message) || e) }, { status: 500 }); }
+  }
+}
+const KV_CORES = new WeakMap();
+export async function storeCall(env, op, args = {}) {
+  if (env.STORE) {
+    const r = await env.STORE.get(env.STORE.idFromName('main')).fetch('https://store/', { method: 'POST', body: JSON.stringify({ op, ...args }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'store_error');
+    return j;
+  }
+  let core = KV_CORES.get(env.LIBRARY);
+  if (!core) { core = new StoreCore(new KvStorage(env.LIBRARY), env); KV_CORES.set(env.LIBRARY, core); }
+  return core[op](args);
+}
+const storeGet = async (env, key) => (await storeCall(env, 'getKeys', { keys: [key] })).values[key];
+const bump = (env, key, ttlSec, limit) => storeCall(env, 'incr', { key, ttlMs: ttlSec * 1000, limit });
+const countOf = async (env, key) => (await storeCall(env, 'count', { key })).n;
 
 // ---------- כניסה ואבטחה ----------
 // כל בקשה (חוץ מ-/ping, /auth/*, מפתח ההתראות והודעת ההתראה) דורשת מפתח כניסה (Bearer), שנוצר אחרי שם + סיסמה (או תשובה לשאלת הביטחון).
@@ -963,12 +1083,13 @@ const hex = (buf) => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2
 export const sha256hex = async (s) => hex(await crypto.subtle.digest('SHA-256', enc.encode(s)));
 const randomHex = (n = 32) => hex(crypto.getRandomValues(new Uint8Array(n)));
 const emptyData = () => ({ profiles: [], deleted: {}, dbs: {}, social: { items: [] } });
-async function loadState(env) { return (await env.LIBRARY.get('state', 'json')) || { rev: 0, data: null }; }
+// המצב של כולם (פרופילים, ספריות, חברים) נשמר ב-Store; כתיבה רק אם אף אחד לא כתב בינתיים (CONFLICT)
+async function loadState(env) { return (await storeCall(env, 'getState')).state || { rev: 0, data: null }; }
+const CONFLICT = 'state_conflict';
 async function saveState(env, cur, data) {
-  const next = { rev: cur.rev + 1, at: Date.now(), data };
-  await env.LIBRARY.put('state', JSON.stringify(next));
-  await env.LIBRARY.put('backup:' + new Date().toISOString().slice(0, 10), JSON.stringify(next), { expirationTtl: 60 * 60 * 24 * 30 });
-  return next;
+  const r = await storeCall(env, 'casState', { baseRev: cur.rev, data });
+  if (r.conflict) { const e = new Error(CONFLICT); e.state = r.state; throw e; }
+  return r.state;
 }
 const publicProfile = (p) => ({ id: p.id, name: p.name, color: p.color, createdAt: p.createdAt, updatedAt: p.updatedAt });
 /* אסימון כניסה חתום (מגרסה 50): s2.<pid>.<זמן>.<HMAC>. נבדק בחישוב בלבד, בלי לקרוא מ-KV, ולכן לא נפגע מהעיכוב של KV
@@ -979,8 +1100,10 @@ const hexBytes = (h) => Uint8Array.from(h.match(/../g).map(x => parseInt(x, 16))
 async function sessionKey(env, fresh = false) {
   const cached = HMAC_KEYS.get(env.LIBRARY);
   if (cached && !fresh) return cached;
-  let raw = await env.LIBRARY.get('session-hmac');
-  if (!raw || !/^[0-9a-f]{64}$/.test(raw)) { raw = randomHex(32); await env.LIBRARY.put('session-hmac', raw); }
+  // נוצר פעם אחת ב-Store (כולם מקבלים אותו מפתח); מפתח שנוצר בגרסה 50 ב-KV עובר אליו, כדי שהכניסות הקיימות יישארו
+  const old = await env.LIBRARY.get('session-hmac');
+  let raw = (await storeCall(env, 'getOrCreate', { key: 'session-hmac', value: old && /^[0-9a-f]{64}$/.test(old) ? old : randomHex(32) })).value;
+  if (!/^[0-9a-f]{64}$/.test(raw || '')) raw = randomHex(32);
   const key = await crypto.subtle.importKey('raw', hexBytes(raw), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   HMAC_KEYS.set(env.LIBRARY, key);
   return key;
@@ -1014,27 +1137,36 @@ async function revokeSessions(env, pid) {
 // מחיקת משתמש: הסיסמה, השאלה, ההסכמה, הכניסות הישנות, ההתראות וההצעות הדו-שבועיות
 async function eraseAccount(env, pid) {
   await revokeSessions(env, pid);
+  await storeCall(env, 'deleteKeys', { keys: ['pw:', 'sec:', 'consent:', 'push:', 'cnt:fail:'].map(k => k + pid) });
   for (const k of ['acct:', 'pw:', 'sec:', 'consent:', 'push:', 'digest:', 'digest-meta:', 'fail:']) await env.LIBRARY.delete(k + pid);
 }
 // הגבלת קצב ליצירת משתמשים: 8 ברבע שעה בכלל, או 4 מאותה כתובת
 async function tooManyNew(env, ip) {
-  const [a, b] = await Promise.all([env.LIBRARY.get('newuser'), env.LIBRARY.get('newuser:' + ip)]);
-  return parseInt(a || '0', 10) >= 8 || parseInt(b || '0', 10) >= 4;
+  return (await countOf(env, 'newuser')) >= 8 || (await countOf(env, 'newuser:' + ip)) >= 4;
 }
-async function noteNew(env, ip) {
-  for (const k of ['newuser', 'newuser:' + ip]) { const n = parseInt((await env.LIBRARY.get(k)) || '0', 10); await env.LIBRARY.put(k, String(n + 1), { expirationTtl: 900 }); }
-}
+async function noteNew(env, ip) { await bump(env, 'newuser', 900); await bump(env, 'newuser:' + ip, 900); }
 const acctOf = async (env, pid) => (await env.LIBRARY.get('acct:' + pid, 'json')) || {};
-/* כל פרט נשמר במפתח משלו (pw:, sec:, consent:) ונכתב בשלמותו, בלי "לקרוא, לשנות ולכתוב".
-   קודם הכול ישב ב-acct:<pid>, ו-KV (שמחזיר לפעמים עותק ישן מהמטמון) גרם לכך שהסכמה לתנאים מחקה סיסמה שנקבעה רגע לפני.
-   קריאה: המפתח החדש, ואם אין – מה שנשאר ב-acct (גרסה 48). */
-async function credOf(env, pid, kind) {
-  const v = await env.LIBRARY.get(kind + ':' + pid, 'json');
-  if (v) return v;
-  const a = await acctOf(env, pid);
-  return (kind === 'pw' ? a.pw : kind === 'sec' ? a.sec : a.consent) || null;
+/* סיסמה, שאלת ביטחון והסכמה: כל אחד במפתח משלו ב-Store (עקבי: מה שנכתב נקרא מיד).
+   בגרסה 48 הכול ישב יחד ב-KV (acct:<pid>), ו-KV החזיר עותק ישן, כך שאישור התנאים מחק סיסמה שנקבעה רגע לפני.
+   בגרסה 50 עברו למפתחות נפרדים ב-KV. קריאה: Store; אם אין – מה שנשאר ב-KV (pw:<pid>, ואז acct:<pid>), ומעבירים ל-Store. */
+async function credsOf(env, pid, kinds) {
+  const keys = kinds.map(k => k + ':' + pid);
+  const { values } = await storeCall(env, 'getKeys', { keys });
+  const out = {};
+  let a = null;
+  for (const k of kinds) {
+    let v = values[k + ':' + pid];
+    if (v == null) {
+      v = await env.LIBRARY.get(k + ':' + pid, 'json');
+      if (v == null) { a = a || await acctOf(env, pid); v = (k === 'pw' ? a.pw : k === 'sec' ? a.sec : a.consent) || null; }
+      if (v != null) await storeCall(env, 'putKey', { key: k + ':' + pid, value: v });
+    }
+    out[k] = v || null;
+  }
+  return out;
 }
-const putCred = (env, pid, kind, v) => env.LIBRARY.put(kind + ':' + pid, JSON.stringify(v));
+const credOf = async (env, pid, kind) => (await credsOf(env, pid, [kind]))[kind];
+const putCred = (env, pid, kind, v) => storeCall(env, 'putKey', { key: kind + ':' + pid, value: v });
 // סיסמה ושאלת ביטחון (מגרסה 48): לתחושת פרטיות בין המשתמשים, לא אבטחה חזקה. נשמרות כגיבוב עם מלח (acct.pw, acct.sec)
 const SEC_QUESTIONS = 5;   // הטקסט של השאלות באפליקציה (SECURITY_QUESTIONS); בשרת רק המספר
 const PW_MIN = 4;
@@ -1059,21 +1191,25 @@ async function credsPatch(b) {
   return { pw: await makeSecret(String(b.password)), sec: { q: Number(b.q), ...(await makeSecret(normAnswer(b.answer))) } };
 }
 // הגבלת ניסיונות שגויים (סיסמה או תשובה): 8 למשתמש ברבע שעה
-const tooManyFails = async (env, pid) => parseInt((await env.LIBRARY.get('fail:' + pid)) || '0', 10) >= 8;
-async function noteFail(env, pid) { const n = parseInt((await env.LIBRARY.get('fail:' + pid)) || '0', 10); await env.LIBRARY.put('fail:' + pid, String(n + 1), { expirationTtl: 900 }); }
+const tooManyFails = async (env, pid) => (await countOf(env, 'fail:' + pid)) >= 8;
+const noteFail = (env, pid) => bump(env, 'fail:' + pid, 900);
 async function createProfile(env, name) {
-  const cur = await loadState(env);
-  const data = cur.data || emptyData();
   const n = String(name || '').trim().slice(0, 24);
   if (!n) return { error: 'name' };
-  if ((data.profiles || []).some(p => p.name.trim().toLowerCase() === n.toLowerCase() && !(data.deleted || {})[p.id])) return { error: 'name_taken' };
-  const used = new Set((data.profiles || []).map(p => p.color));
-  let color = 0; while (used.has(color) && color < 20) color++;
   const id = randomHex(6);
-  const now = Date.now();
-  data.profiles = [...(data.profiles || []), { id, name: n, color, createdAt: now, updatedAt: now }];
-  await saveState(env, cur, data);
-  return { id };
+  // אם מישהו סנכרן בדיוק באותו רגע, מנסים שוב על המצב העדכני (לא דורסים את מה שהוא כתב)
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const cur = await loadState(env);
+    const data = JSON.parse(JSON.stringify(cur.data || emptyData()));
+    data.profiles = data.profiles || [];
+    if (data.profiles.some(p => p.name.trim().toLowerCase() === n.toLowerCase() && !(data.deleted || {})[p.id])) return { error: 'name_taken' };
+    const used = new Set(data.profiles.map(p => p.color));
+    let color = 0; while (used.has(color) && color < 20) color++;
+    const now = Date.now();
+    data.profiles = [...data.profiles, { id, name: n, color, createdAt: now, updatedAt: now }];
+    try { await saveState(env, cur, data); return { id }; } catch (e) { if (e.message !== CONFLICT) throw e; }
+  }
+  return { error: 'busy' };
 }
 const sessionReply = async (env, pid, cors) => {
   const token = await newSession(env, pid);
@@ -1134,7 +1270,7 @@ async function handleAuth(req, env, cors, path) {
     const bad = checkNewCreds(b, false);
     if (bad) return json({ error: bad }, 400, cors);
     await saveCreds(env, p.id, { pw: await makeSecret(String(b.password)) });
-    await env.LIBRARY.delete('fail:' + p.id);
+    await storeCall(env, 'deleteKeys', { keys: ['cnt:fail:' + p.id] });
     return sessionReply(env, p.id, cors);
   }
   if (path === '/auth/register' && req.method === 'POST') {
@@ -1282,13 +1418,16 @@ async function handleSync(req, env, cors, sess) {
     if (cur.data && cur.data.deleted && cur.data.deleted[sess.pid]) return json({ error: 'auth' }, 401, cors);
     if (cur.rev !== body.baseRev) return json(viewFor(cur, sess.pid), 409, cors);   // מישהו אחר עדכן בינתיים: הלקוח ימזג וינסה שוב
     const data = mergeIncoming(cur.data, body.data, sess.pid);
-    if (data.deleted[sess.pid] && !(cur.data && cur.data.deleted && cur.data.deleted[sess.pid])) {
-      // המשתמש מחק את עצמו: גם פרטי הכניסה, כל המכשירים שמחוברים אליו, וההתראות נמחקים
-      await eraseAccount(env, sess.pid);
+    const selfDelete = data.deleted[sess.pid] && !(cur.data && cur.data.deleted && cur.data.deleted[sess.pid]);
+    if (selfDelete) {
       data.profiles = data.profiles.filter(p => p.id !== sess.pid).concat([{ id: sess.pid, name: '', color: 0, createdAt: 0, updatedAt: Date.now() }]);
       data.social.items = data.social.items.filter(x => x.from !== sess.pid && x.to !== sess.pid);
     }
-    const next = await saveState(env, cur, data);
+    let next;
+    try { next = await saveState(env, cur, data); }
+    catch (e) { if (e.message === CONFLICT) return json(viewFor(e.state, sess.pid), 409, cors); throw e; }   // מישהו כתב ממש עכשיו: הלקוח ימזג וינסה שוב
+    // המשתמש מחק את עצמו: גם פרטי הכניסה, ההתראות וההצעות נמחקים (רק אחרי שהמחיקה נשמרה)
+    if (selfDelete) await eraseAccount(env, sess.pid);
     return json({ rev: next.rev }, 200, cors);
   }
   return json({ error: 'method' }, 405, cors);
