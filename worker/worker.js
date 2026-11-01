@@ -971,30 +971,50 @@ async function saveState(env, cur, data) {
   return next;
 }
 const publicProfile = (p) => ({ id: p.id, name: p.name, color: p.color, createdAt: p.createdAt, updatedAt: p.updatedAt });
+/* אסימון כניסה חתום (מגרסה 50): s2.<pid>.<זמן>.<HMAC>. נבדק בחישוב בלבד, בלי לקרוא מ-KV, ולכן לא נפגע מהעיכוב של KV
+   בין אזורים, ולא פג: המכשיר זוכר את המשתמש לתמיד (כמו Spotify). מחיקת משתמש חוסמת אותו בסנכרון (deleted).
+   המפתח נוצר פעם אחת ונשמר ב-KV (session-hmac). אסימונים ישנים (64 תווים, sess: ב-KV) עדיין תקפים. */
+const HMAC_KEYS = new WeakMap();
+const hexBytes = (h) => Uint8Array.from(h.match(/../g).map(x => parseInt(x, 16)));
+async function sessionKey(env, fresh = false) {
+  const cached = HMAC_KEYS.get(env.LIBRARY);
+  if (cached && !fresh) return cached;
+  let raw = await env.LIBRARY.get('session-hmac');
+  if (!raw || !/^[0-9a-f]{64}$/.test(raw)) { raw = randomHex(32); await env.LIBRARY.put('session-hmac', raw); }
+  const key = await crypto.subtle.importKey('raw', hexBytes(raw), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  HMAC_KEYS.set(env.LIBRARY, key);
+  return key;
+}
+const signSession = async (env, pid, t, fresh = false) => hex(await crypto.subtle.sign('HMAC', await sessionKey(env, fresh), enc.encode(`s2|${pid}|${t}`)));
 export async function sessionOf(req, env) {
-  const m = (req.headers.get('Authorization') || '').match(/^Bearer ([0-9a-f]{64})$/);
+  const auth = req.headers.get('Authorization') || '';
+  const m2 = auth.match(/^Bearer (s2\.([0-9A-Za-z_-]{1,40})\.([0-9a-z]{1,12})\.([0-9a-f]{64}))$/);
+  if (m2) {
+    const [, token, pid, t, sig] = m2;
+    if (safeEq(await signSession(env, pid, t), sig) || safeEq(await signSession(env, pid, t, true), sig)) return { pid, at: parseInt(t, 36), token };
+    return null;
+  }
+  const m = auth.match(/^Bearer ([0-9a-f]{64})$/);
   if (!m) return null;
   const s = await env.LIBRARY.get('sess:' + m[1], 'json');
   if (!s || !s.pid || (s.exp && s.exp < Date.now())) return null;
   return { ...s, token: m[1] };
 }
+const safeEq = (a, b) => { if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false; let r = 0; for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i); return r === 0; };
 async function newSession(env, pid) {
-  const token = randomHex(32);
-  await env.LIBRARY.put('sess:' + token, JSON.stringify({ pid, at: Date.now(), exp: Date.now() + SESSION_TTL * 1000 }), { expirationTtl: SESSION_TTL });
-  // רשימת הכניסות של המשתמש, כדי שמחיקה תנתק את כל המכשירים
-  const idx = ((await env.LIBRARY.get('sessidx:' + pid, 'json')) || []).slice(-19);
-  await env.LIBRARY.put('sessidx:' + pid, JSON.stringify([...idx, token]), { expirationTtl: SESSION_TTL });
-  return token;
+  const t = Date.now().toString(36);
+  return `s2.${pid}.${t}.${await signSession(env, pid, t)}`;
 }
+// אסימונים ישנים בלבד (לפני גרסה 50) נשמרו ב-KV; את החדשים חוסם הסימון deleted בסנכרון
 async function revokeSessions(env, pid) {
   const idx = (await env.LIBRARY.get('sessidx:' + pid, 'json')) || [];
   for (const t of idx) await env.LIBRARY.delete('sess:' + t);
   await env.LIBRARY.delete('sessidx:' + pid);
 }
-// מחיקת משתמש: ההסכמה, כל הכניסות, ההתראות וההצעות הדו-שבועיות
+// מחיקת משתמש: הסיסמה, השאלה, ההסכמה, הכניסות הישנות, ההתראות וההצעות הדו-שבועיות
 async function eraseAccount(env, pid) {
   await revokeSessions(env, pid);
-  for (const k of ['acct:', 'push:', 'digest:', 'digest-meta:', 'fail:']) await env.LIBRARY.delete(k + pid);
+  for (const k of ['acct:', 'pw:', 'sec:', 'consent:', 'push:', 'digest:', 'digest-meta:', 'fail:']) await env.LIBRARY.delete(k + pid);
 }
 // הגבלת קצב ליצירת משתמשים: 8 ברבע שעה בכלל, או 4 מאותה כתובת
 async function tooManyNew(env, ip) {
@@ -1005,6 +1025,16 @@ async function noteNew(env, ip) {
   for (const k of ['newuser', 'newuser:' + ip]) { const n = parseInt((await env.LIBRARY.get(k)) || '0', 10); await env.LIBRARY.put(k, String(n + 1), { expirationTtl: 900 }); }
 }
 const acctOf = async (env, pid) => (await env.LIBRARY.get('acct:' + pid, 'json')) || {};
+/* כל פרט נשמר במפתח משלו (pw:, sec:, consent:) ונכתב בשלמותו, בלי "לקרוא, לשנות ולכתוב".
+   קודם הכול ישב ב-acct:<pid>, ו-KV (שמחזיר לפעמים עותק ישן מהמטמון) גרם לכך שהסכמה לתנאים מחקה סיסמה שנקבעה רגע לפני.
+   קריאה: המפתח החדש, ואם אין – מה שנשאר ב-acct (גרסה 48). */
+async function credOf(env, pid, kind) {
+  const v = await env.LIBRARY.get(kind + ':' + pid, 'json');
+  if (v) return v;
+  const a = await acctOf(env, pid);
+  return (kind === 'pw' ? a.pw : kind === 'sec' ? a.sec : a.consent) || null;
+}
+const putCred = (env, pid, kind, v) => env.LIBRARY.put(kind + ':' + pid, JSON.stringify(v));
 // סיסמה ושאלת ביטחון (מגרסה 48): לתחושת פרטיות בין המשתמשים, לא אבטחה חזקה. נשמרות כגיבוב עם מלח (acct.pw, acct.sec)
 const SEC_QUESTIONS = 5;   // הטקסט של השאלות באפליקציה (SECURITY_QUESTIONS); בשרת רק המספר
 const PW_MIN = 4;
@@ -1013,10 +1043,9 @@ const saltedHash = async (salt, v) => sha256hex(`vrt48|${salt}|${v}`);
 export const normAnswer = (v) => String(v || '').toLowerCase().normalize('NFKD').replace(/[֑-ׇ]/g, '').replace(/[^\p{L}\p{N}]/gu, '');
 async function makeSecret(v) { const salt = randomHex(8); return { salt, hash: await saltedHash(salt, v) }; }
 const secretOk = async (sec, v) => !!sec && sec.hash === await saltedHash(sec.salt, v);
-async function saveAcct(env, pid, patch) {
-  const a = { ...(await acctOf(env, pid)), ...patch };
-  await env.LIBRARY.put('acct:' + pid, JSON.stringify(a));
-  return a;
+async function saveCreds(env, pid, patch) {
+  if (patch.pw) await putCred(env, pid, 'pw', patch.pw);
+  if (patch.sec) await putCred(env, pid, 'sec', patch.sec);
 }
 function checkNewCreds(b, needQuestion = true) {
   if (String(b.password || '').length < PW_MIN) return 'short';
@@ -1050,14 +1079,12 @@ const sessionReply = async (env, pid, cors) => {
   const token = await newSession(env, pid);
   const cur = await loadState(env);
   const p = cur.data && (cur.data.profiles || []).find(x => x.id === pid);
-  const a = await acctOf(env, pid);
-  return json({ token, pid, name: p ? p.name : '', consent: (a.consent && a.consent.v) || '' }, 200, cors);
+  const c = await credOf(env, pid, 'consent');
+  return json({ token, pid, name: p ? p.name : '', consent: (c && c.v) || '' }, 200, cors);
 };
 // הסכמה לתנאי השימוש ולמדיניות הפרטיות: נשמרת עם הגרסה והזמן (תיעוד ההסכמה)
 async function recordConsent(env, pid, v) {
-  const a = await acctOf(env, pid);
-  a.consent = { v: String(v || '').slice(0, 20), at: Date.now() };
-  await env.LIBRARY.put('acct:' + pid, JSON.stringify(a));
+  await putCred(env, pid, 'consent', { v: String(v || '').slice(0, 20), at: Date.now() });
 }
 async function handleAuth(req, env, cors, path) {
   const ip = req.headers.get('CF-Connecting-IP') || 'local';
@@ -1070,43 +1097,43 @@ async function handleAuth(req, env, cors, path) {
   // רשימת המשתמשים למסך הכניסה: שם, צבע, ואם כבר יש לו סיסמה
   if (path === '/auth/profiles') {
     const out = [];
-    for (const p of live) out.push({ ...publicProfile(p), hasPass: !!(await acctOf(env, p.id)).pw });
+    for (const p of live) out.push({ ...publicProfile(p), hasPass: !!(await credOf(env, p.id, 'pw')) });
     return json({ profiles: out }, 200, cors);
   }
   if (path === '/auth/enter' && req.method === 'POST') {
     const p = findLive();
     if (!p) return json({ error: 'bad_request' }, 400, cors);
-    const a = await acctOf(env, p.id);
-    if (!a.pw) return json({ error: 'setup' }, 409, cors);   // משתמש ותיק בלי סיסמה: קובע סיסמה ושאלת ביטחון
+    const pw = await credOf(env, p.id, 'pw');
+    if (!pw) return json({ error: 'setup' }, 409, cors);   // משתמש ותיק בלי סיסמה: קובע סיסמה ושאלת ביטחון
     if (await tooManyFails(env, p.id)) return json({ error: 'too_many' }, 429, cors);
-    if (!(await secretOk(a.pw, String(b.password || '')))) { await noteFail(env, p.id); return json({ error: 'wrong' }, 401, cors); }
+    if (!(await secretOk(pw, String(b.password || '')))) { await noteFail(env, p.id); return json({ error: 'wrong' }, 401, cors); }
     return sessionReply(env, p.id, cors);
   }
   if (path === '/auth/setup' && req.method === 'POST') {
     const p = findLive();
     if (!p) return json({ error: 'bad_request' }, 400, cors);
-    if ((await acctOf(env, p.id)).pw) return json({ error: 'has_password' }, 409, cors);
+    if (await credOf(env, p.id, 'pw')) return json({ error: 'has_password' }, 409, cors);
     const bad = checkNewCreds(b);
     if (bad) return json({ error: bad }, 400, cors);
-    await saveAcct(env, p.id, await credsPatch(b));
+    await saveCreds(env, p.id, await credsPatch(b));
     return sessionReply(env, p.id, cors);
   }
   // שכחתי סיסמה: השאלה של המשתמש, ואז תשובה נכונה + סיסמה חדשה
   if (path === '/auth/question' && req.method === 'POST') {
     const p = findLive();
-    const a = p ? await acctOf(env, p.id) : {};
-    if (!p || !a.sec) return json({ error: 'no_question' }, 404, cors);
-    return json({ q: a.sec.q }, 200, cors);
+    const sec = p ? await credOf(env, p.id, 'sec') : null;
+    if (!sec) return json({ error: 'no_question' }, 404, cors);
+    return json({ q: sec.q }, 200, cors);
   }
   if (path === '/auth/recover' && req.method === 'POST') {
     const p = findLive();
-    const a = p ? await acctOf(env, p.id) : {};
-    if (!p || !a.sec) return json({ error: 'no_question' }, 404, cors);
+    const sec = p ? await credOf(env, p.id, 'sec') : null;
+    if (!sec) return json({ error: 'no_question' }, 404, cors);
     if (await tooManyFails(env, p.id)) return json({ error: 'too_many' }, 429, cors);
-    if (!(await secretOk(a.sec, normAnswer(b.answer)))) { await noteFail(env, p.id); return json({ error: 'wrong_answer' }, 401, cors); }
+    if (!(await secretOk(sec, normAnswer(b.answer)))) { await noteFail(env, p.id); return json({ error: 'wrong_answer' }, 401, cors); }
     const bad = checkNewCreds(b, false);
     if (bad) return json({ error: bad }, 400, cors);
-    await saveAcct(env, p.id, { pw: await makeSecret(String(b.password)) });
+    await saveCreds(env, p.id, { pw: await makeSecret(String(b.password)) });
     await env.LIBRARY.delete('fail:' + p.id);
     return sessionReply(env, p.id, cors);
   }
@@ -1118,7 +1145,7 @@ async function handleAuth(req, env, cors, path) {
     const r = await createProfile(env, b.name);
     if (r.error) return json(r, 400, cors);
     await noteNew(env, ip);
-    await saveAcct(env, r.id, await credsPatch(b));
+    await saveCreds(env, r.id, await credsPatch(b));
     await recordConsent(env, r.id, b.consent);
     return sessionReply(env, r.id, cors);
   }
@@ -1130,19 +1157,20 @@ async function handleAuth(req, env, cors, path) {
   // מכאן: רק משתמש מחובר
   if (!s) return json({ error: 'auth' }, 401, cors);
   if (path === '/auth/me') {
-    const a = await acctOf(env, s.pid);
-    return json({ pid: s.pid, consent: (a.consent && a.consent.v) || '', hasPass: !!a.pw, q: a.sec ? a.sec.q : null }, 200, cors);
+    if (!live.some(p => p.id === s.pid)) return json({ error: 'auth' }, 401, cors);   // המשתמש נמחק
+    const [c, pw, sec] = await Promise.all(['consent', 'pw', 'sec'].map(k => credOf(env, s.pid, k)));
+    return json({ pid: s.pid, consent: (c && c.v) || '', hasPass: !!pw, q: sec ? sec.q : null }, 200, cors);
   }
   if (path === '/auth/setpass' && req.method === 'POST') {
     const bad = checkNewCreds(b, false);
     if (bad) return json({ error: bad }, 400, cors);
-    await saveAcct(env, s.pid, { pw: await makeSecret(String(b.password)) });
+    await saveCreds(env, s.pid, { pw: await makeSecret(String(b.password)) });
     return json({ ok: true }, 200, cors);
   }
   if (path === '/auth/setquestion' && req.method === 'POST') {
     const bad = checkNewCreds({ ...b, password: 'xxxx' });
     if (bad) return json({ error: bad }, 400, cors);
-    await saveAcct(env, s.pid, { sec: { q: Number(b.q), ...(await makeSecret(normAnswer(b.answer))) } });
+    await saveCreds(env, s.pid, { sec: { q: Number(b.q), ...(await makeSecret(normAnswer(b.answer))) } });
     return json({ ok: true }, 200, cors);
   }
   if (path === '/auth/consent' && req.method === 'POST') {

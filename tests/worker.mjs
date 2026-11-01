@@ -309,10 +309,21 @@ console.log('worker page verification: ok');
   assert.equal((await call('/auth/setup', { method: 'POST', body: { pid: 'A', password: '1234', q: 9, answer: 'חיפה' } })).json.error, 'question');
   assert.ok((await call('/auth/setup', { method: 'POST', body: { pid: 'A', password: '1234', q: 1, answer: 'תל-אביב' } })).json.token);
   assert.equal((await call('/auth/setup', { method: 'POST', body: { pid: 'A', password: 'grab', q: 1, answer: 'x' } })).json.error, 'has_password');
-  assert.ok(!kv.get('acct:A').includes('1234') && !kv.get('acct:A').includes('תל'), 'only hashes are stored');
+  assert.ok(![kv.get('pw:A'), kv.get('sec:A')].join().includes('1234') && !kv.get('sec:A').includes('תל'), 'only hashes are stored');
   assert.equal((await call('/auth/enter', { method: 'POST', body: { pid: 'A', password: 'nope' } })).json.error, 'wrong');
   const a = (await call('/auth/enter', { method: 'POST', body: { pid: 'A', password: '1234' } })).json;
-  assert.ok(/^[0-9a-f]{64}$/.test(a.token) && a.pid === 'A' && a.name === 'אבי');
+  assert.ok(/^s2\.A\.[0-9a-z]+\.[0-9a-f]{64}$/.test(a.token) && a.pid === 'A' && a.name === 'אבי');
+  // אסימון חתום: לא נשמר ב-KV (לא נפגע מעיכוב בין אזורים) ולא פג; אסימון מזויף או של משתמש אחר נדחה
+  assert.ok(![...kv.keys()].some(k => k.startsWith('sess:')));
+  assert.equal((await call('/sync', { token: a.token })).status, 200);
+  assert.equal((await call('/sync', { token: a.token.replace('s2.A.', 's2.B.') })).status, 401);
+  assert.equal((await call('/sync', { token: a.token.slice(0, -1) + (a.token.endsWith('0') ? '1' : '0') })).status, 401);
+  // הבאג של גרסה 48: אישור התנאים מיד אחרי קביעת סיסמה מחק אותה (KV החזיר עותק ישן). עכשיו כל פרט במפתח משלו
+  const stale = new Map(kv); const realGet = LIB.get;
+  LIB.get = async (k, t) => k.startsWith('acct:') ? (t === 'json' ? JSON.parse(stale.get(k) || 'null') : stale.get(k) || null) : realGet(k, t);
+  assert.equal((await call('/auth/consent', { method: 'POST', token: a.token, body: { v: 'x' } })).status, 200);
+  LIB.get = realGet;
+  assert.ok((await call('/auth/enter', { method: 'POST', body: { pid: 'A', password: '1234' } })).json.token, 'the password survives accepting the terms');
   assert.equal((await call('/auth/profiles')).json.profiles.find(p => p.id === 'A').hasPass, true);
   // שכחתי סיסמה: השאלה, תשובה שגויה נדחית, תשובה נכונה (גם בכתיב אחר) מאפסת
   assert.equal((await call('/auth/question', { method: 'POST', body: { pid: 'A' } })).json.q, 1);
@@ -364,15 +375,19 @@ console.log('worker page verification: ok');
   assert.equal((await call('/auth/register', { method: 'POST', body: { name: ' בת ', consent: '1', ...cred } })).json.error, 'name_taken');
   const dn = (await call('/auth/register', { method: 'POST', body: { name: 'דן', consent: '1', ...cred } })).json;
   assert.equal(dn.consent, '1');
-  assert.equal(JSON.parse(kv.get('acct:' + dn.pid)).consent.v, '1');
+  assert.equal(JSON.parse(kv.get('consent:' + dn.pid)).v, '1');
+  assert.ok((await call('/auth/enter', { method: 'POST', body: { pid: dn.pid, password: '1234' } })).json.token, 'a new user can sign in right away');
   assert.equal((await call('/auth/consent', { method: 'POST', token: dn.token, body: { v: '2' } })).status, 200);
   assert.equal((await call('/auth/me', { token: dn.token })).json.consent, '2');
   // 6. הגבלת קצב ליצירת משתמשים מאותה כתובת
   for (let i = 0; i < 3; i++) await call('/auth/register', { method: 'POST', body: { name: 'משתמש ' + i, consent: '1', ...cred } });
   assert.equal((await call('/auth/register', { method: 'POST', body: { name: 'עוד אחד', consent: '1', ...cred } })).status, 429);
-  // 7. יציאה מבטלת את האסימון; מחיקה עצמית מוחקת הכול ומנתקת את כל המכשירים
-  await call('/auth/logout', { method: 'POST', token: a.token });
-  assert.equal((await call('/sync', { token: a.token })).status, 401);
+  // 7. אסימון ישן (לפני גרסה 50, ב-KV) עדיין תקף, ויציאה מוחקת אותו; מחיקה עצמית מוחקת הכול וחוסמת את כל המכשירים
+  const legacyTok = 'b'.repeat(64);
+  kv.set('sess:' + legacyTok, JSON.stringify({ pid: 'A', at: 1, exp: Date.now() + 86400000 }));
+  assert.equal((await call('/sync', { token: legacyTok })).status, 200);
+  await call('/auth/logout', { method: 'POST', token: legacyTok });
+  assert.equal((await call('/sync', { token: legacyTok })).status, 401);
   const c1 = (await call('/auth/setup', { method: 'POST', body: { pid: 'C', ...cred } })).json.token;
   const c2 = (await call('/auth/enter', { method: 'POST', body: { pid: 'C', password: '1234' } })).json.token;
   const before = (await call('/sync', { token: c1 })).json;

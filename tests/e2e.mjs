@@ -211,7 +211,12 @@ const signUp = async (p, name, submit = 'כניסה') => {
   await p.check('#consent'); await p.click(`form button:has-text("${submit}")`);
 };
 // יציאה: מחכים למסך הכניסה (היציאה מסנכרנת קודם, ורק אז מנתקת)
-const signOut = async (p) => { await p.click('[aria-label="החלפת משתמש"]'); await p.waitForSelector('text=של מי הספרייה?'); };
+// ההתנתקות לא בולטת: הגדרות ← החשבון שלי ← "התנתקות מהמכשיר", עם אישור
+const signOut = async (p) => {
+  await p.click('nav >> text=הגדרות'); await group(p, 'החשבון שלי');
+  await p.click('button:has-text("התנתקות מהמכשיר")'); await p.click('button:has-text("לחצו שוב כדי להתנתק")');
+  await p.waitForSelector('text=של מי הספרייה?');
+};
 const step = async (name, fn) => { process.stdout.write(`• ${name} … `); await fn(); console.log('ok'); };
 const texts = (loc) => loc.allTextContents();
 // SHOTS=<תיקייה>: צילומי מסך של המסכים העיקריים (לבדיקת עיצוב)
@@ -277,18 +282,23 @@ try {
     // משתמש ותיק בלי סיסמה (מגרסה 47) קובע סיסמה ושאלה בכניסה
     const pidY = await A.evaluate(() => JSON.parse(localStorage.getItem('vrt-session')).pid);
     const pidB = Object.keys(JSON.parse(kv.get('state')).data.dbs).find(p => p !== pidY);
-    const accB = JSON.parse(kv.get('acct:' + pidB)); kv.set('acct:' + pidB, JSON.stringify({ consent: accB.consent }));
+    kv.delete('pw:' + pidB); kv.delete('sec:' + pidB);
     await signOut(A); await A.click('main li:has-text("יעל")'); await A.waitForSelector('text=למשתמש הזה עוד אין סיסמה');
     await A.fill('#profile-pass', '1234'); await A.selectOption('#sec-q', '1'); await A.fill('#sec-a', 'חיפה'); await A.click('form button[type=submit]');
-    await A.waitForSelector('nav >> text=ספרים שלי'); assert.ok(JSON.parse(kv.get('acct:' + pidB)).pw, 'password saved for the old user');
+    await A.waitForSelector('nav >> text=ספרים שלי'); assert.ok(kv.get('pw:' + pidB), 'password saved for the old user');
     // תנאים חדשים: משתמש קיים מתבקש להסכים מחדש, וההסכמה נשמרת בשרת
-    kv.set('acct:' + pidY, JSON.stringify({ ...JSON.parse(kv.get('acct:' + pidY)), consent: { v: 'old', at: 1 } }));
+    kv.set('consent:' + pidY, JSON.stringify({ v: 'old', at: 1 }));
     await signOut(A);
     await A.click('button:has-text("הצהרת נגישות")'); await A.waitForSelector('[role=dialog] >> text=ת"י 5568'); await A.keyboard.press('Escape');
     await A.click('button:has-text("מדיניות פרטיות")'); await A.waitForSelector('[role=dialog] >> text=שאלת ביטחון'); await A.keyboard.press('Escape');
     await login(A, 'יובל'); await A.waitForSelector('text=עדכנו את תנאי השימוש');
     await A.check('#consent'); await A.click('button:has-text("הסכמה והמשך")'); await A.waitForSelector('nav >> text=ספרים שלי');
-    assert.notEqual(JSON.parse(kv.get('acct:' + pidY)).consent.v, 'old');
+    assert.notEqual(JSON.parse(kv.get('consent:' + pidY)).v, 'old');
+    // אחרי אישור התנאים הסיסמה עדיין עובדת (הבאג של גרסה 48), והמכשיר זוכר את המשתמש גם אחרי טעינה מחדש
+    await A.reload(); await A.waitForSelector('nav >> text=ספרים שלי');
+    assert.equal(await A.locator('[aria-label="החלפת משתמש"]').count(), 0, 'no switch-user button in the header');
+    await A.click('[aria-label="החשבון שלי"]'); await A.waitForSelector('button:has-text("התנתקות מהמכשיר")');
+    await signOut(A); await login(A, 'יובל'); await A.waitForSelector('nav >> text=ספרים שלי');
     assert.ok(!JSON.stringify([...kv.values()]).includes('הנסיך הקטן'), 'answers are stored only as hashes');
     await A.click('nav >> text=ספרים שלי');
   });

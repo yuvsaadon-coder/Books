@@ -31,7 +31,7 @@ function setUiLang(lang) {
 const DEFAULT_LOCALE = IS_EN ? 'en-GB' : 'he-IL';
 const API_PRIMARY = 'https://www.googleapis.com/books/v1/volumes';
 const OL_BASE = 'https://openlibrary.org';
-const APP_VERSION = '49';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
+const APP_VERSION = '50';   // מוצג בהגדרות, כדי לוודא שהטלפון טען את הגרסה העדכנית
 const STORAGE_KEY = 'verified_reading_tracker_db_v1';
 const PROFILES_KEY = 'verified_reading_tracker_profiles_v1';
 // לכל משתמש מפתחות אחסון משלו. המשתמש הראשון ('default') יורש את הנתונים שהיו לפני שנוספו משתמשים.
@@ -1017,10 +1017,23 @@ window.fetch = (input, init = {}) => {
     init = { ...init, headers };
   }
   const p = rawFetch(input, init);
-  // השרת לא מכיר את האסימון (פג, או שהמשתמש נמחק): חוזרים למסך הכניסה. הנתונים במכשיר נשארים עד שמישהו אחר נכנס
-  if (ours && s) p.then(r => { if (r.status === 401 && !url.includes('/auth/') && loadSession() && loadSession().token === s.token) saveSession(null); }).catch(() => {});
+  // השרת לא קיבל את האסימון: מוודאים פעמיים (/auth/me) לפני שמנתקים, כדי שתקלה רגעית לא תוציא את המשתמש. המכשיר זוכר את המשתמש לתמיד
+  if (ours && s) p.then(r => { if (r.status === 401 && !url.includes('/auth/')) confirmAuthLost(s.token); }).catch(() => {});
   return p;
 };
+let authCheck = null;
+function confirmAuthLost(token) {
+  if (authCheck) return;
+  authCheck = (async () => {
+    for (let i = 0; i < 2; i++) {
+      await new Promise(r => setTimeout(r, i ? 4000 : 800));
+      const s = loadSession();
+      if (!s || s.token !== token) return;
+      try { const r = await rawFetch(loadCloud().url + '/auth/me', { headers: { Authorization: 'Bearer ' + token } }); if (r.status !== 401) return; } catch (e) { return; }
+    }
+    if (loadSession() && loadSession().token === token) saveSession(null);
+  })().finally(() => { authCheck = null; });
+}
 async function authPost(path, body) {
   const c = loadCloud();
   const r = await fetch(c.url + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
@@ -5545,7 +5558,8 @@ function SettingsGroup({ icon, title, summary, children }) {
     </section>
   );
 }
-function BackupTab({ db, update, replace, status, notify, profile, onRenameProfile, onDeleteProfile, onOpenStarter }) {
+function BackupTab({ db, update, replace, status, notify, profile, onRenameProfile, onDeleteProfile, onOpenStarter, onLogout }) {
+  const [confirmLogout, setConfirmLogout] = useState(false);
   // רשימת ההיכרות הושלמה (עברו על כל 400 הספרים, או שכולם כבר בספרייה): לא מציגים אותה בהגדרות
   const [nameDraft, setNameDraft] = useState(profile.name);
   const [confirmProfileDel, setConfirmProfileDel] = useState(false);
@@ -5640,6 +5654,10 @@ function BackupTab({ db, update, replace, status, notify, profile, onRenameProfi
         <Btn variant="danger" onClick={() => { if (!confirmProfileDel) { setConfirmProfileDel(true); return; } onDeleteProfile(); }}>
           {confirmProfileDel ? T(`לחצו שוב: מחיקת "${profile.name}" וכל הספרים שלו`) : 'מחיקת המשתמש'}
         </Btn>
+        {/* התנתקות: המכשיר זוכר את המשתמש לתמיד, ולכן היא לא בולטת (רק כאן, עם אישור) */}
+        {onLogout && <button type="button" className="justify-self-start text-[13px] text-muted underline min-h-[40px]" onClick={() => { if (!confirmLogout) { setConfirmLogout(true); return; } onLogout(); }}>
+          {confirmLogout ? T('לחצו שוב כדי להתנתק מהמכשיר הזה') : L('התנתקות מהמכשיר')}
+        </button>}
         <div>
           <div className="text-[14px] text-muted mb-1.5">{UI_LANG_LABEL}</div>
           <UiLangPicker />
@@ -6456,7 +6474,7 @@ const GUIDE = [
     [L('איך מתחילים?'), L('בוחרים שם. בכניסה הראשונה בוחרים אילו סוגות להציג (למשל בלי ספרי ילדים), ואז נפתחת רשימה של ספרים מוכרים: החלקה ימינה = קראתי (ואז בוחרים דירוג), שמאלה = לא קראתי, והסימנייה = רוצה לקרוא. אפשר לדלג ולחזור אליה מהכרטיס שבראש "הספרים שלי".')],
     [L('איך מתקינים את האפליקציה על מסך הבית?'), L('באייפון: פותחים ב-Safari, לוחצים על כפתור השיתוף ובוחרים "הוספה למסך הבית". באנדרואיד: בכרום, בתפריט ⋮ בוחרים "התקנת האפליקציה", או לוחצים על ההודעה שמופיעה באפליקציה.')],
     [L('איך חוזרים לרשימת הספרים המוכרים?'), L('בהגדרות ← "המלצות" ← "רשימת 400 הספרים המוכרים": "המשך מאיפה שעצרתי" או "מההתחלה". יש גם קישור בתחתית לשונית "הוספת ספר". ספרים שכבר בספרייה לא מוצגים שוב.')],
-    [L('איך נכנסים?'), L('בוחרים את השם שלכם ממסך "של מי הספרייה?" ומקלידים סיסמה. משתמש חדש: "הוספת משתמש", שם, סיסמה ושאלת ביטחון. המכשיר זוכר מי נכנס ממנו; "החלפת משתמש" מנתקת ומוחקת את הספרייה מהמכשיר (היא נשמרת בשרת). משנים סיסמה ושאלת ביטחון בהגדרות ← "החשבון שלי".')],
+    [L('איך נכנסים?'), L('בוחרים את השם שלכם ממסך "של מי הספרייה?" ומקלידים סיסמה. משתמש חדש: "הוספת משתמש", שם, סיסמה ושאלת ביטחון. המכשיר זוכר אתכם לתמיד, כך שבדרך כלל נכנסים רק פעם אחת. משנים סיסמה ושאלת ביטחון בהגדרות ← "החשבון שלי", ושם, בתחתית, גם "התנתקות מהמכשיר" (למשל כשמישהו אחר צריך להשתמש בטלפון).')],
     [L('שכחתי סיסמה. מה עושים?'), L('במסך הכניסה בוחרים את השם, לוחצים "שכחתי סיסמה", עונים על שאלת הביטחון ובוחרים סיסמה חדשה. התשובה לא רגישה לרווחים, למקפים ולאותיות גדולות.')],
     [L('הספרייה שלי מוגנת?'), L('הסיסמה נועדה לפרטיות בסיסית בין המשתמשים, לא להגנה חזקה: מי שיודע את התשובה לשאלת הביטחון יכול לאפס אותה. מעבר לזה, כל מכשיר יכול לשנות רק את הספרייה של מי שנכנס בו, חברים רואים רק את מה שבחרתם לשתף (בלי ספרים מוסתרים), ו"אהובים בקהילה" הוא סיכום אנונימי, בלי שמות ובלי הערות.')],
     [L('איפה מדיניות הפרטיות, תנאי השימוש והצהרת הנגישות?'), L('בהגדרות ← "מידע משפטי ונגישות", וגם בתחתית מסך הכניסה. שם כתוב מה נשמר, איפה, מי רואה את המידע, ואיך מעיינים בו, מתקנים או מוחקים אותו.')],
@@ -6776,9 +6794,9 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
           <div className="flex items-center gap-2 shrink-0">
           <button type="button" onClick={() => setGuideOpen(true)} aria-label="מדריך למשתמש" title="מדריך למשתמש"
             className="w-10 h-10 rounded-full border border-line bg-surface grid place-items-center text-accent"><Icon name="CircleHelp" size={20} /></button>
-          <button type="button" onClick={onSwitch} aria-label="החלפת משתמש" title="החלפת משתמש"
+          <button type="button" onClick={() => { openSettingsGroup(L('החשבון שלי')); setTab('backup'); setTimeout(() => { const el = document.querySelector(`[data-group="${L('החשבון שלי')}"]`); if (el) el.scrollIntoView({ block: 'start' }); }, 60); }} aria-label="החשבון שלי" title="החשבון שלי"
             className="shrink-0 min-h-[40px] ps-1 pe-2.5 rounded-full border border-line bg-surface inline-flex items-center gap-1.5 text-[14px] font-semibold">
-            <Avatar profile={profile} size={30} /><span className="truncate max-w-[110px]">{profile.name}</span><SyncDot /><Icon name="ChevronsUpDown" size={15} className="text-muted" />
+            <Avatar profile={profile} size={30} /><span className="truncate max-w-[110px]">{profile.name}</span><SyncDot />
           </button>
           </div>
         </div>
@@ -6802,7 +6820,7 @@ function App({ profile, onSwitch, onRenameProfile, onDeleteProfile }) {
         {tab === 'add' && <AddTab db={db} update={update} onPick={pick} goSettings={() => setTab('backup')} onOpenStarter={() => openStarter(false)} />}
         {tab === 'discover' && <DiscoverTab db={db} update={update} onPick={pick} notify={notify} onOpenDigest={setDigestOpen} />}
         {tab === 'friends' && <FriendsTab db={db} update={update} onPick={pick} notify={notify} onGoSettings={() => { openSettingsGroup(L('פרטיות וחברים')); setTab('backup'); setTimeout(() => { const el = document.querySelector(`[data-group="${L('פרטיות וחברים')}"]`); if (el) el.scrollIntoView({ block: 'start' }); }, 60); }} />}
-        {tab === 'backup' && <BackupTab onOpenStarter={openStarter} db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} />}
+        {tab === 'backup' && <BackupTab onOpenStarter={openStarter} db={db} update={update} replace={replace} status={status} notify={notify} profile={profile} onRenameProfile={onRenameProfile} onDeleteProfile={onDeleteProfile} onLogout={onSwitch} />}
       </main>
 
       <nav className="fixed bottom-0 inset-x-0 z-30 bg-surface border-t border-line safe-bottom" aria-label="ניווט ראשי">
